@@ -162,9 +162,12 @@ def arg_help(
     module: str = "",
     _atom: BlueprintAtom | None = None,
 ) -> str:
+    # Imported here for performance reasons.
+    from dimos.core.coordination.blueprints import config_key
+
     output = ""
     for k, info in config.model_fields.items():
-        if k == "g":
+        if k in ("g", "instance_name"):
             continue
         t = info.annotation
         if isinstance(t, types.GenericAlias):
@@ -179,7 +182,7 @@ def arg_help(
         if inspect.isclass(t) and issubclass(t, BaseModel):
             output += f"{indent}{module}{k}:\n"
             # Find blueprint atom
-            bp = next(bp for bp in blueprint.blueprints if bp.module.name == k)
+            bp = next(bp for bp in blueprint.blueprints if config_key(bp.name) == k)
             output += arg_help(
                 t, blueprint, indent=indent + "  ", module=module + k + ".", _atom=bp
             )
@@ -211,7 +214,9 @@ def load_config_args(config: type[BaseModel], args: Iterable[str], path: Path) -
 
     for arg in args:
         k, _, v = arg.partition("=")
-        parts = k.split(".")
+        # Accept namespaced instance names in both forms: robot0/sensor.ip
+        # and robot0_sensor.ip (config keys escape "/" to "_").
+        parts = [p.replace("/", "_") for p in k.split(".")]
         d = kwargs
         for p in parts[:-1]:
             d = d.setdefault(p, {})
