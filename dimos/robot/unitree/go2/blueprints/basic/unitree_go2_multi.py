@@ -23,6 +23,9 @@ Configure a single robot with `-o robot0/go2connection.<field>=<value>`.
 
 Usage:
     ROBOT_IPS=10.0.0.102,10.0.0.209 dimos run unitree-go2-multi
+
+    # Simulation: one MuJoCo sim per robot; the IPs are ignored
+    ROBOT_IPS=10.0.0.102,10.0.0.209 dimos --simulation run unitree-go2-multi
 """
 
 from dimos.core.coordination.blueprints import autoconnect, namespace

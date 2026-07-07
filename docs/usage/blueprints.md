@@ -282,6 +282,12 @@ robot_ips = (global_config.robot_ips or "").split(",")
 
 For convenience `global_config.processed_robot_ips` is available which automatically splits the string and errors if no IPs are present.
 
+This works in simulation too: adding `--simulation` starts one MuJoCo instance per robot and the IPs are ignored. For example, to run two simulated Go2 robots:
+
+```bash
+ROBOT_IPS=10.0.0.1,10.0.0.2 dimos --simulation run unitree-go2-multi
+```
+
 ## Overriding global configuration.
 
 Each module includes the global config available as `self.config.g`. E.g.:
