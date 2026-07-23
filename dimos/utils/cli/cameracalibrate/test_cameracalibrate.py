@@ -25,7 +25,10 @@ from typer.testing import CliRunner
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo as DimosCameraInfo
 from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
+    _COVERAGE_GRID,
     DistortionModel,
+    _draw_coverage_overlay,
+    _touched_cells,
     app,
     calibrate_from_frames,
     capture_frames_from_topic,
@@ -909,3 +912,30 @@ def test_write_camera_info_yaml_custom_r_p_and_distortion_model(tmp_path: Path) 
     assert np.allclose(np.asarray(info.D, dtype=np.float64).ravel(), D.ravel())
     assert np.allclose(np.asarray(info.R, dtype=np.float64).reshape(3, 3), R)
     assert np.allclose(np.asarray(info.P, dtype=np.float64).reshape(3, 4), P)
+
+
+# --- coverage overlay (interactive-capture visual hint) -----------------------
+
+
+def test_touched_cells_maps_corners_to_expected_grid_cells() -> None:
+    """A board corner cloud lights exactly the GRID cells its corners fall in (col, row)."""
+    # 640x480 into a 6x6 grid: (10, 10) is the top-left cell, (630, 470) the bottom-right.
+    corners = np.array([[[10.0, 10.0]], [[630.0, 470.0]]], dtype=np.float32)
+    assert _touched_cells(corners, (640, 480)) == frozenset({(0, 0), (5, 5)})
+
+
+def test_draw_coverage_overlay_draws_uncovered_and_omits_covered() -> None:
+    """Uncovered cells get a grid outline; covered cells are left clear ('deleted')."""
+    grid = _COVERAGE_GRID
+    all_cells = {(cx, cy) for cx in range(grid) for cy in range(grid)}
+
+    # Every cell covered -> nothing drawn, image stays black.
+    fully_covered = np.zeros((480, 640, 3), dtype=np.uint8)
+    _draw_coverage_overlay(fully_covered, set(all_cells))
+    assert not fully_covered.any()
+
+    # Only the top-left cell uncovered -> it is outlined; covered cells stay black.
+    one_open = np.zeros((480, 640, 3), dtype=np.uint8)
+    _draw_coverage_overlay(one_open, all_cells - {(0, 0)})
+    assert one_open[0:80, 0:106].any()  # (0, 0) cell outlined
+    assert not one_open[160:320, 320:426].any()  # interior of covered cells stays clear

@@ -61,11 +61,6 @@ _MIN_CHARUCO_CORNERS = 6
 _DEFAULT_CHARUCO_DICT = "DICT_4X4_50"
 _DEFAULT_MARKER_RATIO = 0.8  # markerLength / squareLength for a standard ChArUco print
 
-# Frame-diversity gate: a manually-accepted frame must move its board corners at least this many
-# pixels (mean per-corner displacement vs the nearest already-kept frame) to be kept, so the ~20
-# retained views are varied instead of near-duplicate poses. 0.0 disables the gate (library default).
-_DEFAULT_MIN_FRAME_DIFF_PX = 8.0
-
 
 class CalibrationResultDict(TypedDict):
     """Structured return from ``calibrate_from_frames`` (and base of ``run_calibration``)."""
@@ -84,8 +79,6 @@ class CalibrationRunResultDict(CalibrationResultDict, total=False):
 
     out_path: Path
     preview_path: Path
-    frames_dir: Path
-    n_frames_saved: int
 
 
 class CheckDriftDict(TypedDict, total=False):
@@ -141,8 +134,6 @@ class CalibrationCheckRunResultDict(CalibrationCheckResultDict, total=False):
     source: str
     resolution_warning: str
     out_path: Path
-    frames_dir: Path
-    n_frames_saved: int
 
 
 class Source(str, Enum):
@@ -251,24 +242,6 @@ def load_frames_from_folder(path: str) -> list[np.ndarray]:
             raise ValueError(f"Could not read image: {p}")
         out.append(img)
     return out
-
-
-def save_frames_to_dir(frames: list[np.ndarray], frames_out: Path) -> list[Path]:
-    """Write each accepted frame as ``frame_000.png``, ``frame_001.png`` ... into ``frames_out``.
-
-    Keeps the exact accepted poses so they are reusable (re-loadable by ``load_frames_from_folder``).
-    Filenames are zero-padded to the frame count so a lexical sort matches capture order. Returns the
-    written paths in order; raises ``ValueError`` (got-vs-want) if ``cv2.imwrite`` fails on any frame.
-    """
-    frames_out.mkdir(parents=True, exist_ok=True)
-    pad = max(3, len(str(max(len(frames) - 1, 0))))
-    paths: list[Path] = []
-    for i, frame in enumerate(frames):
-        p = frames_out / f"frame_{i:0{pad}d}.png"
-        if not cv2.imwrite(str(p), np.asarray(frame)):
-            raise ValueError(f"Could not write frame image: {p}")
-        paths.append(p)
-    return paths
 
 
 _CAMERACALIBRATE_WINDOW = "dimos cameracalibrate"
@@ -694,110 +667,11 @@ def _draw_capture_status(
     cv2.putText(preview, detail, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
 
-# --- Coverage-guided capture --------------------------------------------------
-# ROS-style progress: each accepted view contributes (x, y, board-size, skew) params, and capture
-# is "good enough" once every axis has been swept and the image grid is well filled. The metric and
-# thresholds are ported from the ROS image_pipeline camera_calibration coverage heuristic
-# (calibrator.py _get_params / is_good_sample / compute_goodenough):
-# https://github.com/ros-perception/image_pipeline
-_COVERAGE_GRID = 6  # image binned into GRID x GRID cells for the area-fill metric
-# Per-axis sweep target ranges (ROS calibrator.py param_ranges): X pos, Y pos, board size, skew.
-_COVERAGE_PARAM_RANGES = (0.7, 0.7, 0.4, 0.5)
-_COVERAGE_MIN_PARAM_DISTANCE = (
-    0.2  # L1 distance in (x,y,size,skew) a new view must add (ROS is_good_sample)
-)
-_COVERAGE_MIN_CORNER_MOTION_PX = (
-    8.0  # mean corner shift vs the last accepted view; rejects near-duplicates
-)
-_COVERAGE_AUTOFINISH_MIN_FRAMES = (
-    3  # never auto-finish on --min-coverage below this many accepted views
-)
-
-_COVERAGE_AXIS_GUIDANCE = {
-    "x": "move the board across the frame horizontally (LEFT <-> RIGHT)",
-    "y": "move the board across the frame vertically (TOP <-> BOTTOM)",
-    "size": "vary board SIZE: move it CLOSER and then FARTHER",
-    "skew": "TILT the board more to add skew (angle it away from the camera)",
-    "fill": "move the board to cover more of the frame",
-}
-
-
-@dataclass(frozen=True)
-class CoverageProgress:
-    """ROS-style coverage of the accepted calibration views, each axis in [0, 1].
-
-    ``fill_fraction`` is the share of the GRID x GRID image cells touched by any board corner;
-    ``x_spread``/``y_spread`` are the swept range of the board-centroid position (scaled by the ROS
-    target range); ``size_spread`` is the near/far range (board area) and ``skew_spread`` the
-    out-of-plane tilt reached. ``overall`` is the mean of the five axes; ``weakest_axis`` names the
-    least-covered one and ``guidance`` is a one-line operator hint pointing at it.
-    """
-
-    fill_fraction: float
-    x_spread: float
-    y_spread: float
-    size_spread: float
-    skew_spread: float
-    overall: float
-    weakest_axis: str
-    guidance: str
-
-
-def _order_quad_corners(
-    pts_xy: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Outer quad (up-left, up-right, down-right, down-left) of a board's corner cloud.
-
-    Uses coordinate sum/difference extremes so it works for a full chessboard grid or a partial
-    ChArUco corner set without assuming any corner ordering.
-    """
-    pts = np.asarray(pts_xy, dtype=np.float64).reshape(-1, 2)
-    s = pts[:, 0] + pts[:, 1]
-    diff = pts[:, 0] - pts[:, 1]
-    up_left = pts[int(np.argmin(s))]
-    down_right = pts[int(np.argmax(s))]
-    up_right = pts[int(np.argmax(diff))]  # max x - y: top-right
-    down_left = pts[int(np.argmin(diff))]  # min x - y: bottom-left
-    return up_left, up_right, down_right, down_left
-
-
-def _quad_area_px2(ul: np.ndarray, ur: np.ndarray, dr: np.ndarray, dl: np.ndarray) -> float:
-    """Shoelace area (px^2) of the ordered board quad ul -> ur -> dr -> dl."""
-    poly = np.array([ul, ur, dr, dl], dtype=np.float64)
-    x = poly[:, 0]
-    y = poly[:, 1]
-    return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
-
-
-def _corner_angle_rad(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    """Interior angle (rad) at vertex ``b`` of the corner triple a-b-c; pi/2 when degenerate."""
-    ab = np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)
-    cb = np.asarray(c, dtype=np.float64) - np.asarray(b, dtype=np.float64)
-    denom = float(np.linalg.norm(ab) * np.linalg.norm(cb))
-    if denom < 1e-9:
-        return float(np.pi / 2.0)
-    cos_theta = float(np.dot(ab, cb) / denom)
-    return float(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
-
-
-def board_coverage_params(
-    corners_px: np.ndarray, image_wh: tuple[int, int]
-) -> tuple[float, float, float, float]:
-    """(x, y, size, skew) coverage params of one board view, each in [0, 1] (ROS image_pipeline).
-
-    ``x``/``y`` are the board-centroid pixel position normalized by image width/height; ``size`` is
-    ``sqrt(board_quad_area / image_area)`` (near boards are large); ``skew`` is the out-of-plane
-    tilt proxy ``min(1, 2*|pi/2 - top_edge_angle|)`` from the projected board's top corners.
-    """
-    w = max(int(image_wh[0]), 1)
-    h = max(int(image_wh[1]), 1)
-    pts = np.asarray(corners_px, dtype=np.float64).reshape(-1, 2)
-    x = float(np.mean(pts[:, 0]) / w)
-    y = float(np.mean(pts[:, 1]) / h)
-    ul, ur, dr, dl = _order_quad_corners(pts)
-    size = float(np.sqrt(_quad_area_px2(ul, ur, dr, dl) / float(w * h)))
-    skew = float(min(1.0, 2.0 * abs((np.pi / 2.0) - _corner_angle_rad(ul, ur, dr))))
-    return x, y, min(1.0, size), skew
+# --- Coverage overlay (interactive-capture visual hint) -----------------------
+# The live preview is binned into a GRID x GRID grid; a cell clears once the detected board has
+# swept over it, so the still-drawn cells show which image regions the board has not reached yet.
+# A visual hint only -- SPACE captures whatever is in view, no gating.
+_COVERAGE_GRID = 6  # image binned into GRID x GRID cells for the coverage overlay
 
 
 def _touched_cells(corners_px: np.ndarray, image_wh: tuple[int, int]) -> frozenset[tuple[int, int]]:
@@ -811,217 +685,24 @@ def _touched_cells(corners_px: np.ndarray, image_wh: tuple[int, int]) -> frozens
     return frozenset(zip(cx.tolist(), cy.tolist(), strict=True))
 
 
-def _uncovered_region(touched_cells: set[tuple[int, int]]) -> str | None:
-    """Compass label (e.g. ``"top-left"``, ``"right"``, ``"center"``) of the emptiest image area."""
+def _draw_coverage_overlay(preview: np.ndarray, covered_cells: set[tuple[int, int]]) -> None:
+    """Outline every still-uncovered GRID x GRID cell on ``preview``; covered cells are omitted.
+
+    A light capture hint: each cell the detected board has not yet swept over is drawn as a thin
+    rectangle, so the operator sees at a glance which image regions still need the board. Cells in
+    ``covered_cells`` are left clear ("deleted"). Draw-only -- it never gates SPACE capture.
+    """
     grid = _COVERAGE_GRID
-    all_cells = {(cx, cy) for cx in range(grid) for cy in range(grid)}
-    untouched = all_cells - set(touched_cells)
-    if not untouched:
-        return None
-    mean_cx = sum(cx for cx, _cy in untouched) / len(untouched)
-    mean_cy = sum(cy for _cx, cy in untouched) / len(untouched)
-    fx = mean_cx / max(grid - 1, 1)
-    fy = mean_cy / max(grid - 1, 1)
-    horiz = "left" if fx < 0.34 else "right" if fx > 0.66 else ""
-    vert = "top" if fy < 0.34 else "bottom" if fy > 0.66 else ""
-    region = "-".join(part for part in (vert, horiz) if part)
-    return region or "center"
-
-
-def _coverage_guidance(weakest_axis: str, touched_cells: set[tuple[int, int]]) -> str:
-    """One-line hint for the weakest axis; positional axes point at the emptiest region."""
-    if weakest_axis in ("fill", "x", "y"):
-        region = _uncovered_region(touched_cells)
-        if region is not None:
-            return f"move the board toward the {region.upper()} of the frame"
-    return _COVERAGE_AXIS_GUIDANCE[weakest_axis]
-
-
-def compute_coverage(
-    frames_corners: list[np.ndarray], image_wh: tuple[int, int]
-) -> CoverageProgress:
-    """Aggregate ROS-style coverage over all accepted board views (pure, deterministic).
-
-    Empty input returns all-zero progress. X/Y spread are the swept centroid range divided by the
-    ROS target range; size/skew spread are the max reached (min pinned at 0, per ROS). ``fill_fraction``
-    is the share of grid cells any view touched. ``overall`` is the mean of the five axes; each is
-    monotonically non-decreasing as more views are added. See ``board_coverage_params``.
-    """
-    if not frames_corners:
-        return CoverageProgress(
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "fill", _COVERAGE_AXIS_GUIDANCE["fill"]
-        )
-
-    params = [board_coverage_params(c, image_wh) for c in frames_corners]
-    xs = [p[0] for p in params]
-    ys = [p[1] for p in params]
-    sizes = [p[2] for p in params]
-    skews = [p[3] for p in params]
-    rx, ry, rsize, rskew = _COVERAGE_PARAM_RANGES
-    x_spread = min((max(xs) - min(xs)) / rx, 1.0)
-    y_spread = min((max(ys) - min(ys)) / ry, 1.0)
-    size_spread = min(max(sizes) / rsize, 1.0)
-    skew_spread = min(max(skews) / rskew, 1.0)
-
-    cells: set[tuple[int, int]] = set()
-    for c in frames_corners:
-        cells |= _touched_cells(c, image_wh)
-    fill_fraction = len(cells) / float(_COVERAGE_GRID * _COVERAGE_GRID)
-
-    axes = {
-        "x": x_spread,
-        "y": y_spread,
-        "size": size_spread,
-        "skew": skew_spread,
-        "fill": fill_fraction,
-    }
-    weakest_axis = min(axes, key=lambda k: axes[k])
-    overall = float(sum(axes.values()) / len(axes))
-    return CoverageProgress(
-        fill_fraction=float(fill_fraction),
-        x_spread=float(x_spread),
-        y_spread=float(y_spread),
-        size_spread=float(size_spread),
-        skew_spread=float(skew_spread),
-        overall=overall,
-        weakest_axis=weakest_axis,
-        guidance=_coverage_guidance(weakest_axis, cells),
-    )
-
-
-def _param_l1_distance(
-    p1: tuple[float, float, float, float], p2: tuple[float, float, float, float]
-) -> float:
-    return float(sum(abs(a - b) for a, b in zip(p1, p2, strict=True)))
-
-
-def coverage_gate_accepts(
-    candidate_corners_px: np.ndarray,
-    accepted_corners: list[np.ndarray],
-    image_wh: tuple[int, int],
-) -> bool:
-    """True if this board view meaningfully improves coverage (ROS is_good_sample, pure).
-
-    Accepts the first view unconditionally. Otherwise rejects a view that barely moved from the last
-    accepted one (mean corner displacement < ``_COVERAGE_MIN_CORNER_MOTION_PX``), then accepts when
-    it lights up a new image grid cell or its (x,y,size,skew) params sit > ``_COVERAGE_MIN_PARAM_
-    DISTANCE`` (L1) from every accepted view.
-    """
-    if not accepted_corners:
-        return True
-
-    cand = np.asarray(candidate_corners_px, dtype=np.float64).reshape(-1, 2)
-    last = np.asarray(accepted_corners[-1], dtype=np.float64).reshape(-1, 2)
-    if cand.shape == last.shape:
-        motion_px = float(np.mean(np.linalg.norm(cand - last, axis=1)))
-        if motion_px < _COVERAGE_MIN_CORNER_MOTION_PX:
-            return False
-
-    existing_cells: set[tuple[int, int]] = set()
-    for c in accepted_corners:
-        existing_cells |= _touched_cells(c, image_wh)
-    if _touched_cells(candidate_corners_px, image_wh) - existing_cells:
-        return True
-
-    cand_params = board_coverage_params(candidate_corners_px, image_wh)
-    nearest = min(
-        _param_l1_distance(cand_params, board_coverage_params(c, image_wh))
-        for c in accepted_corners
-    )
-    return nearest > _COVERAGE_MIN_PARAM_DISTANCE
-
-
-def is_frame_novel(
-    candidate_corners: np.ndarray,
-    accepted_corners_list: list[np.ndarray],
-    min_diff_px: float,
-) -> bool:
-    """True if this board view is meaningfully different from every already-accepted frame.
-
-    Novelty = the mean per-corner pixel displacement to the NEAREST accepted frame is at least
-    ``min_diff_px``; this rejects near-duplicate poses so the retained views stay varied without any
-    coverage UI. The first frame (empty ``accepted_corners_list``) is always novel, and
-    ``min_diff_px <= 0`` disables the gate (everything is novel). An accepted frame whose corner
-    count differs from the candidate (e.g. a partial ChArUco view) is not comparable, so it does not
-    constrain novelty -- if none are comparable the candidate is treated as novel.
-    """
-    if min_diff_px <= 0.0 or not accepted_corners_list:
-        return True
-
-    cand = np.asarray(candidate_corners, dtype=np.float64).reshape(-1, 2)
-    nearest_mean_disp_px = float("inf")
-    for accepted in accepted_corners_list:
-        acc = np.asarray(accepted, dtype=np.float64).reshape(-1, 2)
-        if acc.shape != cand.shape:
-            continue  # different corner count -> not comparable, cannot prove a duplicate
-        mean_disp_px = float(np.mean(np.linalg.norm(cand - acc, axis=1)))
-        nearest_mean_disp_px = min(nearest_mean_disp_px, mean_disp_px)
-    return nearest_mean_disp_px >= min_diff_px
-
-
-class _CoverageTracker:
-    """Loop-side accumulator over accepted board corners; delegates to the pure coverage functions."""
-
-    def __init__(self, image_wh: tuple[int, int]) -> None:
-        self._image_wh = image_wh
-        self._accepted: list[np.ndarray] = []
-
-    def accepts(self, corners_px: np.ndarray) -> bool:
-        return coverage_gate_accepts(corners_px, self._accepted, self._image_wh)
-
-    def add(self, corners_px: np.ndarray) -> None:
-        self._accepted.append(np.asarray(corners_px, dtype=np.float32).reshape(-1, 2).copy())
-
-    def progress(self) -> CoverageProgress:
-        return compute_coverage(self._accepted, self._image_wh)
-
-
-def _draw_coverage_panel(preview: np.ndarray, progress: CoverageProgress) -> None:
-    """Overlay the four ROS coverage bars (X/Y/size/skew), overall %, and the guidance line."""
     h, w = preview.shape[:2]
-    bars = (
-        ("X pos", progress.x_spread),
-        ("Y pos", progress.y_spread),
-        ("size", progress.size_spread),
-        ("skew", progress.skew_spread),
-    )
-    row_h = 22
-    panel_h = row_h * (len(bars) + 2)
-    y0 = max(60, h - panel_h)
-    cv2.rectangle(preview, (0, y0), (w, h), (0, 0, 0), thickness=-1)
-    bar_x = 74
-    bar_w = min(220, max(120, w - bar_x - 12))
-    y = y0 + 16
-    for label, value in bars:
-        v = float(max(0.0, min(1.0, value)))
-        cv2.putText(preview, label, (8, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-        cv2.rectangle(preview, (bar_x, y - 8), (bar_x + bar_w, y + 4), (60, 60, 60), thickness=-1)
-        # Green once the axis is fully swept, amber while it still needs motion.
-        color = (0, 180, 0) if v >= 0.999 else (0, 180, 220)
-        cv2.rectangle(preview, (bar_x, y - 8), (bar_x + int(bar_w * v), y + 4), color, thickness=-1)
-        y += row_h
-    cv2.putText(
-        preview,
-        f"coverage {progress.overall * 100:.0f}%  weakest: {progress.weakest_axis}",
-        (8, y + 4),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (255, 255, 255),
-        1,
-    )
-    y += row_h
-    cv2.putText(
-        preview, progress.guidance, (8, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 220, 220), 1
-    )
-
-
-def _format_coverage_line(progress: CoverageProgress) -> str:
-    """One-line stdout coverage summary for the ``--no-display`` guided path."""
-    return (
-        f"coverage {progress.overall * 100:.0f}% | x {progress.x_spread:.2f} y {progress.y_spread:.2f} "
-        f"size {progress.size_spread:.2f} skew {progress.skew_spread:.2f} fill {progress.fill_fraction:.2f} "
-        f"| {progress.guidance}"
-    )
+    for cx in range(grid):
+        for cy in range(grid):
+            if (cx, cy) in covered_cells:
+                continue
+            x0 = round(cx * w / grid)
+            y0 = round(cy * h / grid)
+            x1 = round((cx + 1) * w / grid)
+            y1 = round((cy + 1) * h / grid)
+            cv2.rectangle(preview, (x0, y0), (x1, y1), (0, 200, 255), thickness=1)
 
 
 def _interactive_capture(
@@ -1031,17 +712,13 @@ def _interactive_capture(
     rows: int,
     *,
     no_display: bool,
-    coverage_guided: bool = False,
-    min_coverage: float | None = None,
-    min_frame_diff_px: float = 0.0,
 ) -> _WebcamCapture:
     """Interactive chessboard preview + SPACE-accept / q-quit loop.
 
     ``next_frame()`` returns the latest BGR/grayscale frame, or ``None`` to skip the iteration.
     ``no_display`` skips ``imshow``/teardown but still calls ``cv2.waitKey`` so tests can inject
-    keys. ``coverage_guided`` auto-accepts frames that pass the coverage gate (no SPACE) and draws
-    the bars + guidance; ``min_coverage`` finishes early once ``overall`` coverage reaches it.
-    ``min_frame_diff_px`` gates the manual SPACE path via ``is_frame_novel`` (0.0 = accept every SPACE).
+    keys. A light ``_draw_coverage_overlay`` marks image regions the board has not yet swept over;
+    it is a visual hint only -- SPACE accepts whatever board is in view.
     """
     if target_count < 1:
         raise ValueError("target_count must be >= 1")
@@ -1053,17 +730,13 @@ def _interactive_capture(
     locked_exact_probe = False
     pattern_candidates = _pattern_candidates(cols, rows)
     pattern_candidate_index = 0
-    tracker: _CoverageTracker | None = None
-    finished_ok = False
+    covered_cells: set[tuple[int, int]] = set()
 
     try:
         while len(accepted) < target_count:
             frame = next_frame()
             if frame is None:
                 continue
-            if coverage_guided and tracker is None:
-                fh, fw = np.asarray(frame).shape[:2]
-                tracker = _CoverageTracker((int(fw), int(fh)))
 
             if frame.ndim == 3:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -1105,6 +778,9 @@ def _interactive_capture(
                 detected = (detection.cols, detection.rows, detection.label)
                 if detected != last_detected:
                     last_detected = detected
+                covered_cells |= _touched_cells(
+                    detection.corners, (preview.shape[1], preview.shape[0])
+                )
                 cv2.drawChessboardCorners(
                     preview,
                     (detection.cols, detection.rows),
@@ -1117,44 +793,19 @@ def _interactive_capture(
                 accepted_count=len(accepted),
                 target_count=target_count,
             )
-            if coverage_guided and tracker is not None and not no_display:
-                _draw_coverage_panel(preview, tracker.progress())
 
             if not no_display:
+                _draw_coverage_overlay(preview, covered_cells)
                 cv2.imshow(_CAMERACALIBRATE_WINDOW, preview)
 
             key = cv2.waitKey(1) & 0xFF
-            if coverage_guided and tracker is not None:
-                # Guided: auto-accept any detection that improves coverage; SPACE is not required.
-                if detection is not None and tracker.accepts(detection.corners):
-                    accepted.append(np.asarray(frame).copy())
-                    accepted_corners.append(np.asarray(detection.corners, dtype=np.float32).copy())
-                    tracker.add(detection.corners)
-                    progress = tracker.progress()
-                    if no_display:
-                        typer.echo(
-                            f"[{len(accepted)}/{target_count}] {_format_coverage_line(progress)}"
-                        )
-                    if (
-                        min_coverage is not None
-                        and len(accepted) >= _COVERAGE_AUTOFINISH_MIN_FRAMES
-                        and progress.overall >= min_coverage
-                    ):
-                        finished_ok = True
-                        break
-                if key == ord("q"):
-                    break
-            elif (
-                key == ord(" ")
-                and detection is not None
-                and is_frame_novel(detection.corners, accepted_corners, min_frame_diff_px)
-            ):
+            if key == ord(" ") and detection is not None:
                 accepted.append(np.asarray(frame).copy())
                 accepted_corners.append(np.asarray(detection.corners, dtype=np.float32).copy())
             elif key == ord("q"):
                 break
 
-        if len(accepted) < target_count and not finished_ok:
+        if len(accepted) < target_count:
             raise RuntimeError(
                 f"Capture ended with {len(accepted)} of {target_count} frames "
                 f"(quit early, missing detections on SPACE, or read failures)."
@@ -1177,32 +828,25 @@ def _interactive_capture_charuco(
     spec: CharucoBoardSpec,
     *,
     no_display: bool,
-    coverage_guided: bool = False,
-    min_coverage: float | None = None,
-    min_frame_diff_px: float = 0.0,
 ) -> _WebcamCapture:
-    """ChArUco variant of ``_interactive_capture``: same accept/guided/quit UX, charuco detector.
+    """ChArUco variant of ``_interactive_capture``: same SPACE-accept / q-quit UX, charuco detector.
 
     Detection is per-frame ``_detect_charuco`` (the board fixes the geometry, so no pattern-size
-    guessing). Accepted frames store their ``_CharucoDetection`` for reuse at accept time; all gates
-    (coverage, ``min_frame_diff_px`` novelty) key off the ChArUco corner pixels.
+    guessing). Accepted frames store their ``_CharucoDetection`` for reuse at accept time. The same
+    light ``_draw_coverage_overlay`` hint keys off the ChArUco corner pixels.
     """
     if target_count < 1:
         raise ValueError("target_count must be >= 1")
 
     accepted: list[np.ndarray] = []
     accepted_detections: list[_CharucoDetection] = []
-    tracker: _CoverageTracker | None = None
-    finished_ok = False
+    covered_cells: set[tuple[int, int]] = set()
 
     try:
         while len(accepted) < target_count:
             frame = next_frame()
             if frame is None:
                 continue
-            if coverage_guided and tracker is None:
-                fh, fw = np.asarray(frame).shape[:2]
-                tracker = _CoverageTracker((int(fw), int(fh)))
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
             detection = _detect_charuco(gray, spec)
@@ -1212,6 +856,9 @@ def _interactive_capture_charuco(
                 # drawDetectedCornersCharuco expects a BGR image; upgrade grayscale previews.
                 if preview.ndim == 2:
                     preview = cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
+                covered_cells |= _touched_cells(
+                    detection.charuco_corners_px, (preview.shape[1], preview.shape[0])
+                )
                 cv2.aruco.drawDetectedCornersCharuco(
                     preview, detection.charuco_corners_px, detection.charuco_ids
                 )
@@ -1228,48 +875,19 @@ def _interactive_capture_charuco(
                 preview, status, (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
             cv2.putText(preview, detail, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-            if coverage_guided and tracker is not None and not no_display:
-                _draw_coverage_panel(preview, tracker.progress())
 
             if not no_display:
+                _draw_coverage_overlay(preview, covered_cells)
                 cv2.imshow(_CAMERACALIBRATE_WINDOW, preview)
 
             key = cv2.waitKey(1) & 0xFF
-            if coverage_guided and tracker is not None:
-                # Guided: auto-accept any detection that improves coverage; SPACE is not required.
-                if detection is not None and tracker.accepts(detection.charuco_corners_px):
-                    accepted.append(np.asarray(frame).copy())
-                    accepted_detections.append(detection)
-                    tracker.add(detection.charuco_corners_px)
-                    progress = tracker.progress()
-                    if no_display:
-                        typer.echo(
-                            f"[{len(accepted)}/{target_count}] {_format_coverage_line(progress)}"
-                        )
-                    if (
-                        min_coverage is not None
-                        and len(accepted) >= _COVERAGE_AUTOFINISH_MIN_FRAMES
-                        and progress.overall >= min_coverage
-                    ):
-                        finished_ok = True
-                        break
-                if key == ord("q"):
-                    break
-            elif (
-                key == ord(" ")
-                and detection is not None
-                and is_frame_novel(
-                    detection.charuco_corners_px,
-                    [d.charuco_corners_px for d in accepted_detections],
-                    min_frame_diff_px,
-                )
-            ):
+            if key == ord(" ") and detection is not None:
                 accepted.append(np.asarray(frame).copy())
                 accepted_detections.append(detection)
             elif key == ord("q"):
                 break
 
-        if len(accepted) < target_count and not finished_ok:
+        if len(accepted) < target_count:
             raise RuntimeError(
                 f"Capture ended with {len(accepted)} of {target_count} frames "
                 f"(quit early, missing detections on SPACE, or read failures)."
@@ -1294,14 +912,11 @@ def _capture_frames_from_webcam(
     *,
     no_display: bool = False,
     charuco_spec: CharucoBoardSpec | None = None,
-    coverage_guided: bool = False,
-    min_coverage: float | None = None,
-    min_frame_diff_px: float = 0.0,
 ) -> _WebcamCapture:
     """Open the webcam and drive ``_interactive_capture`` (or the charuco variant) over its frames.
 
     Raises if the device cannot be opened or fails to read ``_MAX_CONSECUTIVE_WEBCAM_READ_FAILURES``
-    times; the accept/guided/quit UX and all keyword gates are those of ``_interactive_capture``.
+    times; the SPACE-accept / q-quit UX is that of ``_interactive_capture``.
     """
     if target_count < 1:
         raise ValueError("target_count must be >= 1")
@@ -1336,9 +951,6 @@ def _capture_frames_from_webcam(
                 target_count,
                 charuco_spec,
                 no_display=no_display,
-                coverage_guided=coverage_guided,
-                min_coverage=min_coverage,
-                min_frame_diff_px=min_frame_diff_px,
             )
         return _interactive_capture(
             _next,
@@ -1346,9 +958,6 @@ def _capture_frames_from_webcam(
             cols,
             rows,
             no_display=no_display,
-            coverage_guided=coverage_guided,
-            min_coverage=min_coverage,
-            min_frame_diff_px=min_frame_diff_px,
         )
 
     finally:
@@ -1383,9 +992,6 @@ def _capture_frames_from_topic(
     no_display: bool = False,
     timeout_sec: float = 60.0,
     charuco_spec: CharucoBoardSpec | None = None,
-    coverage_guided: bool = False,
-    min_coverage: float | None = None,
-    min_frame_diff_px: float = 0.0,
 ) -> _WebcamCapture:
     """Capture frames from an LCM/SHM image topic with the same interactive UX.
 
@@ -1437,9 +1043,6 @@ def _capture_frames_from_topic(
                 target_count,
                 charuco_spec,
                 no_display=no_display,
-                coverage_guided=coverage_guided,
-                min_coverage=min_coverage,
-                min_frame_diff_px=min_frame_diff_px,
             )
         return _interactive_capture(
             _next,
@@ -1447,9 +1050,6 @@ def _capture_frames_from_topic(
             cols,
             rows,
             no_display=no_display,
-            coverage_guided=coverage_guided,
-            min_coverage=min_coverage,
-            min_frame_diff_px=min_frame_diff_px,
         )
     finally:
         # Best-effort teardown: swallow per-transport quirks so cleanup
@@ -1750,17 +1350,11 @@ def run_calibration(
     squares_y: int | None = None,
     marker_size_m: float | None = None,
     marker_ratio: float = _DEFAULT_MARKER_RATIO,
-    coverage_guided: bool = False,
-    min_coverage: float | None = None,
-    min_frame_diff_px: float = 0.0,
-    frames_out: Path | None = None,
 ) -> CalibrationRunResultDict:
     """Capture frames from ``source``, calibrate, and (optionally) write CameraInfo YAML + preview.
 
     ``board`` picks chessboard vs charuco and ``distortion_model`` picks the solver -- charuco
     fisheye routes through ``cv2.fisheye.calibrate`` over the per-view corner correspondences.
-    ``coverage_guided``/``min_coverage`` apply to webcam/topic only; ``frames_out`` saves the used
-    frames (paths + count returned in ``frames_dir``/``n_frames_saved``).
     """
     source_value = Source(source)
     model = DistortionModel(distortion_model)
@@ -1805,9 +1399,6 @@ def run_calibration(
             no_display=no_display,
             timeout_sec=topic_timeout_sec,
             charuco_spec=charuco_spec,
-            coverage_guided=coverage_guided,
-            min_coverage=min_coverage,
-            min_frame_diff_px=min_frame_diff_px,
         )
         frames = capture.frames
         pattern_hint = capture.pattern
@@ -1820,9 +1411,6 @@ def run_calibration(
             rows,
             no_display=no_display,
             charuco_spec=charuco_spec,
-            coverage_guided=coverage_guided,
-            min_coverage=min_coverage,
-            min_frame_diff_px=min_frame_diff_px,
         )
         frames = capture.frames
         pattern_hint = capture.pattern
@@ -1850,11 +1438,6 @@ def run_calibration(
         "pattern_label": cal["pattern_label"],
     }
     image_width, image_height = result["image_size"]
-
-    if frames_out is not None:
-        saved = save_frames_to_dir(frames, frames_out)
-        result["frames_dir"] = frames_out
-        result["n_frames_saved"] = len(saved)
 
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -2382,8 +1965,6 @@ def run_check(
     out: Path | None,
     target_count: int,
     no_display: bool,
-    frames_out: Path | None = None,
-    min_frame_diff_px: float = 0.0,
     board: BoardType | str = BoardType.chessboard,
     dict_name: str = _DEFAULT_CHARUCO_DICT,
     squares_x: int | None = None,
@@ -2396,9 +1977,6 @@ def run_check(
     ``board`` selects checkerboard (``check_calibration``) or charuco
     (``check_calibration_charuco``); only the per-frame corner source differs -- both feed the same
     reprojection/drift verdict. Writes the check JSON to ``out`` (or a default next to the source).
-
-    ``frames_out`` (if set) saves the ingested frames via ``save_frames_to_dir``. ``min_frame_diff_px``
-    gates the manual SPACE path for the webcam/topic sources (0.0 = off).
     """
     from dimos.msgs.sensor_msgs.CameraInfo import (
         CameraInfo,  # heavy (dimos_lcm); only --check needs it
@@ -2466,7 +2044,6 @@ def run_check(
                 no_display=no_display,
                 timeout_sec=topic_timeout_sec,
                 charuco_spec=charuco_spec,
-                min_frame_diff_px=min_frame_diff_px,
             )
         else:
             capture = _capture_frames_from_webcam(
@@ -2476,7 +2053,6 @@ def run_check(
                 rows,
                 no_display=no_display,
                 charuco_spec=charuco_spec,
-                min_frame_diff_px=min_frame_diff_px,
             )
         frames = capture.frames
         if charuco_spec is not None:
@@ -2542,11 +2118,6 @@ def run_check(
             f"{w0}x{h0}; reprojection RMS is not meaningful across resolutions."
         )
 
-    if frames_out is not None:
-        saved = save_frames_to_dir(frames, frames_out)
-        result["frames_dir"] = frames_out
-        result["n_frames_saved"] = len(saved)
-
     out_path = out if out is not None else _default_check_out_path(source_value, images)
     _write_check_json(out_path, result)
     result["out_path"] = out_path
@@ -2570,8 +2141,6 @@ def run_check_report(
     out: Path | None,
     target_count: int,
     no_display: bool,
-    frames_out: Path | None = None,
-    min_frame_diff_px: float = 0.0,
     board: BoardType | str = BoardType.chessboard,
     dict_name: str = _DEFAULT_CHARUCO_DICT,
     squares_x: int | None = None,
@@ -2603,8 +2172,6 @@ def run_check_report(
             out=out,
             target_count=target_count,
             no_display=no_display,
-            frames_out=frames_out,
-            min_frame_diff_px=min_frame_diff_px,
             board=board,
             dict_name=dict_name,
             squares_x=squares_x,
@@ -2644,8 +2211,6 @@ def run_check_report(
         typer.echo(f"  WARNING: {resolution_warning}")
     if result["recommendation"]:
         typer.echo(f"  -> {result['recommendation']}")
-    if "frames_dir" in result:
-        typer.echo(f"Saved {result.get('n_frames_saved', 0)} frame(s) to {result['frames_dir']}")
     if "out_path" in result:
         typer.echo(f"Wrote check JSON to {result['out_path']}")
 
@@ -2724,23 +2289,6 @@ def calibrate(
     camera_name: str = typer.Option("webcam", "--camera-name", help="Camera name in YAML"),
     target_count: int = typer.Option(20, "--target-count", help="Accepted webcam frame count"),
     no_display: bool = typer.Option(False, "--no-display", help="Disable OpenCV preview windows"),
-    guided: bool = typer.Option(
-        False,
-        "--guided",
-        help=(
-            "COVERAGE-GUIDED capture (webcam/topic): auto-accept only frames that improve board "
-            "X/Y/size/skew coverage, draw progress bars, and print where to move the board next "
-            "(like ROS camera_calibration)."
-        ),
-    ),
-    min_coverage: float | None = typer.Option(
-        None,
-        "--min-coverage",
-        help=(
-            "--guided: finish capture early once overall coverage reaches this fraction [0-1] "
-            "(default off); --target-count stays the hard cap."
-        ),
-    ),
     distortion_model: DistortionModel = typer.Option(
         DistortionModel.plumb_bob,
         "--distortion-model",
@@ -2773,24 +2321,6 @@ def calibrate(
         "--no-drift",
         help="--check: skip the fresh-calibration drift comparison (reprojection RMS only).",
     ),
-    min_frame_diff_px: float = typer.Option(
-        _DEFAULT_MIN_FRAME_DIFF_PX,
-        "--min-frame-diff-px",
-        help=(
-            "Frame-diversity gate on the manual SPACE path: accept a frame only if its board "
-            "corners moved at least this many pixels (mean) from the nearest kept frame, so the "
-            "retained views are varied. 0 disables the gate."
-        ),
-    ),
-    frames_out: Path | None = typer.Option(
-        None,
-        "--frames-out",
-        help=(
-            "Directory to save each accepted frame as frame_000.png ... (reusable poses). "
-            "Defaults to a 'frames/' dir next to --out when --out is given; no frames are saved "
-            "otherwise. Applies to calibrate and --check."
-        ),
-    ),
 ) -> None:
     """Calibrate camera intrinsics and write ROS CameraInfo YAML.
 
@@ -2804,11 +2334,6 @@ def calibrate(
         raise typer.BadParameter("--squares-x and --squares-y are required when --board charuco")
     resolved_cols = int(cols) if cols is not None else 0
     resolved_rows = int(rows) if rows is not None else 0
-
-    # Default: a 'frames/' dir next to --out; skip saving when neither --frames-out nor --out is set.
-    resolved_frames_out = frames_out
-    if resolved_frames_out is None and out is not None:
-        resolved_frames_out = out.parent / "frames"
 
     if check:
         run_check_report(
@@ -2827,8 +2352,6 @@ def calibrate(
             out=out,
             target_count=target_count,
             no_display=no_display,
-            frames_out=resolved_frames_out,
-            min_frame_diff_px=min_frame_diff_px,
             board=board,
             dict_name=charuco_dict,
             squares_x=squares_x,
@@ -2863,10 +2386,6 @@ def calibrate(
             squares_y=squares_y,
             marker_size_m=marker_size_m,
             marker_ratio=marker_ratio,
-            coverage_guided=guided,
-            min_coverage=min_coverage,
-            min_frame_diff_px=min_frame_diff_px,
-            frames_out=resolved_frames_out,
         )
     except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -2876,8 +2395,6 @@ def calibrate(
         f"Detected pattern: {tuple(result.get('pattern_size', (cols, rows)))} "
         f"({result.get('pattern_label', 'requested inner corners')})"
     )
-    if "frames_dir" in result:
-        typer.echo(f"Saved {result.get('n_frames_saved', 0)} frame(s) to {result['frames_dir']}")
     if out is not None:
         typer.echo(f"Wrote camera info YAML to {out}")
     if preview_out is not None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+from unittest.mock import MagicMock
 
 import cv2
 import numpy as np
@@ -36,6 +37,7 @@ from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     _MIN_CHARUCO_CORNERS,
     CharucoBoardSpec,
     _calibrate_charuco_fisheye,
+    _capture_frames_from_webcam,
     _CharucoDetection,
     app,
     build_charuco_board,
@@ -471,3 +473,39 @@ def test_cli_charuco_check_requires_squares(tmp_path: Path) -> None:
     output_plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output).replace("\n", " ")
     output_plain = re.sub(r"\s+", " ", output_plain)
     assert "squares" in output_plain, output_plain
+
+
+# --- interactive webcam capture (charuco SPACE path + coverage overlay) --------
+
+
+def test_capture_frames_from_webcam_charuco_space_accepts_and_draws_overlay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ChArUco webcam capture accepts a detected board on SPACE and draws the coverage overlay."""
+    spec = _board_spec()
+    frame_gray = _synthetic_detectable_charuco_frames(spec, count=1)[0]
+    bgr = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+
+    class _Cap:
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            return True, bgr.copy()
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *_a, **_k: _Cap())
+    monkeypatch.setattr(cv2, "waitKey", lambda _delay=0: ord(" "))
+    mock_imshow = MagicMock()
+    monkeypatch.setattr(cv2, "imshow", mock_imshow)
+    monkeypatch.setattr(cv2, "destroyWindow", MagicMock())
+
+    # no_display=False exercises the imshow + overlay draw path; the single frame is accepted twice.
+    capture = _capture_frames_from_webcam(0, 2, 0, 0, no_display=False, charuco_spec=spec)
+
+    assert len(capture.frames) == 2
+    assert capture.charuco_detections is not None
+    assert len(capture.charuco_detections) == 2
+    mock_imshow.assert_called()

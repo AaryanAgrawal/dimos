@@ -12,18 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for three cameracalibrate features: the frame-diversity gate, separate frame saving,
-and the interactive recalibrate-from-captured-frames offer on a DEGRADED --check.
+"""Recalibrate-from-captured-frames offer on a DEGRADED --check.
 
-All synthetic and deterministic: constructed corner arrays for the pure gate, seeded projected
-frames for the folder-source --check path. No live capture, no display.
+Seeded projected frames drive the real folder-source --check pipeline; on DEGRADED it re-emits the
+fresh drift solve as a loadable CameraInfo YAML. All synthetic and deterministic; no live capture.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
-import tempfile
 
 import cv2
 import numpy as np
@@ -33,11 +30,8 @@ from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     CalibrationCheckRunResultDict,
     _board_object_points,
     find_chessboard_corners,
-    is_frame_novel,
-    load_frames_from_folder,
     run_check,
     run_check_report,
-    save_frames_to_dir,
     write_camera_info_yaml,
     write_recalibration_from_check,
 )
@@ -52,69 +46,7 @@ _K_TRUE = np.array(
 _D_ZERO = np.zeros(5, dtype=np.float64)
 
 
-def _grid_corners(dx: float = 0.0, dy: float = 0.0) -> np.ndarray:
-    """A deterministic 3x3 board-corner grid (shape (9, 1, 2)) shifted by (dx, dy) pixels."""
-    pts = [
-        [[float(x) + dx, float(y) + dy]]
-        for y in (100.0, 120.0, 140.0)
-        for x in (100.0, 120.0, 140.0)
-    ]
-    return np.asarray(pts, dtype=np.float32)
-
-
-# --- Feature 1: frame-diversity gate (pure) -----------------------------------
-
-
-def test_is_frame_novel_accepts_displaced_and_rejects_near_duplicate() -> None:
-    """A frame shifted well past the threshold is novel; one barely shifted is a near-duplicate."""
-    base = _grid_corners()
-    near_duplicate = _grid_corners(dx=2.0)  # mean per-corner displacement 2.0 px < 8.0
-    displaced = _grid_corners(dx=20.0)  # mean per-corner displacement 20.0 px >= 8.0
-
-    assert is_frame_novel(displaced, [base], 8.0) is True
-    assert is_frame_novel(near_duplicate, [base], 8.0) is False
-
-
-def test_is_frame_novel_first_frame_and_disabled_gate_are_always_novel() -> None:
-    """The first frame (empty history) and any frame under a <=0 threshold are always kept."""
-    base = _grid_corners()
-    near_duplicate = _grid_corners(dx=2.0)
-
-    assert is_frame_novel(base, [], 8.0) is True  # nothing accepted yet
-    assert is_frame_novel(near_duplicate, [base], 0.0) is True  # gate disabled
-
-
-def test_is_frame_novel_ignores_uncomparable_corner_counts() -> None:
-    """An accepted frame with a different corner count cannot prove a duplicate -> treated novel."""
-    base = _grid_corners()
-    partial = base[:4].copy()  # 4 corners vs 9 -> shapes differ, not comparable
-    # Only the uncomparable frame is in history, so the candidate is novel despite being identical.
-    assert is_frame_novel(base, [partial], 8.0) is True
-
-
-# --- Feature 2: save accepted frames separately -------------------------------
-
-
-def test_save_frames_to_dir_count_matches_and_reloads() -> None:
-    """save_frames_to_dir writes exactly one image per frame, re-loadable in capture order."""
-    tmp_dir = Path(tempfile.mkdtemp())
-    try:
-        frames = [np.full((16, 24, 3), i * 10, dtype=np.uint8) for i in range(5)]
-        frames_out = tmp_dir / "frames"
-
-        paths = save_frames_to_dir(frames, frames_out)
-
-        assert len(paths) == len(frames)
-        written = sorted(frames_out.iterdir())
-        assert len(written) == len(frames)
-        assert [p.name for p in written] == [f"frame_{i:03d}.png" for i in range(5)]
-        reloaded = load_frames_from_folder(str(frames_out))
-        assert len(reloaded) == len(frames)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-# --- Feature 3: recalibrate-from-captured-frames on DEGRADED --check ----------
+# --- recalibrate-from-captured-frames on DEGRADED --check ---------------------
 
 
 def _synthetic_detectable_frames(count: int = 12) -> list[np.ndarray]:

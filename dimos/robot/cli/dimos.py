@@ -793,23 +793,6 @@ def cameracalibrate(
     camera_name: str = typer.Option("webcam", "--camera-name", help="Camera name in YAML"),
     target_count: int = typer.Option(20, "--target-count", help="Accepted webcam frame count"),
     no_display: bool = typer.Option(False, "--no-display", help="Disable OpenCV preview windows"),
-    guided: bool = typer.Option(
-        False,
-        "--guided",
-        help=(
-            "COVERAGE-GUIDED capture (webcam/topic): auto-accept only frames that improve board "
-            "X/Y/size/skew coverage, draw progress bars, and print where to move the board next "
-            "(like ROS camera_calibration)."
-        ),
-    ),
-    min_coverage: float | None = typer.Option(
-        None,
-        "--min-coverage",
-        help=(
-            "--guided: finish capture early once overall coverage reaches this fraction [0-1] "
-            "(default off); --target-count stays the hard cap."
-        ),
-    ),
     distortion_model: str = typer.Option(
         "plumb_bob",
         "--distortion-model",
@@ -841,24 +824,6 @@ def cameracalibrate(
         "--no-drift",
         help="--check: skip the fresh-calibration drift comparison (reprojection RMS only).",
     ),
-    min_frame_diff_px: float = typer.Option(
-        8.0,
-        "--min-frame-diff-px",
-        help=(
-            "Frame-diversity gate on the manual SPACE path: accept a frame only if its board "
-            "corners moved at least this many pixels (mean) from the nearest kept frame, so the "
-            "retained views are varied. 0 disables the gate."
-        ),
-    ),
-    frames_out: Path | None = typer.Option(
-        None,
-        "--frames-out",
-        help=(
-            "Directory to save each accepted frame as frame_000.png ... (reusable poses). "
-            "Defaults to a 'frames/' dir next to --out when --out is given; no frames are saved "
-            "otherwise. Applies to calibrate and --check."
-        ),
-    ),
 ) -> None:
     """Calibrate camera intrinsics and write ROS CameraInfo YAML.
 
@@ -880,11 +845,6 @@ def cameracalibrate(
     resolved_cols = int(cols) if cols is not None else 0
     resolved_rows = int(rows) if rows is not None else 0
 
-    # Default: a 'frames/' dir next to --out; skip saving when neither --frames-out nor --out is set.
-    resolved_frames_out = frames_out
-    if resolved_frames_out is None and out is not None:
-        resolved_frames_out = out.parent / "frames"
-
     if check:
         run_check_report(
             source=source,
@@ -902,8 +862,6 @@ def cameracalibrate(
             out=out,
             target_count=target_count,
             no_display=no_display,
-            frames_out=resolved_frames_out,
-            min_frame_diff_px=min_frame_diff_px,
             board=board,
             dict_name=charuco_dict,
             squares_x=squares_x,
@@ -938,10 +896,6 @@ def cameracalibrate(
             squares_y=squares_y,
             marker_size_m=marker_size_m,
             marker_ratio=marker_ratio,
-            coverage_guided=guided,
-            min_coverage=min_coverage,
-            min_frame_diff_px=min_frame_diff_px,
-            frames_out=resolved_frames_out,
         )
     except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -951,8 +905,6 @@ def cameracalibrate(
         f"Detected pattern: {tuple(result.get('pattern_size', (cols, rows)))} "
         f"({result.get('pattern_label', 'requested inner corners')})"
     )
-    if "frames_dir" in result:
-        typer.echo(f"Saved {result.get('n_frames_saved', 0)} frame(s) to {result['frames_dir']}")
     if out is not None:
         typer.echo(f"Wrote camera info YAML to {out}")
     if preview_out is not None:
