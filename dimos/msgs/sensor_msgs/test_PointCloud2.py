@@ -16,8 +16,9 @@
 
 import numpy as np
 import pytest
+import rerun as rr
 
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.sensor_msgs.PointCloud2 import _Z_WINDOW_M, PointCloud2
 from dimos.robot.unitree.type.lidar import pointcloud2_from_webrtc_lidar
 from dimos.utils.testing.replay import SensorReplay
 
@@ -109,6 +110,39 @@ def test_lcm_no_intensity_round_trip() -> None:
 
     decoded_pts, _ = decoded.as_numpy()
     np.testing.assert_allclose(decoded_pts.astype(np.float32), points, atol=1e-6)
+
+
+def _publish_heights(z_values: np.ndarray) -> list[int]:
+    points = np.zeros((len(z_values), 3), dtype=np.float32)
+    points[:, 2] = z_values
+    archetype = PointCloud2.from_numpy(points).to_rerun()
+    assert isinstance(archetype, rr.Points3D) and archetype.class_ids is not None
+    return list(archetype.class_ids.as_arrow_array().to_pylist())
+
+
+def test_coincident_clouds_color_a_shared_height_identically() -> None:
+    """Clouds spanning different z extents give a height they both contain one class_id."""
+    _Z_WINDOW_M[:] = [np.inf, -np.inf]
+
+    merged = _publish_heights(np.append(np.linspace(-0.7, 2.5, 1001), 0.9))  # premap + live
+    live = _publish_heights(np.append(np.linspace(-0.5, 1.3, 1001), 0.9))  # live only, shorter
+
+    assert merged[-1] == live[-1] == 127  # the 0.9 m wall both clouds hold, one color
+
+
+def test_height_above_the_window_widens_it_instead_of_saturating() -> None:
+    """New geometry above the window stretches the ramp; heights pinned to its top spread out."""
+    _Z_WINDOW_M[:] = [np.inf, -np.inf]
+
+    low = _publish_heights(np.linspace(0.0, 1.0, 1001))
+    assert low[-1] == 255  # 1.0 m is the top of the window this first cloud set
+    floor_m = _Z_WINDOW_M[0]
+
+    tall = _publish_heights(np.linspace(0.0, 5.0, 1001))
+
+    assert _Z_WINDOW_M[1] == pytest.approx(4.995, abs=1e-3)  # widened to the new geometry
+    assert _Z_WINDOW_M[0] == pytest.approx(floor_m, abs=1e-6)  # and never narrowed
+    assert tall[200] == 51  # 1.0 m now sits a fifth up the ramp instead of pinned at 255
 
 
 def test_bounding_box_intersects() -> None:

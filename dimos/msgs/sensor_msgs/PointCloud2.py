@@ -55,6 +55,28 @@ def _get_colormap_lut(name: str) -> np.ndarray:
     return (cmap(t)[:, :3] * 255).astype(np.uint8)  # type: ignore[no-any-return]
 
 
+# Height window the turbo ramp is stretched over, in the gravity-aligned world frame. Shared by
+# every cloud in the process, like the LUT above and the AnnotationContext its class_ids index into
+# (fresh state per process, so a replay starts clean). Deriving it per message was the bug:
+# merged_map re-voxelises global_map onto the same 0.05 m grid, so the clouds are coincident, yet
+# each stretched the ramp over its own data and painted one wall voxel two colors that z-fought.
+# It only widens, so new geometry pushes the ramp out instead of clipping; widening on percentiles
+# rather than min/max keeps one stray return at 50 m from flattening it for the session. The cost
+# is that colors drift while the window grows toward the true extent early in a run, then hold.
+# A concurrent publisher can lose a widen to the read-modify-write; the next message re-applies it.
+_Z_WINDOW_PCT = (0.1, 99.9)  # a handful of stray returns cannot move it; real structure can
+_Z_WINDOW_M: list[float] = [np.inf, -np.inf]  # [min, max]
+
+
+def _height_class_ids(z: np.ndarray) -> np.ndarray:
+    """Widen the shared height window to cover z, then index the 256-entry ramp."""
+    low, high = np.percentile(z, _Z_WINDOW_PCT)
+    _Z_WINDOW_M[0] = min(_Z_WINDOW_M[0], float(low))
+    _Z_WINDOW_M[1] = max(_Z_WINDOW_M[1], float(high))
+    span = max(_Z_WINDOW_M[1] - _Z_WINDOW_M[0], 1e-8)  # a flat cloud has no span to divide by
+    return (np.clip((z - _Z_WINDOW_M[0]) / span, 0.0, 1.0) * 255).astype(np.uint8)
+
+
 def register_colormap_annotation(name: str = "turbo") -> None:
     """Register a colormap as AnnotationContext so Rerun resolves colors viewer-side."""
     import rerun as rr
@@ -727,7 +749,7 @@ class PointCloud2(Timestamped):
             point_colors = colors
         else:
             z = points[:, 2]
-            class_ids = ((z - z.min()) / (z.max() - z.min() + 1e-8) * 255).astype(np.uint8)
+            class_ids = _height_class_ids(z)
 
         if mode == "points":
             return rr.Points3D(
