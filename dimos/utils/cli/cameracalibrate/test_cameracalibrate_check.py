@@ -117,6 +117,90 @@ def test_check_calibration_verdict_tracks_intrinsics(fx_scale: float, verdict: s
         assert result["recommendation"]  # non-empty recalibrate hint
 
 
+# Fisheye (Kannala-Brandt) ground truth for the equidistant --check path: fx == fy, principal
+# point centered, 4 coeffs, a small physical barrel.
+_K_FISHEYE = np.array([[400.0, 0.0, 320.0], [0.0, 400.0, 240.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+_D_FISHEYE = np.array([0.02, -0.01, 0.004, -0.001], dtype=np.float64)
+
+
+def _synthetic_fisheye_board_corners(
+    *,
+    count: int = 14,
+    K: np.ndarray = _K_FISHEYE,
+    D: np.ndarray = _D_FISHEYE,
+    noise_px: float = 0.03,
+    seed: int = 7,
+) -> list[np.ndarray]:
+    """Project the checkerboard through a fisheye ``K``/``D`` (cv2.fisheye.projectPoints) -> corners.
+
+    Object points are the same ``_board_object_points`` grid ``check_calibration`` reprojects
+    against; tvec centers the board so the whole (barrel-warped) grid stays in frame. A tiny seeded
+    sub-pixel noise makes the reprojection RMS realistically nonzero.
+    """
+    objp_m = _board_object_points(_COLS, _ROWS, _SQUARE_SIZE_M).astype(np.float64)
+    cx_off = (_COLS - 1) * _SQUARE_SIZE_M / 2  # shift the board origin to the optical axis via tvec
+    cy_off = (_ROWS - 1) * _SQUARE_SIZE_M / 2
+    rng = np.random.default_rng(seed)
+    views: list[np.ndarray] = []
+    while len(views) < count:
+        rvec = rng.uniform(-0.2, 0.2, size=3).reshape(1, 1, 3)
+        tvec = np.array(
+            [
+                -cx_off + rng.uniform(-0.03, 0.03),
+                -cy_off + rng.uniform(-0.03, 0.03),
+                rng.uniform(0.35, 0.5),
+            ],
+            dtype=np.float64,
+        ).reshape(1, 1, 3)
+        imgpts, _ = cv2.fisheye.projectPoints(objp_m.reshape(-1, 1, 3), rvec, tvec, K, D)
+        pts_px = np.asarray(imgpts, dtype=np.float64).reshape(-1, 2)
+        if (
+            pts_px[:, 0].min() < 10
+            or pts_px[:, 0].max() > _WIDTH - 10
+            or pts_px[:, 1].min() < 10
+            or pts_px[:, 1].max() > _HEIGHT - 10
+        ):
+            continue
+        pts_px += rng.normal(0.0, noise_px, size=pts_px.shape)
+        views.append(pts_px.astype(np.float32).reshape(-1, 1, 2))
+    return views
+
+
+@pytest.mark.parametrize(("fx_scale", "verdict"), [(1.0, "OK"), (1.08, "DEGRADED")])
+def test_check_calibration_fisheye_verdict_tracks_intrinsics(fx_scale: float, verdict: str) -> None:
+    """Fisheye (equidistant) deployment: K/D == truth -> OK; fx off 8% -> DEGRADED.
+
+    Exercises the fisheye branch of ``_reproject_rms_px`` (fisheye undistort + projectPoints) and
+    the fisheye fresh-calibration drift solve (``cv2.fisheye.calibrate``), which the pinhole test
+    never reaches. The fresh solve stays fisheye (4 coeffs).
+    """
+    views = _synthetic_fisheye_board_corners(count=14)
+    K = _K_FISHEYE.copy()
+    K[0, 0] *= fx_scale
+    result = check_calibration(
+        views,
+        cols=_COLS,
+        rows=_ROWS,
+        square_size_m=_SQUARE_SIZE_M,
+        K_deployed=K,
+        D_deployed=_D_FISHEYE,
+        distortion_model="equidistant",
+        image_size_wh=(_WIDTH, _HEIGHT),
+    )
+
+    assert result["verdict"] == verdict
+    assert result["n_frames_used"] == 14
+    assert result["drift"]["ran"] is True
+    assert len(result["drift"]["fresh_D"]) == 4  # fisheye refit, not plumb-bob's 5
+    if verdict == "OK":
+        assert result["median_reproj_rms_px"] < 1.0
+        assert result["drift"]["drift_small"] is True
+    else:
+        assert result["median_reproj_rms_px"] > 1.0
+        assert result["drift"]["drift_small"] is False
+        assert result["drift"]["max_rel_intrinsics_drift"] > 0.05
+
+
 def test_check_drift_skipped_when_too_few_frames() -> None:
     """With fewer than the minimum frames, drift is skipped but the RMS verdict still holds."""
     views = _synthetic_board_corners(count=2)
@@ -236,6 +320,20 @@ def test_cli_check_folder_verdict_and_json(tmp_path: Path, fx_scale: float, verd
         assert payload["median_reproj_rms_px"] < 1.0
     else:
         assert "recalibrate this unit" in result.output
+
+
+def test_cli_check_requires_camera_info(tmp_path: Path) -> None:
+    """--check without --camera-info is a clean BadParameter (no silent Go2 default on any camera)."""
+    result = CliRunner().invoke(
+        app,
+        [
+            "--check", "--source", "folder", "--images", str(tmp_path),
+            "--cols", "9", "--rows", "6", "--square-size-m", "0.025", "--no-display",
+        ],
+    )  # fmt: skip
+    assert result.exit_code != 0
+    output_plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output).replace("\n", " ")
+    assert "--camera-info is required" in output_plain, output_plain
 
 
 def test_cli_help_lists_check_flags() -> None:

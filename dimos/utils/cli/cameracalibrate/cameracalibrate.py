@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from functools import cached_property
 import json
 import os
 from pathlib import Path
@@ -39,12 +40,6 @@ import typer
 import yaml
 
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg"})
-
-# Deployed CameraInfo tested by --check when the operator gives no --camera-info. Resolved
-# relative to the dimos package root so it works from any cwd (parents[3] == dimos/).
-_GO2_FRONT_CAMERA_YAML = (
-    Path(__file__).resolve().parents[3] / "robot" / "unitree" / "go2" / "front_camera_720.yaml"
-)
 
 _DEFAULT_CHECK_RMS_THRESHOLD_PX = 1.0  # median reprojection RMS a deployed calib must stay at/below
 _DEFAULT_CHECK_DRIFT_THRESHOLD_FRAC = (
@@ -283,6 +278,11 @@ class CharucoBoardSpec:
     square_size_m: float
     marker_size_m: float
 
+    @cached_property
+    def detector(self) -> Any:  # cv2.aruco.CharucoDetector (no cv2 stub)
+        """One detector per board, reused across every frame (constructing per frame is wasteful)."""
+        return cv2.aruco.CharucoDetector(self.board)
+
 
 @dataclass(frozen=True)
 class _CharucoDetection:
@@ -354,32 +354,15 @@ def build_charuco_board(
 def _detect_charuco(gray: np.ndarray, spec: CharucoBoardSpec) -> _CharucoDetection | None:
     """Detect + interpolate ChArUco corners in one frame (cv2.aruco / OpenCV ArUco).
 
-    Uses ``cv2.aruco.CharucoDetector.detectBoard`` on OpenCV >= 4.7, else the legacy
-    ``detectMarkers`` + ``interpolateCornersCharuco`` path. Returns ``None`` when fewer than
-    ``_MIN_CHARUCO_CORNERS`` corners are recovered. Object points come straight from
+    Uses ``cv2.aruco.CharucoDetector.detectBoard`` (cached on the spec). Returns ``None`` when
+    fewer than ``_MIN_CHARUCO_CORNERS`` corners are recovered. Object points come straight from
     ``board.getChessboardCorners()[ids]`` -- no re-implemented marker or corner math.
     """
     g = _as_grayscale_uint8(gray)
     board = spec.board
 
-    charuco_corners: np.ndarray | None = None
-    charuco_ids: np.ndarray | None = None
-    detector_cls = getattr(cv2.aruco, "CharucoDetector", None)
-    if detector_cls is not None:
-        detector = detector_cls(board)
-        detect_board = cast("Callable[..., tuple[Any, Any, Any, Any]]", detector.detectBoard)
-        charuco_corners, charuco_ids, _marker_corners, _marker_ids = detect_board(g)
-    else:
-        # Legacy OpenCV (< 4.7): detect markers, then interpolate the chessboard corners.
-        dictionary = board.getDictionary()
-        detect_markers = cast("Callable[..., tuple[Any, Any, Any]]", cv2.aruco.detectMarkers)
-        marker_corners, marker_ids, _rejected = detect_markers(g, dictionary)
-        if marker_ids is None or len(marker_ids) == 0:
-            return None
-        interpolate = cast(
-            "Callable[..., tuple[Any, Any, Any]]", cv2.aruco.interpolateCornersCharuco
-        )
-        _n, charuco_corners, charuco_ids = interpolate(marker_corners, marker_ids, g, board)
+    detect_board = cast("Callable[..., tuple[Any, Any, Any, Any]]", spec.detector.detectBoard)
+    charuco_corners, charuco_ids, _marker_corners, _marker_ids = detect_board(g)
 
     if charuco_ids is None or charuco_corners is None or len(charuco_ids) < _MIN_CHARUCO_CORNERS:
         return None
@@ -437,8 +420,7 @@ def _calibrate_charuco_fisheye(
 
     Per view the correspondence is object points = ``board.getChessboardCorners()[ids]`` (meters,
     already selected in ``_detect_charuco``) against the detected ``charucoCorners``. The solve
-    reuses the same ``cv2.fisheye.calibrate`` machinery as the chessboard fisheye path (one fisheye
-    solver): https://docs.opencv.org/4.x/db/d58/group__calib3d__fisheye.html
+    reuses the same ``cv2.fisheye.calibrate`` machinery as the chessboard fisheye path.
     """
     objpoints: list[np.ndarray] = []
     imgpoints: list[np.ndarray] = []
@@ -1472,11 +1454,6 @@ def run_calibration(
     return result
 
 
-def _is_fisheye_model(distortion_model: str) -> bool:
-    """True for the Kannala-Brandt fisheye model. ROS writes it as ``equidistant``."""
-    return distortion_model.strip().lower() in {"equidistant", "fisheye"}
-
-
 def _board_object_points(cols: int, rows: int, square_size_m: float) -> np.ndarray:
     """Checkerboard inner-corner object points on Z=0, XY spacing ``square_size_m`` (meters).
 
@@ -1660,7 +1637,11 @@ def check_calibration(
     if square_size_m <= 0:
         raise ValueError("square_size_m must be > 0")
 
-    fisheye = _is_fisheye_model(distortion_model)
+    # is_fisheye_model (incl. kannala_brandt) is the verified source of truth; import it lazily so
+    # the calibrate path stays free of dimos_lcm (marker_pose -> CameraInfo) -- only --check gets here.
+    from dimos.perception.fiducial.marker_pose import is_fisheye_model
+
+    fisheye = is_fisheye_model(distortion_model)
     K = np.asarray(K_deployed, dtype=np.float64).reshape(3, 3)
     D = np.asarray(D_deployed, dtype=np.float64).reshape(-1, 1)
     objp_m = _board_object_points(cols, rows, square_size_m)
@@ -1751,23 +1732,25 @@ def _finalize_check_result(
 
 
 def _assess_drift_charuco(
-    charuco_corners_per_view: list[np.ndarray],
-    charuco_ids_per_view: list[np.ndarray],
+    detections: list[_CharucoDetection],
     board: Any,
     K_deployed: np.ndarray,
     D_deployed: np.ndarray,
     *,
     image_size_wh: tuple[int, int],
+    fisheye: bool,
     drift_threshold_frac: float,
     run_drift: bool,
 ) -> CheckDriftDict:
-    """Fresh ChArUco calibration (``calibrateCameraCharuco``) vs the deployed intrinsics.
+    """Fresh ChArUco calibration vs the deployed intrinsics, in the DEPLOYED lens model.
 
-    Always a plumb-bob solve (calibrateCameraCharuco has no fisheye variant); the fx/fy/cx/cy
-    drift is still valid against a fisheye-deployed K, and the distortion delta is dropped when the
-    coefficient counts differ. Diagnostic-only: a solver failure becomes ``ran=False``.
+    A fisheye deployment is refit with ``cv2.fisheye.calibrate`` (``_calibrate_charuco_fisheye``)
+    so the fresh intrinsics carry the same model as the deployment -- the recalibration offer never
+    hands a plumb-bob YAML to a fisheye lens. A plumb-bob deployment uses ``calibrateCameraCharuco``.
+    The distortion delta is comparable when the models (hence coeff counts) match. Diagnostic-only:
+    a solver failure becomes ``ran=False`` and can never sink the reprojection verdict.
     """
-    n_views = len(charuco_corners_per_view)
+    n_views = len(detections)
     if not run_drift:
         return {"ran": False, "reason": "drift check disabled (--no-drift)"}
     if n_views < _MIN_DRIFT_CALIBRATION_FRAMES:
@@ -1780,10 +1763,17 @@ def _assess_drift_charuco(
         }
 
     try:
-        fresh_rms_px, K_fresh, D_fresh = _calibrate_charuco(
-            charuco_corners_per_view, charuco_ids_per_view, board, image_size_wh
-        )
-    except cv2.error as exc:
+        if fisheye:
+            fresh_rms_px, K_fresh, D_fresh = _calibrate_charuco_fisheye(detections, image_size_wh)
+        else:
+            fresh_rms_px, K_fresh, D_fresh = _calibrate_charuco(
+                [d.charuco_corners_px for d in detections],
+                [d.charuco_ids for d in detections],
+                board,
+                image_size_wh,
+            )
+    # ValueError: _calibrate_charuco_fisheye's got-vs-want convergence sentinel (diagnostic-only).
+    except (cv2.error, ValueError) as exc:
         return {"ran": False, "reason": f"fresh calibration failed: {exc}"}
 
     return _intrinsics_drift_block(
@@ -1813,13 +1803,17 @@ def check_calibration_charuco(
     Per view, solvePnP recovers the board pose from that view's ``object_points_m`` <->
     ``charuco_corners_px`` correspondence under the deployed intrinsics, then the reprojection RMS
     is computed (``_reproject_rms_px``, cv2.projectPoints / fisheye.projectPoints). Median/p90 and
-    the drift comparison feed ``_finalize_check_result`` unchanged. The deployed lens model may be
-    pinhole or fisheye; only the fresh drift calibration is charuco-native (plumb-bob).
+    the drift comparison feed ``_finalize_check_result`` unchanged. The fresh drift calibration
+    matches the deployed lens model: fisheye deployment -> fisheye refit, else plumb-bob.
     """
     if not detections:
         raise ValueError("detections must be non-empty")
 
-    fisheye = _is_fisheye_model(distortion_model)
+    # is_fisheye_model (incl. kannala_brandt) is the verified source of truth; import it lazily so
+    # the calibrate path stays free of dimos_lcm (marker_pose -> CameraInfo) -- only --check gets here.
+    from dimos.perception.fiducial.marker_pose import is_fisheye_model
+
+    fisheye = is_fisheye_model(distortion_model)
     K = np.asarray(K_deployed, dtype=np.float64).reshape(3, 3)
     D = np.asarray(D_deployed, dtype=np.float64).reshape(-1, 1)
 
@@ -1831,12 +1825,12 @@ def check_calibration_charuco(
             per_view_rms_px.append(rms_px)
 
     drift = _assess_drift_charuco(
-        [d.charuco_corners_px for d in detections],
-        [d.charuco_ids for d in detections],
+        detections,
         board_spec.board,
         K,
         D,
         image_size_wh=image_size_wh,
+        fisheye=fisheye,
         drift_threshold_frac=drift_threshold_frac,
         run_drift=run_drift,
     )
@@ -1914,15 +1908,14 @@ def _write_check_json(path: Path, result: CalibrationCheckRunResultDict) -> None
 def write_recalibration_from_check(
     result: CalibrationCheckRunResultDict,
     out_yaml: Path,
-    *,
-    board: BoardType | str,
 ) -> Path:
     """Write the fresh intrinsics ``--check`` already computed to a CameraInfo YAML (no re-solve).
 
     Reuses ``result['drift']['fresh_K']/['fresh_D']`` so no second calibration is run. The fresh
-    chessboard solve used the deployed lens model (its ROS name carries over); the fresh ChArUco
-    solve is always plumb-bob. Raises ``ValueError`` (got-vs-want) when the drift solve did not run
-    (too few frames), i.e. there are no fresh intrinsics to emit.
+    solve (chessboard or ChArUco) uses the deployed lens model, so its ROS name carries straight
+    over -- a fisheye deployment yields an ``equidistant`` YAML, never a plumb-bob mismatch. Raises
+    ``ValueError`` (got-vs-want) when the drift solve did not run (too few frames), i.e. there are
+    no fresh intrinsics to emit.
     """
     drift = result["drift"]
     if not drift.get("ran") or "fresh_K" not in drift:
@@ -1932,8 +1925,7 @@ def write_recalibration_from_check(
         )
     K_fresh = np.asarray(drift["fresh_K"], dtype=np.float64).reshape(3, 3)
     D_fresh = np.asarray(drift["fresh_D"], dtype=np.float64).ravel()
-    board_type = BoardType(board)
-    fresh_model = "plumb_bob" if board_type is BoardType.charuco else result["distortion_model"]
+    fresh_model = result["distortion_model"]
     w, h = result["image_size_wh"]
     out_yaml.parent.mkdir(parents=True, exist_ok=True)
     write_camera_info_yaml(
@@ -2223,7 +2215,7 @@ def run_check_report(
         ):
             default_yaml = Path(result["out_path"]).with_name("recalibrated.yaml")
             target = Path(typer.prompt("Output YAML path", default=str(default_yaml)))
-            written = write_recalibration_from_check(result, target, board=board)
+            written = write_recalibration_from_check(result, target)
             typer.echo(f"Wrote fresh recalibration YAML to {written}")
 
 
@@ -2282,7 +2274,14 @@ def calibrate(
         "--marker-size-m",
         help="--board charuco: aruco marker size in meters (overrides --marker-ratio).",
     ),
-    out: Path | None = typer.Option(None, "--out", help="Optional ROS CameraInfo YAML output path"),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help=(
+            "Calibrate: ROS CameraInfo YAML output path. --check: JSON report output path "
+            "(default: next to the source)."
+        ),
+    ),
     preview_out: Path | None = typer.Argument(
         None, help="Optional preview PNG output path. Requires --out."
     ),
@@ -2302,14 +2301,15 @@ def calibrate(
         False,
         "--check",
         help=(
-            "CHECK mode: instead of calibrating, verify a DEPLOYED CameraInfo (--camera-info) "
-            "against the boards seen on this source and report reprojection RMS + intrinsics drift."
+            "CHECK mode: verify a DEPLOYED CameraInfo (--camera-info) against the boards on this "
+            "source -- reports reprojection RMS and, via a fresh calibration on the same frames, "
+            "intrinsics drift."
         ),
     ),
-    camera_info: Path = typer.Option(
-        _GO2_FRONT_CAMERA_YAML,
+    camera_info: Path | None = typer.Option(
+        None,
         "--camera-info",
-        help="--check: deployed CameraInfo YAML to test (default: Go2 front 720p static calib).",
+        help="--check: deployed CameraInfo YAML to test (required with --check).",
     ),
     rms_threshold_px: float = typer.Option(
         _DEFAULT_CHECK_RMS_THRESHOLD_PX,
@@ -2325,8 +2325,9 @@ def calibrate(
     """Calibrate camera intrinsics and write ROS CameraInfo YAML.
 
     With ``--check`` the command scores how well ``--camera-info`` explains the boards on this
-    source instead of calibrating: it writes a JSON report to ``--out`` (or a default next to the
-    source), and on a DEGRADED result offers to write a fresh CameraInfo YAML from the same frames.
+    source (running a fresh calibration on the same frames for the drift comparison) rather than
+    producing a calibration: it writes a JSON report to ``--out`` (or a default next to the source),
+    and on a DEGRADED result offers to write a fresh CameraInfo YAML from the same frames.
     """
     if board is BoardType.chessboard and (cols is None or rows is None):
         raise typer.BadParameter("--cols and --rows are required when --board chessboard")
@@ -2336,6 +2337,8 @@ def calibrate(
     resolved_rows = int(rows) if rows is not None else 0
 
     if check:
+        if camera_info is None:
+            raise typer.BadParameter("--camera-info is required with --check")
         run_check_report(
             source=source,
             device_index=device_index,

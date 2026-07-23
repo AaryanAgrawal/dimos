@@ -44,6 +44,7 @@ from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     calibrate_from_frames_charuco,
     check_calibration_charuco,
     write_camera_info_yaml,
+    write_recalibration_from_check,
 )
 
 _WIDTH, _HEIGHT = 640, 480
@@ -226,6 +227,44 @@ def test_check_charuco_verdict_tracks_intrinsics(fx_scale: float, verdict: str) 
 def test_check_charuco_empty_detections_raises() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         check_calibration_charuco([], **_check_kwargs(_K_TRUE, _D_TRUE, _board_spec()))  # type: ignore[arg-type]
+
+
+def test_check_charuco_fisheye_deployment_refits_fisheye_not_plumb_bob(tmp_path: Path) -> None:
+    """A DEGRADED fisheye ChArUco deployment refits FISHEYE, not plumb-bob.
+
+    The drift solve uses the deployed lens model, so the fresh intrinsics are Kannala-Brandt (4
+    coeffs) and the recalibration YAML stays ``equidistant`` -- never a plumb-bob YAML handed to a
+    fisheye lens. Deployed fx is off 8% off the constructed fisheye truth, so the verdict is DEGRADED
+    and the fresh solve recovers the true fx.
+    """
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+
+    spec = _board_spec()
+    detections = _synthetic_charuco_fisheye_detections(spec, count=15)
+    K_bad = _K_FISHEYE.copy()
+    K_bad[0, 0] *= 1.08  # fx off 8% -> DEGRADED
+    result = check_calibration_charuco(
+        detections,
+        board_spec=spec,
+        K_deployed=K_bad,
+        D_deployed=_D_FISHEYE,
+        distortion_model="equidistant",
+        image_size_wh=(_WIDTH, _HEIGHT),
+    )
+
+    assert result["verdict"] == "DEGRADED"
+    assert result["drift"]["ran"] is True
+    # Fisheye refit: exactly the 4 Kannala-Brandt coeffs, never the 5-coeff plumb-bob vector.
+    assert len(result["drift"]["fresh_D"]) == 4
+
+    target = tmp_path / "recalibrated.yaml"
+    written = write_recalibration_from_check(result, target)  # type: ignore[arg-type]
+    info = CameraInfo.from_yaml(str(written))
+    assert info.distortion_model == "equidistant"
+    assert len(info.get_D_coeffs()) == 4
+    # The fresh solve recovers the true fisheye fx, not the deployed (bad) one.
+    fx = float(info.get_K_matrix()[0, 0])
+    assert abs(fx - _K_FISHEYE[0, 0]) < abs(fx - K_bad[0, 0])
 
 
 # --- folder end-to-end over a rendered board (REAL cv2.aruco detection path) -------------------

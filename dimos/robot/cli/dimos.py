@@ -786,7 +786,14 @@ def cameracalibrate(
         "--marker-size-m",
         help="--board charuco: aruco marker size in meters (overrides --marker-ratio).",
     ),
-    out: Path | None = typer.Option(None, "--out", help="Optional ROS CameraInfo YAML output path"),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help=(
+            "Calibrate: ROS CameraInfo YAML output path. --check: JSON report output path "
+            "(default: next to the source)."
+        ),
+    ),
     preview_out: Path | None = typer.Argument(
         None, help="Optional preview PNG output path. Requires --out."
     ),
@@ -805,14 +812,15 @@ def cameracalibrate(
         False,
         "--check",
         help=(
-            "CHECK mode: instead of calibrating, verify a DEPLOYED CameraInfo (--camera-info) "
-            "against the boards seen on this source and report reprojection RMS + intrinsics drift."
+            "CHECK mode: verify a DEPLOYED CameraInfo (--camera-info) against the boards on this "
+            "source -- reports reprojection RMS and, via a fresh calibration on the same frames, "
+            "intrinsics drift."
         ),
     ),
     camera_info: Path | None = typer.Option(
         None,
         "--camera-info",
-        help="--check: deployed CameraInfo YAML to test (default: Go2 front 720p static calib).",
+        help="--check: deployed CameraInfo YAML to test (required with --check).",
     ),
     rms_threshold_px: float = typer.Option(
         1.0,
@@ -828,12 +836,12 @@ def cameracalibrate(
     """Calibrate camera intrinsics and write ROS CameraInfo YAML.
 
     With ``--check`` the command scores how well ``--camera-info`` explains the boards on this
-    source instead of calibrating: it writes a JSON report to ``--out`` (or a default next to the
-    source), and on a DEGRADED result offers to write a fresh CameraInfo YAML from the same frames.
+    source (running a fresh calibration on the same frames for the drift comparison) rather than
+    producing a calibration: it writes a JSON report to ``--out`` (or a default next to the source),
+    and on a DEGRADED result offers to write a fresh CameraInfo YAML from the same frames.
     """
     from dimos.utils.cli.cameracalibrate.cameracalibrate import (
         _DEFAULT_CHECK_DRIFT_THRESHOLD_FRAC,
-        _GO2_FRONT_CAMERA_YAML,
         run_calibration,
         run_check_report,
     )
@@ -846,6 +854,8 @@ def cameracalibrate(
     resolved_rows = int(rows) if rows is not None else 0
 
     if check:
+        if camera_info is None:
+            raise typer.BadParameter("--camera-info is required with --check")
         run_check_report(
             source=source,
             device_index=device_index,
@@ -855,7 +865,7 @@ def cameracalibrate(
             cols=resolved_cols,
             rows=resolved_rows,
             square_size_m=square_size_m,
-            camera_info=camera_info if camera_info is not None else _GO2_FRONT_CAMERA_YAML,
+            camera_info=camera_info,
             rms_threshold_px=rms_threshold_px,
             drift_threshold_frac=_DEFAULT_CHECK_DRIFT_THRESHOLD_FRAC,
             check_drift=not no_drift,

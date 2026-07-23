@@ -171,7 +171,7 @@ def test_write_recalibration_from_check_emits_loadable_fresh_yaml(tmp_path: Path
     assert result["verdict"] == "DEGRADED"  # type: ignore[index]
 
     target = tmp_path / "recalibrated.yaml"
-    written = write_recalibration_from_check(result, target, board="chessboard")
+    written = write_recalibration_from_check(result, target)
 
     assert written == target
     assert target.exists()
