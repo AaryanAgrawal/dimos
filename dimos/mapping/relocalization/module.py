@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections import deque
+import threading
 import time
 from typing import Any, TypeVar
 
@@ -135,6 +136,9 @@ class RelocalizationModule(Module):
         self._fiducial_prior: FiducialPrior | None = None
         # Latest global_map, so a completed tag burst is judged the instant it lands. Sound because the stream ACCUMULATES in the world frame: the previous cloud scores wall fitness as well as the newest, and the tag candidate needs no lidar at all.
         self._last_local_map: PointCloud2 | None = None
+        # Guards the publish decision only: the solve stays outside, so a 7 s RANSAC sweep never blocks a 0.1 s tag fix.
+        self._publish_lock = threading.Lock()
+        self._last_solve_start_s = 0.0
 
     @rpc
     def start(self) -> None:
@@ -311,7 +315,12 @@ class RelocalizationModule(Module):
         n_pts = len(msg)
         if not self._fitness_ok(prior, fitness, dt, n_pts):
             return None
-        return self._publish_fix(map_T_world, prior, fitness, dt, n_pts)
+        # The two _fire paths run on separate backpressure threads, so a slow RANSAC solve can outlive a fiducial fix that started later; publishing it would rewind the anchor.
+        with self._publish_lock:
+            if t0 < self._last_solve_start_s:
+                return None
+            self._last_solve_start_s = t0
+            return self._publish_fix(map_T_world, prior, fitness, dt, n_pts)
 
     def _solve(self, msg: PointCloud2, prior: RelocPrior) -> tuple[np.ndarray, float] | None:
         """Judge this prior's candidates, turning each refusal into a None sentinel."""
