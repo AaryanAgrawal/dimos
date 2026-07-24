@@ -756,7 +756,7 @@ def main(
             # Write the aggregated marker map alongside the exported premap, sharing its stem.
             marker_map_path = Path.cwd() / f"{db_path.stem}.marker_map.json"
             if in_gate:
-                from dimos.mapping.relocalization.priors import write_marker_map
+                from dimos.mapping.relocalization.utils import write_marker_map
                 from dimos.perception.fiducial.apriltag_aggregation import aggregate_by_marker_id
 
                 fused = aggregate_by_marker_id(in_gate)

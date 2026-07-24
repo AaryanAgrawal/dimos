@@ -26,7 +26,11 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.mapping.relocalization.eval import SourceTally, format_eval_summary
-from dimos.mapping.relocalization.priors import (
+from dimos.mapping.relocalization.relocalize import (
+    InsufficientWallEvidenceError,
+    NoUprightCandidateError,
+)
+from dimos.mapping.relocalization.utils import (
     FiducialPrior,
     FiducialPriorConfig,
     PriorConfig,
@@ -35,10 +39,6 @@ from dimos.mapping.relocalization.priors import (
     RelocPrior,
     load_marker_map,
     relocalize_with_prior,
-)
-from dimos.mapping.relocalization.relocalize import (
-    InsufficientWallEvidenceError,
-    NoUprightCandidateError,
 )
 from dimos.mapping.voxels import VoxelGrid
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
