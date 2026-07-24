@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from dimos.msgs.geometry_msgs.Transform import Transform
     from dimos.msgs.sensor_msgs.Image import Image
     from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-    from dimos.perception.fiducial.apriltag_aggregation import AggregationConfig, Pose7
+    from dimos.perception.fiducial.marker_aggregation import AggregationConfig, Pose7
 
 PATH_THICKNESS = 0.01
 # Pin pattern (from dimos/memory2/vis/space/rerun.py): thin vertical line
@@ -347,7 +347,7 @@ def _marker_observations(
     graph: PoseGraph | None,
 ) -> list[Any]:
     """PGO-correct each detection into the map frame and wrap it as a TagObservation carrying all four gate inputs."""
-    from dimos.perception.fiducial.apriltag_aggregation import (
+    from dimos.perception.fiducial.marker_aggregation import (
         TagObservation,
         camera_relative_quality,
         tag_side_px,
@@ -378,7 +378,7 @@ def _gate_observations(
     observations: list[Any], config: AggregationConfig
 ) -> tuple[list[Any], Counter[str]]:
     """Keep the glimpses clearing every per-glimpse gate; tally the rest by rejection reason."""
-    from dimos.perception.fiducial.apriltag_aggregation import gate_reason
+    from dimos.perception.fiducial.marker_aggregation import gate_reason
 
     kept: list[Any] = []
     rejected: Counter[str] = Counter()
@@ -756,7 +756,7 @@ def main(
             # Write the aggregated marker map alongside the exported premap, sharing its stem.
             marker_map_path = Path.cwd() / f"{db_path.stem}.marker_map.json"
             if in_gate:
-                from dimos.perception.fiducial.apriltag_aggregation import aggregate_by_marker_id
+                from dimos.perception.fiducial.marker_aggregation import aggregate_by_marker_id
                 from dimos.perception.fiducial.marker_map import write_marker_map
 
                 fused = aggregate_by_marker_id(in_gate)

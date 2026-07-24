@@ -48,7 +48,7 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
-from dimos.perception.fiducial.apriltag_aggregation import matrix_from_pose7
+from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7
 from dimos.perception.fiducial.marker_map import (
     MARKER_MAP_SUFFIX,
     load_marker_map,

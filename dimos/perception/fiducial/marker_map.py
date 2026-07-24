@@ -26,7 +26,7 @@ import numpy as np
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.perception.fiducial.apriltag_aggregation import Pose7
+from dimos.perception.fiducial.marker_aggregation import Pose7
 
 MAP_FRAME = "map"
 MARKER_MAP_SUFFIX = ".json"  # what write_marker_map emits and load_marker_map parses

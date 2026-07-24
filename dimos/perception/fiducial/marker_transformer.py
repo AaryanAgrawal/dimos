@@ -51,7 +51,7 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.detection.type.detection3d.imageDetections3D import ImageDetections3D
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
-from dimos.perception.fiducial.apriltag_aggregation import (
+from dimos.perception.fiducial.marker_aggregation import (
     AggregationConfig,
     Pose7,
     TagAggregator,
