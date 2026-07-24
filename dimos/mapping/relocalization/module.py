@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import deque
 from pathlib import Path
 import time
 from typing import Any
@@ -46,6 +47,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
+from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
 from dimos.perception.fiducial.apriltag_aggregation import matrix_from_pose7
 from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
 from dimos.utils.data import resolve_named_path
@@ -61,6 +63,9 @@ PUBLISH_INTERVAL = 2.0  # for loaded_map + TF
 MAP_SUFFIX = ".pc2.lcm"
 MARKER_MAP_SUFFIX = ".json"  # what write_marker_map emits and load_marker_map parses
 SKIP_LOG_INTERVAL_S = 5.0  # s; throttle relocalize-skip warnings so a starved feed can't spam
+# EntityMarkers.TYPE_COLORS key per prior, so the two read apart in rerun: ransac blue, fiducial green.
+FIX_MARKER_TYPE = {"ransac": "location", "fiducial": "object"}
+MAX_FIX_MARKERS = 500  # a 730 s survey polls RANSAC ~365 times, so a whole run fits
 
 
 class Config(ModuleConfig):
@@ -99,6 +104,7 @@ class RelocalizationModule(Module):
     aggregated_detections: In[Detection3DArray]  # the detector's per-burst aggregated tag poses
     loaded_map: Out[PointCloud2]
     merged_map: Out[PointCloud2]
+    fix_markers: Out[EntityMarkers]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -106,6 +112,8 @@ class RelocalizationModule(Module):
         self._last_skip_log = 0.0
         # Per-source accept/reject tally, filled only under verbose_eval_logging (--eval) and rendered once at stop(). The module already owns the accept/reject data.
         self._eval_tally: dict[str, SourceTally] = {}
+        # Accepted-fix trail for rerun, filled only under verbose_eval_logging (--eval) and republished whole so the view accumulates.
+        self._fix_markers: deque[Marker] = deque(maxlen=MAX_FIX_MARKERS)
         self._world_to_map: Subject[Transform | None] = Subject()
         # Prior objects are built ONCE, not per frame: the fiducial holds pending-fix state across bursts that a fresh instance would reset. The RANSAC prior is a pure source; the module owns its poll timer (below).
         ransac_entry = next(
@@ -376,6 +384,7 @@ class RelocalizationModule(Module):
         # so inverse the transform T here to get map_in_scan_frame
         world_T_map = np.linalg.inv(map_T_world)
         self._log_accept(prior, fitness, dt, n_pts, map_T_world, world_T_map)
+        self._publish_fix_marker(prior, fitness, world_T_map)
         return Transform(
             translation=Vector3(*world_T_map[:3, 3]),
             rotation=Quaternion.from_rotation_matrix(world_T_map[:3, :3]),
@@ -404,6 +413,26 @@ class RelocalizationModule(Module):
             f"published_t={world_T_map[:3, 3].round(3).tolist()} "
             f"source={prior.name} "
         )
+
+    def _publish_fix_marker(
+        self, prior: RelocPrior, fitness: float, world_T_map: np.ndarray
+    ) -> None:
+        """Append this accepted fix to the rerun marker trail and republish the trail."""
+        if not self.config.verbose_eval_logging:
+            return
+        # EntityMarkers carries no frame_id, so the bridge leaves it unparented at the rerun root -- the world frame the live clouds are drawn in.
+        x, y, z = world_T_map[:3, 3]
+        self._fix_markers.append(
+            Marker(
+                entity_id=prior.name,
+                label=f"{fitness:.2f}",
+                entity_type=FIX_MARKER_TYPE.get(prior.name, ""),
+                x=float(x),
+                y=float(y),
+                z=float(z),
+            )
+        )
+        self.fix_markers.publish(EntityMarkers(markers=list(self._fix_markers)))
 
     def _publish_periodic(self, pair: tuple[int, Transform]) -> None:
         _, tf = pair
