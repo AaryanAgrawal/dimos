@@ -17,10 +17,8 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import threading
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
@@ -30,10 +28,6 @@ from dimos.mapping.relocalization.relocalize import (
     generate_ransac_candidates,
     refine_candidates,
 )
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-from dimos.msgs.geometry_msgs.Transform import Transform
-from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.perception.fiducial.apriltag_aggregation import Pose7
 from dimos.protocol.service.spec import BaseConfig
 
 # One pydantic config per prior, keyed by a Literal ``type`` into a discriminated union. Pattern from dimos/manipulation/planning/kinematics/config.py:26-57.
@@ -95,62 +89,6 @@ class RansacPrior:
         local_map: o3d.geometry.PointCloud,
     ) -> list[np.ndarray]:
         return generate_ransac_candidates(global_map, local_map)
-
-
-MAP_FRAME = "map"
-
-
-def _validated_entry(marker_id: int, entry: dict[str, Any]) -> Transform:
-    """Validate one survey entry into a ``map_T_marker`` Transform, failing loudly on a short translation or zero-norm quaternion."""
-    translation, rotation = entry["translation"], entry["rotation"]
-    if not isinstance(translation, (list, tuple)) or len(translation) != 3:
-        raise ValueError(f"marker {marker_id}: translation must be [x, y, z], got {translation!r}")
-    if not isinstance(rotation, (list, tuple)) or len(rotation) != 4:
-        raise ValueError(f"marker {marker_id}: rotation must be [x, y, z, w], got {rotation!r}")
-    if not np.all(np.isfinite(np.asarray(translation, dtype=np.float64))):
-        raise ValueError(f"marker {marker_id}: translation must be finite, got {translation!r}")
-    norm = float(np.linalg.norm(np.asarray(rotation, dtype=np.float64)))
-    if (
-        not np.isfinite(norm) or norm < 1e-6
-    ):  # 1e-6: unnormalizable, floor below a unit quaternion's round-off
-        raise ValueError(f"marker {marker_id}: rotation quaternion norm is {norm}, not usable")
-    return Transform(
-        translation=Vector3(*translation),
-        rotation=Quaternion(*rotation),
-        frame_id=MAP_FRAME,
-        child_frame_id=f"marker_{marker_id}",
-    )
-
-
-def load_marker_map(path: str | Path) -> dict[int, Transform]:
-    """``marker_id -> map_T_marker`` from a survey JSON (the format ``write_marker_map`` emits)."""
-    data = json.loads(Path(path).read_text()) or {}
-    return {
-        int(marker_id): _validated_entry(int(marker_id), entry)
-        for marker_id, entry in (data.get("markers", {}) or {}).items()
-    }
-
-
-def write_marker_map(path: Path, aggregated: dict[int, tuple[Pose7, int]], *, source: str) -> None:
-    """Serialize aggregated ``map_T_tag`` poses to the JSON ``load_marker_map`` reads."""
-    doc = {
-        "meta": {
-            "schema": "map_T_tag",
-            "source_recording": source,
-            "n_detections_aggregated": {
-                str(mid): n for mid, (_pose, n) in sorted(aggregated.items())
-            },
-        },
-        "markers": {
-            str(marker_id): {
-                "translation": [pose[0], pose[1], pose[2]],
-                "rotation": [pose[3], pose[4], pose[5], pose[6]],
-            }
-            for marker_id, (pose, _n) in sorted(aggregated.items())
-        },
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2))
 
 
 class FiducialPrior:

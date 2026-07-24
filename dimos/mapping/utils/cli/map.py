@@ -756,8 +756,8 @@ def main(
             # Write the aggregated marker map alongside the exported premap, sharing its stem.
             marker_map_path = Path.cwd() / f"{db_path.stem}.marker_map.json"
             if in_gate:
-                from dimos.mapping.relocalization.utils import write_marker_map
                 from dimos.perception.fiducial.apriltag_aggregation import aggregate_by_marker_id
+                from dimos.perception.fiducial.marker_map import write_marker_map
 
                 fused = aggregate_by_marker_id(in_gate)
                 # thinner than min_observations leaves the Huber fit no redundancy to reject a mirror flip with
@@ -766,7 +766,12 @@ def main(
                     for marker_id, (pose, n) in fused.items()
                     if n >= aggregation.min_observations
                 }
-                write_marker_map(marker_map_path, aggregated_markers, source=db_path.name)
+                write_marker_map(
+                    marker_map_path,
+                    aggregated_markers,
+                    source=db_path.name,
+                    marker_length_m=marker_size,
+                )
                 aggregated_ids = sorted(aggregated_markers)
                 print(
                     f"wrote aggregated marker locations: {len(aggregated_ids)} tags "

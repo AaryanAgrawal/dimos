@@ -41,12 +41,14 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
 from dimos.perception.fiducial.apriltag_aggregation import AggregationConfig
+from dimos.perception.fiducial.marker_map import MARKER_MAP_SUFFIX, marker_length_m_from_map
 from dimos.perception.fiducial.marker_pose import camera_optical_frame_id, is_fisheye_model
 from dimos.perception.fiducial.marker_transformer import (
     AggregateTagBursts,
     DetectMarkers,
     MarkersPerFrame,
 )
+from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -60,6 +62,8 @@ class MarkerDetectionStreamModuleConfig(ModuleConfig):
     marker_length_m: float = Field(
         ..., gt=0.0, description="Physical square marker edge length in meters."
     )
+    # Survey marker map (.json from `dimos map global --markers --export`); the marker_length_m it stamped wins over the field above, so the two solve at one scale.
+    marker_map_file: str | None = None
     quality_window_s: float = Field(0.5, gt=0.0)
     smoothing_window: float = Field(0.0, ge=0.0)
     speed_limit_enabled: bool = False
@@ -93,6 +97,17 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
             self.config.world_frame,
         )
 
+    def _marker_length_m(self) -> float:
+        """The tag size the marker map was surveyed at, falling back to the configured one."""
+        if not self.config.marker_map_file:
+            return self.config.marker_length_m
+        path = resolve_named_path(self.config.marker_map_file, MARKER_MAP_SUFFIX)
+        surveyed = marker_length_m_from_map(path)
+        if surveyed is None:
+            return self.config.marker_length_m
+        logger.info("marker size from map", marker_length_m=surveyed, marker_map_file=str(path))
+        return surveyed
+
     def pipeline(self, stream: Stream[Image]) -> Stream[Detection3DArray]:
         result: Stream[Any] = stream.transform(
             QualityWindow(lambda img: img.sharpness, window=self.config.quality_window_s)
@@ -110,7 +125,7 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
             result.transform(
                 DetectMarkers(
                     camera_info=self.config.camera_info,
-                    marker_length_m=self.config.marker_length_m,
+                    marker_length_m=self._marker_length_m(),
                     aruco_dictionary=self.config.aruco_dictionary,
                     world_frame=self.config.world_frame,
                     smoothing_window=self.config.smoothing_window,

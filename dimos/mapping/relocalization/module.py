@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from collections import deque
-from pathlib import Path
 import time
 from typing import Any
 
@@ -26,19 +25,18 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.mapping.relocalization.eval import SourceTally, format_eval_summary
-from dimos.mapping.relocalization.relocalize import (
-    InsufficientWallEvidenceError,
-    NoUprightCandidateError,
-)
-from dimos.mapping.relocalization.utils import (
+from dimos.mapping.relocalization.priors import (
     FiducialPrior,
     FiducialPriorConfig,
     PriorConfig,
     RansacPrior,
     RansacPriorConfig,
     RelocPrior,
-    load_marker_map,
     relocalize_with_prior,
+)
+from dimos.mapping.relocalization.relocalize import (
+    InsufficientWallEvidenceError,
+    NoUprightCandidateError,
 )
 from dimos.mapping.voxels import VoxelGrid
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -49,6 +47,7 @@ from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
 from dimos.perception.fiducial.apriltag_aggregation import matrix_from_pose7
+from dimos.perception.fiducial.marker_map import MARKER_MAP_SUFFIX, load_marker_map
 from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
@@ -61,7 +60,6 @@ FRAME_WORLD = "world"
 
 PUBLISH_INTERVAL = 2.0  # for loaded_map + TF
 MAP_SUFFIX = ".pc2.lcm"
-MARKER_MAP_SUFFIX = ".json"  # what write_marker_map emits and load_marker_map parses
 SKIP_LOG_INTERVAL_S = 5.0  # s; throttle relocalize-skip warnings so a starved feed can't spam
 # EntityMarkers.TYPE_COLORS key per prior, so the two read apart in rerun: ransac blue, fiducial green.
 FIX_MARKER_TYPE = {"ransac": "location", "fiducial": "object"}
@@ -208,12 +206,10 @@ class RelocalizationModule(Module):
                 "relocalize: fiducial prior enabled but no marker_map_file; fiducial prior disabled"
             )
             return
-        # A bare name gets the default suffix; a name that already carries it keeps it (resolve_named_path would otherwise look up "<survey>.json.json").
-        suffix = "" if Path(marker_map_file).suffix == MARKER_MAP_SUFFIX else MARKER_MAP_SUFFIX
         marker_map = {
             marker_id: transform.to_matrix()
             for marker_id, transform in load_marker_map(
-                resolve_named_path(marker_map_file, suffix)
+                resolve_named_path(marker_map_file, MARKER_MAP_SUFFIX)
             ).items()
         }
         self._fiducial_prior = FiducialPrior(marker_map)
