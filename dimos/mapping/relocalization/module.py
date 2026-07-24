@@ -14,7 +14,7 @@
 
 from collections import deque
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from pydantic import model_validator
@@ -29,6 +29,7 @@ from dimos.mapping.relocalization.priors import (
     FiducialPrior,
     FiducialPriorConfig,
     PriorConfig,
+    PriorConfigBase,
     RansacPrior,
     RansacPriorConfig,
     RelocPrior,
@@ -62,8 +63,10 @@ PUBLISH_INTERVAL = 2.0  # for loaded_map + TF
 MAP_SUFFIX = ".pc2.lcm"
 SKIP_LOG_INTERVAL_S = 5.0  # s; throttle relocalize-skip warnings so a starved feed can't spam
 # EntityMarkers.TYPE_COLORS key per prior, so the two read apart in rerun: ransac blue, fiducial green.
-FIX_MARKER_TYPE = {"ransac": "location", "fiducial": "object"}
-MAX_FIX_MARKERS = 500  # a 730 s survey polls RANSAC ~365 times, so a whole run fits
+ACCEPTED_FIX_TYPE = {"ransac": "location", "fiducial": "object"}
+MAX_ACCEPTED_FIXES = 500  # a 730 s survey polls RANSAC ~365 times, so a whole run fits
+
+_PriorConfigT = TypeVar("_PriorConfigT", bound=PriorConfigBase)
 
 
 class Config(ModuleConfig):
@@ -102,7 +105,7 @@ class RelocalizationModule(Module):
     aggregated_detections: In[Detection3DArray]  # the detector's per-burst aggregated tag poses
     loaded_map: Out[PointCloud2]
     merged_map: Out[PointCloud2]
-    fix_markers: Out[EntityMarkers]
+    accepted_fixes: Out[EntityMarkers]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -111,23 +114,19 @@ class RelocalizationModule(Module):
         # Per-source accept/reject tally, filled only under verbose_eval_logging (--eval) and rendered once at stop(). The module already owns the accept/reject data.
         self._eval_tally: dict[str, SourceTally] = {}
         # Accepted-fix trail for rerun, filled only under verbose_eval_logging (--eval) and republished whole so the view accumulates.
-        self._fix_markers: deque[Marker] = deque(maxlen=MAX_FIX_MARKERS)
+        self._accepted_fixes: deque[Marker] = deque(maxlen=MAX_ACCEPTED_FIXES)
         self._world_to_map: Subject[Transform | None] = Subject()
         # Prior objects are built ONCE, not per frame: the fiducial holds pending-fix state across bursts that a fresh instance would reset. The RANSAC prior is a pure source; the module owns its poll timer (below).
-        ransac_entry = next(
-            (p for p in self.config.priors.values() if isinstance(p, RansacPriorConfig)),
-            RansacPriorConfig(),
-        )
-        self._ransac_prior = RansacPrior()
+        ransac = self._enabled_entry(RansacPriorConfig)
+        self._ransac_prior = RansacPrior() if ransac else None
         # Per-source accept gate {prior name: min wall fitness}. Key = the entry's `type` discriminator, which equals the ``name`` of the prior it builds.
         self._accept_threshold: dict[str, float] = {
             p.type: p.fitness_threshold for p in self.config.priors.values()
         }
-        # RANSAC poll timer (the prior is a pure source): its interval and last fire. None == never fired, so the first dense-enough frame relocalizes immediately.
-        self._ransac_interval_s = ransac_entry.interval_s
+        # RANSAC poll timer and its point floor, both read only while the prior is up (0 while it is down). Last fire None == never fired, so the first dense-enough frame relocalizes immediately.
+        self._ransac_interval_s = ransac.interval_s if ransac else 0.0
+        self._ransac_min_local_points = ransac.min_local_points if ransac else 0
         self._last_ransac_fired_s: float | None = None
-        # RANSAC-only point floor (a fiducial burst fires regardless); read from the ransac entry, or the default when no ransac entry is enabled (then unused).
-        self._ransac_min_local_points = ransac_entry.min_local_points
         # Built in start() once the marker map is loaded (needs map_T_marker).
         self._fiducial_prior: FiducialPrior | None = None
         # Latest global_map, so a completed tag burst is judged the instant it lands. Sound because the stream ACCUMULATES in the world frame: the previous cloud scores wall fitness as well as the newest, and the tag candidate needs no lidar at all.
@@ -174,7 +173,7 @@ class RelocalizationModule(Module):
             f"loaded_map.frame_id={self._premap.frame_id!r}"
         )
         # Both priors default on and the blueprint names none, so this is where an operator sees what actually came up: an enabled fiducial entry with no marker map is inert.
-        live = [prior.name for prior in self._enabled_prior_objects()]
+        live = [p.name for p in (self._ransac_prior, self._fiducial_prior) if p is not None]
         logger.info(
             "relocalize priors",
             live=live,
@@ -188,16 +187,14 @@ class RelocalizationModule(Module):
             logger.info("relocalize eval summary", table=format_eval_summary(self._eval_tally))
         super().stop()
 
-    def _fiducial_config(self) -> FiducialPriorConfig | None:
-        """The first enabled fiducial entry, or None -- one detector feeds one prior."""
-        for prior_config in self.config.priors.values():
-            if isinstance(prior_config, FiducialPriorConfig) and prior_config.enabled:
-                return prior_config
-        return None
+    def _enabled_entry(self, entry_type: type[_PriorConfigT]) -> _PriorConfigT | None:
+        """This prior's pool entry when it is present and enabled -- the pool key IS the entry's ``type``."""
+        entry = self.config.priors.get(entry_type.model_fields["type"].default)
+        return entry if isinstance(entry, entry_type) and entry.enabled else None
 
     def _start_fiducial_prior(self) -> None:
         """Load the marker map, build the FiducialPrior, route sightings into it."""
-        fiducial = self._fiducial_config()
+        fiducial = self._enabled_entry(FiducialPriorConfig)
         if fiducial is None:
             return
         marker_map_file = fiducial.marker_map_file
@@ -275,26 +272,11 @@ class RelocalizationModule(Module):
         raw = MarkerTfModule._marker_id_from_detection(detection)
         return int(raw) if raw is not None and raw.isdigit() else None
 
-    def _enabled_prior_objects(self) -> list[RelocPrior]:
-        """The candidate PROPOSERS for enabled entries."""
-        objects: list[RelocPrior] = []
-        for prior_config in self.config.priors.values():
-            if not prior_config.enabled:
-                continue
-            if isinstance(prior_config, RansacPriorConfig):
-                objects.append(self._ransac_prior)
-            elif isinstance(prior_config, FiducialPriorConfig) and self._fiducial_prior is not None:
-                objects.append(self._fiducial_prior)
-        return objects
-
     def _on_local_map(self, msg: PointCloud2) -> None:
         """Poll the RANSAC prior on the module's timer; on cold start fire a pending fiducial fix."""
         self._last_local_map = msg  # what a burst-triggered fire judges against
         now = time.monotonic()
-        # _ransac_prior is always constructed, so gate it on the enabled set (the toggle); _fiducial_prior is None unless its enabled entry loaded a marker map.
-        enabled = self._enabled_prior_objects()
-
-        if self._ransac_prior in enabled:
+        if self._ransac_prior is not None:
             time_due = (
                 self._last_ransac_fired_s is None
                 or now - self._last_ransac_fired_s >= self._ransac_interval_s
@@ -380,7 +362,7 @@ class RelocalizationModule(Module):
         # so inverse the transform T here to get map_in_scan_frame
         world_T_map = np.linalg.inv(map_T_world)
         self._log_accept(prior, fitness, dt, n_pts, map_T_world, world_T_map)
-        self._publish_fix_marker(prior, fitness, world_T_map)
+        self._publish_accepted_fixes(prior, fitness, world_T_map)
         return Transform(
             translation=Vector3(*world_T_map[:3, 3]),
             rotation=Quaternion.from_rotation_matrix(world_T_map[:3, :3]),
@@ -410,7 +392,7 @@ class RelocalizationModule(Module):
             f"source={prior.name} "
         )
 
-    def _publish_fix_marker(
+    def _publish_accepted_fixes(
         self, prior: RelocPrior, fitness: float, world_T_map: np.ndarray
     ) -> None:
         """Append this accepted fix to the rerun marker trail and republish the trail."""
@@ -418,17 +400,17 @@ class RelocalizationModule(Module):
             return
         # EntityMarkers carries no frame_id, so the bridge leaves it unparented at the rerun root -- the world frame the live clouds are drawn in.
         x, y, z = world_T_map[:3, 3]
-        self._fix_markers.append(
+        self._accepted_fixes.append(
             Marker(
                 entity_id=prior.name,
                 label=f"{fitness:.2f}",
-                entity_type=FIX_MARKER_TYPE.get(prior.name, ""),
+                entity_type=ACCEPTED_FIX_TYPE.get(prior.name, ""),
                 x=float(x),
                 y=float(y),
                 z=float(z),
             )
         )
-        self.fix_markers.publish(EntityMarkers(markers=list(self._fix_markers)))
+        self.accepted_fixes.publish(EntityMarkers(markers=list(self._accepted_fixes)))
 
     def _publish_periodic(self, pair: tuple[int, Transform]) -> None:
         _, tf = pair
