@@ -48,7 +48,11 @@ from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
 from dimos.perception.fiducial.apriltag_aggregation import matrix_from_pose7
-from dimos.perception.fiducial.marker_map import MARKER_MAP_SUFFIX, load_marker_map
+from dimos.perception.fiducial.marker_map import (
+    MARKER_MAP_SUFFIX,
+    load_marker_map,
+    marker_length_m_from_map,
+)
 from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
@@ -203,11 +207,10 @@ class RelocalizationModule(Module):
                 "relocalize: fiducial prior enabled but no marker_map_file; fiducial prior disabled"
             )
             return
+        marker_map_path = resolve_named_path(marker_map_file, MARKER_MAP_SUFFIX)
         marker_map = {
             marker_id: transform.to_matrix()
-            for marker_id, transform in load_marker_map(
-                resolve_named_path(marker_map_file, MARKER_MAP_SUFFIX)
-            ).items()
+            for marker_id, transform in load_marker_map(marker_map_path).items()
         }
         self._fiducial_prior = FiducialPrior(marker_map)
         self.register_disposable(
@@ -216,6 +219,7 @@ class RelocalizationModule(Module):
         logger.info(
             "fiducial prior enabled",
             marker_map_file=marker_map_file,
+            surveyed_marker_length_m=marker_length_m_from_map(marker_map_path),
             n_markers=len(marker_map),
         )
 
