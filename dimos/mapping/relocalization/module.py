@@ -15,10 +15,10 @@
 from collections import deque
 import threading
 import time
-from typing import Any, TypeVar
+from typing import Annotated, Any, TypeVar
 
 import numpy as np
-from pydantic import model_validator
+from pydantic import Field, model_validator
 import reactivex as rx
 from reactivex import Subject, combine_latest, operators as ops
 
@@ -26,16 +26,9 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.mapping.relocalization.eval import SourceTally, format_eval_summary
-from dimos.mapping.relocalization.priors import (
-    FiducialPrior,
-    FiducialPriorConfig,
-    PriorConfig,
-    PriorConfigBase,
-    RansacPrior,
-    RansacPriorConfig,
-    RelocPrior,
-    relocalize_with_prior,
-)
+from dimos.mapping.relocalization.fiducial import FiducialPrior, FiducialPriorConfig
+from dimos.mapping.relocalization.prior import PriorConfigBase, RelocPrior, relocalize_with_prior
+from dimos.mapping.relocalization.ransac import RansacPrior, RansacPriorConfig
 from dimos.mapping.relocalization.relocalize import (
     InsufficientWallEvidenceError,
     NoUprightCandidateError,
@@ -64,6 +57,12 @@ ACCEPTED_FIX_TYPE = {"ransac": "location", "fiducial": "object"}
 MAX_ACCEPTED_FIXES = 500  # a 730 s survey polls RANSAC ~365 times, so a whole run fits
 
 _PriorConfigT = TypeVar("_PriorConfigT", bound=PriorConfigBase)
+
+# Discriminated on ``type`` (kinematics/config.py:54 is the exemplar); assembled here, its only consumer, so prior.py stays unaware of the leaves.
+PriorConfig = Annotated[
+    RansacPriorConfig | FiducialPriorConfig,
+    Field(discriminator="type"),
+]
 
 
 class Config(ModuleConfig):

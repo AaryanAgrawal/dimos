@@ -20,7 +20,7 @@ from typing import Literal
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 
-from dimos.mapping.relocalization.priors.base import PriorConfigBase
+from dimos.mapping.relocalization.prior import PriorConfigBase
 from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7

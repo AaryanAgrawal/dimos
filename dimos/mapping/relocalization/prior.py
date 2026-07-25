@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Pluggable relocalization priors: candidate proposers feeding the shared fine-ICP judge in relocalize.py (``refine_candidates``)."""
+
 from __future__ import annotations
 
 from typing import Protocol

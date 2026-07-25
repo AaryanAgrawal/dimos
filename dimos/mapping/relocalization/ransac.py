@@ -20,7 +20,7 @@ import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 from pydantic import Field
 
-from dimos.mapping.relocalization.priors.base import PriorConfigBase
+from dimos.mapping.relocalization.prior import PriorConfigBase
 from dimos.mapping.relocalization.relocalize import generate_ransac_candidates
 
 
