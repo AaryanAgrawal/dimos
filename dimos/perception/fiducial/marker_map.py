@@ -67,7 +67,11 @@ def marker_length_m_from_map(path: str | Path) -> float | None:
     """The printed tag edge length the survey solved at, or ``None`` when the map carries none."""
     meta = (json.loads(Path(path).read_text()) or {}).get("meta") or {}
     size = meta.get("marker_length_m")
-    return float(size) if size is not None else None
+    if size is None:
+        return None
+    if float(size) <= 0:
+        raise ValueError(f"{path}: marker_length_m must be > 0, got {size}")
+    return float(size)
 
 
 def write_marker_map(
