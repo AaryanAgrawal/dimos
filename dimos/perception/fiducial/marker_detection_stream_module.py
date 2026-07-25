@@ -98,16 +98,18 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
         )
 
     def _marker_length_m(self) -> float:
-        """The tag size the marker map was surveyed at, falling back to the configured one."""
+        """The tag size the marker map was surveyed at; the configured one when the map carries none."""
         if not self.config.marker_map_file:
             return self.config.marker_length_m
         path = resolve_named_path(self.config.marker_map_file, MARKER_MAP_SUFFIX)
         surveyed = marker_length_m_from_map(path)
         if surveyed is None:
-            raise ValueError(
-                f"{path} carries no marker_length_m: re-survey with `dimos map global --markers`, "
-                "or unset marker_map_file to solve at the configured size"
+            logger.warning(
+                "marker map carries no size, using the configured one",
+                configured_m=self.config.marker_length_m,
+                marker_map_file=str(path),
             )
+            return self.config.marker_length_m
         if surveyed != self.config.marker_length_m:
             # The map's poses are metric only at the size they were solved at, so it outranks the field.
             logger.warning(
