@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright 2026 Dimensional Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,21 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pluggable relocalization priors: candidate proposers feeding the shared fine-ICP judge in relocalize.py (``refine_candidates``)."""
-
 from __future__ import annotations
 
 import threading
-from typing import Annotated, Literal, Protocol
+from typing import Literal
 
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
-from pydantic import Field
 
-from dimos.mapping.relocalization.relocalize import (
-    generate_ransac_candidates,
-    refine_candidates,
-)
+from dimos.mapping.relocalization.priors.base import PriorConfigBase
 from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7
@@ -37,31 +30,10 @@ from dimos.perception.fiducial.marker_map import (
     marker_length_m_from_map,
 )
 from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
-from dimos.protocol.service.spec import BaseConfig
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
-
-# One pydantic config per prior, keyed by a Literal ``type`` into a discriminated union. Pattern from dimos/manipulation/planning/kinematics/config.py:26-57.
-
-
-class PriorConfigBase(BaseConfig):
-    """Fields every prior shares: the on/off toggle plus its accept bar."""
-
-    enabled: bool = True
-    # Per-prior accept gate: min wall fitness (dimensionless, 0-1) this prior's fix must clear. 0.6 because the trial's office survey produced sub-0.6 fixes that were meters off while still scoring as "fit".
-    fitness_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
-
-
-class RansacPriorConfig(PriorConfigBase):
-    """Multi-scale FPFH+RANSAC global search (``RansacPrior``); search knobs live in relocalize.py, this entry owns the accept bar, cadence and geometry floor."""
-
-    type: Literal["ransac"] = "ransac"
-    # s between RANSAC fires; one FPFH+RANSAC search costs 4.4-23 s of CPU on the trial's go2/Orin recordings, so the sweep is paced, not per-frame.
-    interval_s: float = Field(default=2.0, gt=0.0)
-    # Min local-map points (post VoxelGridMapper) before this search fires; below this FPFH matching + the wall-only rerank have too little geometry, so the frame is skipped.
-    min_local_points: int = Field(default=50_000, ge=0)
 
 
 class FiducialPriorConfig(PriorConfigBase):
@@ -70,38 +42,6 @@ class FiducialPriorConfig(PriorConfigBase):
     type: Literal["fiducial"] = "fiducial"
     # Surveyed marker map (map_T_marker per id), a .json path resolved via resolve_named_path; required -- start() no-ops the prior without it.
     marker_map_file: str | None = None
-
-
-# Discriminated on ``type`` (kinematics/config.py:54 is the exemplar).
-PriorConfig = Annotated[
-    RansacPriorConfig | FiducialPriorConfig,
-    Field(discriminator="type"),
-]
-
-
-class RelocPrior(Protocol):
-    """A relocalization candidate proposer; the module owns the trigger. A prior must not self-select a winner (``refine_candidates``'s job); zero candidates is a valid response."""
-
-    name: str
-
-    def propose(
-        self,
-        global_map: o3d.geometry.PointCloud,
-        local_map: o3d.geometry.PointCloud,
-    ) -> list[np.ndarray]: ...
-
-
-class RansacPrior:
-    """Wraps relocalize.py's FPFH+RANSAC global search; a pure candidate source the module polls on a paced interval (the pace bounds an eventless search's cost)."""
-
-    name = "ransac"
-
-    def propose(
-        self,
-        global_map: o3d.geometry.PointCloud,
-        local_map: o3d.geometry.PointCloud,
-    ) -> list[np.ndarray]:
-        return generate_ransac_candidates(global_map, local_map)
 
 
 class FiducialPrior:
@@ -190,15 +130,3 @@ class FiducialPrior:
         with self._pending_lock:
             pending, self._pending = self._pending, {}
         return list(pending.values())
-
-
-def relocalize_with_prior(
-    global_map: o3d.geometry.PointCloud,
-    local_map: o3d.geometry.PointCloud,
-    prior: RelocPrior,
-) -> tuple[np.ndarray, float] | None:
-    """Judge this prior's candidates through the shared fine-ICP tail; ``None`` when it proposed none."""
-    transforms = prior.propose(global_map, local_map)
-    if not transforms:
-        return None
-    return refine_candidates(global_map, local_map, transforms)

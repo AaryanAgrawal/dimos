@@ -73,7 +73,7 @@ class Config(ModuleConfig):
     publish_loaded_map: bool = False
     use_carving: bool = True
     # True (`--eval`): raise the throttled refusal lines to warning and tally accepts/rejects per prior for the summary at stop().
-    verbose_eval_logging: bool = False
+    eval: bool = False
     # The prior pool keyed by `type`, so every knob is `-o relocalizationmodule.priors.<key>.<field>`: each entry a toggleable candidate proposer (RANSAC polled, fiducial event-driven). Both on by default, so a blueprint declares nothing; `--disable marker-detection-stream-module` leaves RANSAC alone.
     priors: dict[str, PriorConfig] = {
         "ransac": RansacPriorConfig(),
@@ -108,9 +108,9 @@ class RelocalizationModule(Module):
         super().__init__(**kwargs)
         self._premap: PointCloud2 | None = None
         self._last_skip_log = 0.0
-        # Per-source accept/reject tally, filled only under verbose_eval_logging (--eval) and rendered once at stop(). The module already owns the accept/reject data.
+        # Per-source accept/reject tally, filled only under eval and rendered once at stop(). The module already owns the accept/reject data.
         self._eval_tally: dict[str, SourceTally] = {}
-        # Accepted-fix trail for rerun, filled only under verbose_eval_logging (--eval) and republished whole so the view accumulates.
+        # Accepted-fix trail for rerun, filled only under eval and republished whole so the view accumulates.
         self._accepted_fixes: deque[Marker] = deque(maxlen=MAX_ACCEPTED_FIXES)
         self._world_to_map: Subject[Transform | None] = Subject()
         # Prior objects are built ONCE, not per frame: the fiducial holds pending-fix state across bursts that a fresh instance would reset. The RANSAC prior is a pure source; the module owns its poll timer (below).
@@ -183,7 +183,7 @@ class RelocalizationModule(Module):
     @rpc
     def stop(self) -> None:
         # Emit the per-source accept/reject table once, at shutdown, from the tally the fire path filled -- the module owns the data, so no log parsing.
-        if self.config.verbose_eval_logging and self._eval_tally:
+        if self.config.eval and self._eval_tally:
             logger.info("relocalize eval summary", table=format_eval_summary(self._eval_tally))
         super().stop()
 
@@ -207,7 +207,7 @@ class RelocalizationModule(Module):
         now = time.monotonic()
         if now - self._last_skip_log > SKIP_LOG_INTERVAL_S:
             # Refusals are the steady state while the submap fills, so they surface only under --eval; the console otherwise carries accepted fixes alone.
-            log = logger.warning if self.config.verbose_eval_logging else logger.debug
+            log = logger.warning if self.config.eval else logger.debug
             log(event, **kw)
             self._last_skip_log = now
 
@@ -302,13 +302,11 @@ class RelocalizationModule(Module):
         threshold = self._accept_threshold[prior.name]
         if fitness >= threshold:
             return True
-        if self.config.verbose_eval_logging:
+        if self.config.eval:
             self._eval_tally.setdefault(prior.name, SourceTally()).rejects += 1
         # threshold= IS the reason: this is the only fitness reject path, and the operator's next move is to compare the two numbers.
         extra: dict[str, Any] = (
-            {"time_cost_s": round(dt, 1), "n_pts": n_pts}
-            if self.config.verbose_eval_logging
-            else {}
+            {"time_cost_s": round(dt, 1), "n_pts": n_pts} if self.config.eval else {}
         )
         logger.warning(
             "relocalize rejected",
@@ -346,7 +344,7 @@ class RelocalizationModule(Module):
         world_T_map: np.ndarray,
     ) -> None:
         """One accept line: the published fix, its health, and which prior won."""
-        if self.config.verbose_eval_logging:
+        if self.config.eval:
             entry = self._eval_tally.setdefault(prior.name, SourceTally())
             entry.accepts += 1
             entry.fitnesses.append(round(fitness, 3))
@@ -362,7 +360,7 @@ class RelocalizationModule(Module):
         self, prior: RelocPrior, fitness: float, world_T_map: np.ndarray
     ) -> None:
         """Append this accepted fix to the rerun marker trail and republish the trail."""
-        if not self.config.verbose_eval_logging:
+        if not self.config.eval:
             return
         # EntityMarkers carries no frame_id, so the bridge leaves it unparented at the rerun root -- the world frame the live clouds are drawn in.
         x, y, z = world_T_map[:3, 3]
