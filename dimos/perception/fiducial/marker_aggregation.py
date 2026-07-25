@@ -31,10 +31,9 @@ if TYPE_CHECKING:
 Pose7 = tuple[float, float, float, float, float, float, float]
 
 # Per-glimpse gate thresholds (see gate_reason).
-DEFAULT_MAX_DISTANCE_M = 1.0  # camera->tag range past which perspective is too weak
 DEFAULT_MAX_VIEW_ANGLE_DEG = 45.0  # line-of-sight vs tag normal; grazing views mis-solve
 DEFAULT_MAX_REPROJ_PX = 2.0  # RMS solvePnP corner reprojection error
-DEFAULT_MIN_TAG_PX = 24.0  # tag side length in pixels (sqrt of quad area)
+DEFAULT_MIN_TAG_PX = 24.0  # tag side in px (sqrt of quad area); apparent size, so it bounds range and tag size at once
 # streaming: span back from the newest glimpse, not a between-sightings gap
 DEFAULT_TIME_WINDOW_S = 5.0
 DEFAULT_MIN_OBSERVATIONS = 3  # clusters thinner than this are unreliable
@@ -54,7 +53,6 @@ MIN_TAG_NOISE_SCALE = 0.25  # dimensionless floor, so no read claims near-zero v
 class AggregationConfig:
     """Per-glimpse gate thresholds + clustering/aggregation knobs."""
 
-    max_distance_m: float = DEFAULT_MAX_DISTANCE_M
     max_view_angle_deg: float = DEFAULT_MAX_VIEW_ANGLE_DEG
     max_reproj_px: float = DEFAULT_MAX_REPROJ_PX
     min_tag_px: float = DEFAULT_MIN_TAG_PX
@@ -170,8 +168,6 @@ def gate_reason(obs: TagObservation, config: AggregationConfig) -> str | None:
         return "reproj"
     if obs.tag_px is not None and obs.tag_px < config.min_tag_px:
         return "small"
-    if obs.distance_m is not None and obs.distance_m > config.max_distance_m:
-        return "far"
     if obs.view_angle_deg is not None and obs.view_angle_deg > config.max_view_angle_deg:
         return "oblique"
     return None
