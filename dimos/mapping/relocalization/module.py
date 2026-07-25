@@ -45,16 +45,8 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
-from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7
-from dimos.perception.fiducial.marker_map import (
-    MARKER_MAP_SUFFIX,
-    load_marker_map,
-    marker_length_m_from_map,
-)
-from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure
@@ -132,7 +124,7 @@ class RelocalizationModule(Module):
         self._ransac_interval_s = ransac.interval_s if ransac else 0.0
         self._ransac_min_local_points = ransac.min_local_points if ransac else 0
         self._last_ransac_fired_s: float | None = None
-        # Built in start() once the marker map is loaded (needs map_T_marker).
+        # Built in start(), where the prior loads its own marker map.
         self._fiducial_prior: FiducialPrior | None = None
         # Latest global_map, so a completed tag burst is judged the instant it lands. Sound because the stream ACCUMULATES in the world frame: the previous cloud scores wall fitness as well as the newest, and the tag candidate needs no lidar at all.
         self._last_local_map: PointCloud2 | None = None
@@ -201,30 +193,13 @@ class RelocalizationModule(Module):
         return entry if isinstance(entry, entry_type) and entry.enabled else None
 
     def _start_fiducial_prior(self) -> None:
-        """Load the marker map, build the FiducialPrior, route sightings into it."""
+        """Build the fiducial prior from its config and route tag sightings into it."""
         fiducial = self._enabled_entry(FiducialPriorConfig)
-        if fiducial is None:
+        self._fiducial_prior = FiducialPrior.from_config(fiducial) if fiducial else None
+        if self._fiducial_prior is None:
             return
-        marker_map_file = fiducial.marker_map_file
-        if not marker_map_file:
-            logger.warning(
-                "relocalize: fiducial prior enabled but no marker_map_file; fiducial prior disabled"
-            )
-            return
-        marker_map_path = resolve_named_path(marker_map_file, MARKER_MAP_SUFFIX)
-        marker_map = {
-            marker_id: transform.to_matrix()
-            for marker_id, transform in load_marker_map(marker_map_path).items()
-        }
-        self._fiducial_prior = FiducialPrior(marker_map)
         self.register_disposable(
             self.aggregated_detections.observable().subscribe(self._on_aggregated_detections)  # type: ignore[no-untyped-call]
-        )
-        logger.info(
-            "fiducial prior enabled",
-            marker_map_file=marker_map_file,
-            surveyed_marker_length_m=marker_length_m_from_map(marker_map_path),
-            n_markers=len(marker_map),
         )
 
     def _throttled_warn(self, event: str, **kw: Any) -> None:
@@ -245,26 +220,10 @@ class RelocalizationModule(Module):
         self._world_to_map.on_next(tf)
 
     def _on_aggregated_detections(self, msg: Detection3DArray) -> None:
-        """Compose each aggregated tag pose into this tag's world->map fix, then fire."""
+        """Hand the burst to the fiducial prior, then fire it."""
         if self._fiducial_prior is None:
             return
-        for detection in msg.detections[: msg.detections_length]:
-            marker_id = self._marker_id_from_detection(detection)
-            if marker_id is None:
-                continue
-            center = detection.bbox.center  # world_T_marker_aggregated (frame_id == world)
-            world_T_marker_aggregated = matrix_from_pose7(
-                (
-                    center.position.x,
-                    center.position.y,
-                    center.position.z,
-                    center.orientation.x,
-                    center.orientation.y,
-                    center.orientation.z,
-                    center.orientation.w,
-                )
-            )
-            self._fiducial_prior.observe(marker_id, world_T_marker_aggregated)
+        self._fiducial_prior.observe_detections(msg)
         # Fire HERE, not at the next cloud: the tag candidate is composed from the marker alone, so waiting on lidar is dead time on acquisition. No cloud yet -> pending stays and _on_local_map fires it on the first frame.
         cloud = self._last_local_map
         if cloud is not None and self._fiducial_prior.has_pending:
@@ -273,12 +232,6 @@ class RelocalizationModule(Module):
     def _fire(self, prior: RelocPrior, local_map: PointCloud2) -> None:
         """Run this prior's ONE relocalization and publish the resulting TF."""
         self._publish_tf(self._try_relocalize(local_map, prior))
-
-    @staticmethod
-    def _marker_id_from_detection(detection: Detection3D) -> int | None:
-        """Numeric marker id off the wire, via the same parse MarkerTfModule publishes TF from."""
-        raw = MarkerTfModule._marker_id_from_detection(detection)
-        return int(raw) if raw is not None and raw.isdigit() else None
 
     def _on_local_map(self, msg: PointCloud2) -> None:
         """Poll the RANSAC prior on the module's timer; on cold start fire a pending fiducial fix."""

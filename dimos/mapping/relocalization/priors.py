@@ -28,7 +28,20 @@ from dimos.mapping.relocalization.relocalize import (
     generate_ransac_candidates,
     refine_candidates,
 )
+from dimos.msgs.vision_msgs.Detection3D import Detection3D
+from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
+from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7
+from dimos.perception.fiducial.marker_map import (
+    MARKER_MAP_SUFFIX,
+    load_marker_map,
+    marker_length_m_from_map,
+)
+from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
 from dimos.protocol.service.spec import BaseConfig
+from dimos.utils.data import resolve_named_path
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
 
 # One pydantic config per prior, keyed by a Literal ``type`` into a discriminated union. Pattern from dimos/manipulation/planning/kinematics/config.py:26-57.
 
@@ -103,6 +116,56 @@ class FiducialPrior:
         self._pending: dict[int, np.ndarray] = {}
         # observe() and propose() run on different transport threads; the lock makes the read-modify-write of _pending one critical section -- see propose() for the tear.
         self._pending_lock = threading.Lock()
+
+    @classmethod
+    def from_config(cls, config: FiducialPriorConfig) -> FiducialPrior | None:
+        """Load the surveyed marker map this prior composes against; ``None`` when the config names none."""
+        # A constructor cannot decline to exist, and without a map every candidate would be dropped at observe(); None keeps the prior out of the live list and off the detections stream.
+        if not config.marker_map_file:
+            logger.warning(
+                "relocalize: fiducial prior enabled but no marker_map_file; fiducial prior disabled"
+            )
+            return None
+        marker_map_path = resolve_named_path(config.marker_map_file, MARKER_MAP_SUFFIX)
+        marker_map = {
+            marker_id: transform.to_matrix()
+            for marker_id, transform in load_marker_map(marker_map_path).items()
+        }
+        logger.info(
+            "fiducial prior enabled",
+            marker_map_file=config.marker_map_file,
+            surveyed_marker_length_m=marker_length_m_from_map(marker_map_path),
+            n_markers=len(marker_map),
+        )
+        return cls(marker_map)
+
+    @staticmethod
+    def _marker_id_from_detection(detection: Detection3D) -> int | None:
+        """Numeric marker id off the wire, via the same parse MarkerTfModule publishes TF from."""
+        raw = MarkerTfModule._marker_id_from_detection(detection)
+        return int(raw) if raw is not None and raw.isdigit() else None
+
+    def observe_detections(self, msg: Detection3DArray) -> None:
+        """Compose every aggregated tag pose in this burst into that tag's world->map fix."""
+        for detection in msg.detections[: msg.detections_length]:
+            marker_id = self._marker_id_from_detection(detection)
+            if marker_id is None:
+                continue
+            center = detection.bbox.center  # world_T_marker_aggregated (frame_id == world)
+            self.observe(
+                marker_id,
+                matrix_from_pose7(
+                    (
+                        center.position.x,
+                        center.position.y,
+                        center.position.z,
+                        center.orientation.x,
+                        center.orientation.y,
+                        center.orientation.z,
+                        center.orientation.w,
+                    )
+                ),
+            )
 
     def observe(self, marker_id: int, world_T_marker_aggregated: np.ndarray) -> str | None:
         """Compose this tag's map_T_world fix from one aggregated pose; returns ``unmapped_id`` or ``None``."""
