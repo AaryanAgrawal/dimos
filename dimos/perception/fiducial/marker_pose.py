@@ -143,34 +143,6 @@ def estimate_marker_pose_candidates(
     ]
 
 
-def _by_reprojection_error(
-    candidates: list[tuple[np.ndarray, np.ndarray]],
-    corners_px: np.ndarray,
-    marker_length_m: float,
-    camera_matrix: np.ndarray,
-    dist_coeffs: np.ndarray,
-    distortion_model: str | None,
-) -> list[tuple[float, np.ndarray, np.ndarray]]:
-    """``(rms_reproj_px, rvec, tvec)`` per candidate, best fit first."""
-    scored = [
-        (
-            marker_reprojection_error(
-                corners_px,
-                marker_length_m,
-                camera_matrix,
-                dist_coeffs,
-                rvec,
-                tvec,
-                distortion_model=distortion_model,
-            ),
-            rvec,
-            tvec,
-        )
-        for rvec, tvec in candidates
-    ]
-    return sorted(scored, key=lambda item: item[0])
-
-
 def ambiguity_gated_pose(
     corners_px: np.ndarray,
     marker_length_m: float,
@@ -179,21 +151,26 @@ def ambiguity_gated_pose(
     *,
     distortion_model: str | None = None,
     ambiguity_ratio_min: float,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    """Best ``(rvec, tvec)`` for ``camera_optical <- marker``, ``None`` when the runner-up's reproj is within ``ambiguity_ratio_min`` x the best (the mirror solution explains the pixels nearly as well)."""
-    candidates = estimate_marker_pose_candidates(
-        corners_px, marker_length_m, camera_matrix, dist_coeffs, distortion_model=distortion_model
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Best ``(rvec, tvec, reproj_px)`` for ``camera_optical <- marker``, ``None`` when the runner-up's reproj is within ``ambiguity_ratio_min`` x the best (the mirror solution explains the pixels nearly as well)."""
+    intrinsics = (corners_px, marker_length_m, camera_matrix, dist_coeffs)
+    scored = sorted(
+        (
+            marker_reprojection_error(*intrinsics, rvec, tvec, distortion_model=distortion_model),
+            rvec,
+            tvec,
+        )
+        for rvec, tvec in estimate_marker_pose_candidates(
+            *intrinsics, distortion_model=distortion_model
+        )
     )
-    if not candidates:
+    if not scored:
         return None
-    scored = _by_reprojection_error(
-        candidates, corners_px, marker_length_m, camera_matrix, dist_coeffs, distortion_model
-    )
     error, rvec, tvec = scored[0]
     # error > 1e-12 px guards the ratio div-by-zero when the best pose fits the corners exactly
     if len(scored) > 1 and error > 1e-12 and scored[1][0] / error < ambiguity_ratio_min:
         return None  # IPPE planar mirror ambiguity https://doi.org/10.1007/s11263-014-0725-5
-    return rvec, tvec
+    return rvec, tvec, error
 
 
 def rvec_tvec_to_transform(

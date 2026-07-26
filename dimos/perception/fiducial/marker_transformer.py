@@ -41,8 +41,6 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from dimos.memory2.transform import Transformer
-from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.geometry_msgs.PoseWithCovariance import PoseWithCovariance
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -53,14 +51,11 @@ from dimos.perception.detection.type.detection3d.imageDetections3D import ImageD
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
 from dimos.perception.fiducial.marker_aggregation import (
     AggregationConfig,
-    Pose7,
     TagAggregator,
     TagEstimate,
-    TagObservation,
-    camera_relative_quality,
-    tag_covariance,
+    marker_pose7,
     tag_noise_scale,
-    tag_side_px,
+    tag_observation,
 )
 from dimos.perception.fiducial.marker_detect import (
     detect_markers_in_image as _detect_markers_in_image,
@@ -448,27 +443,7 @@ class AggregateTagBursts:
         if det is None:
             return  # DetectMarkers(emit_empty_frames=True) sentinel: a tag-free frame
 
-        world_T_marker: Pose7 = (
-            det.center.x,
-            det.center.y,
-            det.center.z,
-            det.orientation.x,
-            det.orientation.y,
-            det.orientation.z,
-            det.orientation.w,
-        )
-        distance_m, view_angle_deg = camera_relative_quality(det, world_T_marker)
-        reason = self._aggregator.observe(
-            TagObservation(
-                ts=obs.ts,
-                marker_id=det.marker_id,
-                pose=world_T_marker,
-                distance_m=distance_m,
-                view_angle_deg=view_angle_deg,
-                reproj_px=det.reprojection_error,
-                tag_px=tag_side_px(det.corners_px),
-            )
-        )
+        reason = self._aggregator.observe(tag_observation(det, obs.ts, marker_pose7(det)))
         if reason is not None:
             return
         estimate = self._aggregator.robust_estimate(det.marker_id)
@@ -481,7 +456,7 @@ class AggregateTagBursts:
         self._publish(self._aggregated_array(det, estimate))
 
     def _aggregated_array(self, det: Detection3DMarker, estimate: TagEstimate) -> Detection3DArray:
-        """One-detection array with this tag's aggregated world_T_marker; covariance and score are the same number twice, so they cannot disagree."""
+        """One-detection array with this tag's aggregated world_T_marker, scored by its noise scale."""
         scale = tag_noise_scale(estimate.distance_m, estimate.reproj_px)
         x, y, z, qx, qy, qz, qw = estimate.pose
         aggregated = dataclasses.replace(
@@ -494,12 +469,6 @@ class AggregateTagBursts:
         msg = ImageDetections3D(det.image, [aggregated]).to_ros_detection3d_array(
             frame_id=self._world_frame
         )
-        # ASSIGN, never mutate: the generated LCM constructor shares ONE default PoseWithCovariance across all hypotheses, so writing .covariance would stamp every detection in the process (same hazard as detection3d/bbox.py)
-        msg.detections[0].results[0].pose = PoseWithCovariance(
-            Pose(position=aggregated.center, orientation=aggregated.orientation),
-            tag_covariance(estimate.pose, scale),
-        )
-        # one visit shares a viewpoint, so its PnP errors are correlated and the covariance carries no 1/n
         logger.debug(
             "tag burst aggregated",
             marker_id=det.marker_id,

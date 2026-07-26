@@ -16,16 +16,12 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal
 
-import numpy as np
-import open3d as o3d  # type: ignore[import-untyped]
 from pydantic import Field
 
-from dimos.mapping.relocalization.relocalize import refine_candidates
+from dimos.mapping.relocalization.relocalize import generate_ransac_candidates
 from dimos.protocol.service.spec import BaseConfig
-
-# One pydantic config per prior, keyed by a Literal ``type`` into a discriminated union. Pattern from dimos/manipulation/planning/kinematics/config.py:26-57.
 
 
 class PriorConfigBase(BaseConfig):
@@ -36,25 +32,18 @@ class PriorConfigBase(BaseConfig):
     fitness_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
-class RelocPrior(Protocol):
-    """A relocalization candidate proposer; the module owns the trigger. A prior must not self-select a winner (``refine_candidates``'s job); zero candidates is a valid response."""
+class RansacPriorConfig(PriorConfigBase):
+    """Multi-scale FPFH+RANSAC global search (``RansacPrior``); search knobs live in relocalize.py, this entry owns the accept bar, cadence and geometry floor."""
 
-    name: str
-
-    def propose(
-        self,
-        global_map: o3d.geometry.PointCloud,
-        local_map: o3d.geometry.PointCloud,
-    ) -> list[np.ndarray]: ...
+    type: Literal["ransac"] = "ransac"
+    # s between RANSAC fires; one FPFH+RANSAC search costs 4.4-23 s of CPU on the trial's go2/Orin recordings, so the sweep is paced, not per-frame.
+    interval_s: float = Field(default=2.0, gt=0.0)
+    # Min local-map points (post VoxelGridMapper) before this search fires; below this FPFH matching + the wall-only rerank have too little geometry, so the frame is skipped.
+    min_local_points: int = Field(default=50_000, ge=0)
 
 
-def relocalize_with_prior(
-    global_map: o3d.geometry.PointCloud,
-    local_map: o3d.geometry.PointCloud,
-    prior: RelocPrior,
-) -> tuple[np.ndarray, float] | None:
-    """Judge this prior's candidates through the shared fine-ICP tail; ``None`` when it proposed none."""
-    transforms = prior.propose(global_map, local_map)
-    if not transforms:
-        return None
-    return refine_candidates(global_map, local_map, transforms)
+class RansacPrior:
+    """relocalize.py's FPFH+RANSAC global search as a prior; the module owns its poll timer."""
+
+    name = "ransac"
+    propose = staticmethod(generate_ransac_candidates)

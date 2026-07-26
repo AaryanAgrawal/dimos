@@ -21,14 +21,9 @@ import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 
 from dimos.mapping.relocalization.prior import PriorConfigBase
-from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7
-from dimos.perception.fiducial.marker_map import (
-    MARKER_MAP_SUFFIX,
-    load_marker_map,
-    marker_length_m_from_map,
-)
+from dimos.perception.fiducial.marker_map import MARKER_MAP_SUFFIX, load_marker_map
 from dimos.perception.fiducial.marker_tf_module import MarkerTfModule
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
@@ -54,7 +49,6 @@ class FiducialPrior:
         self._map_T_marker = marker_map
         # marker_id -> map_T_world (4x4) awaiting its ONE trip past the judge.
         self._pending: dict[int, np.ndarray] = {}
-        # observe() and propose() run on different transport threads; the lock makes the read-modify-write of _pending one critical section -- see propose() for the tear.
         self._pending_lock = threading.Lock()
 
     @classmethod
@@ -74,26 +68,20 @@ class FiducialPrior:
         logger.info(
             "fiducial prior enabled",
             marker_map_file=config.marker_map_file,
-            surveyed_marker_length_m=marker_length_m_from_map(marker_map_path),
             n_markers=len(marker_map),
         )
         return cls(marker_map)
 
-    @staticmethod
-    def _marker_id_from_detection(detection: Detection3D) -> int | None:
-        """Numeric marker id off the wire, via the same parse MarkerTfModule publishes TF from."""
-        raw = MarkerTfModule._marker_id_from_detection(detection)
-        return int(raw) if raw is not None and raw.isdigit() else None
-
     def observe_detections(self, msg: Detection3DArray) -> None:
         """Compose every aggregated tag pose in this burst into that tag's world->map fix."""
         for detection in msg.detections[: msg.detections_length]:
-            marker_id = self._marker_id_from_detection(detection)
-            if marker_id is None:
+            # the same parse MarkerTfModule publishes its marker TF from
+            raw_id = MarkerTfModule._marker_id_from_detection(detection)
+            if raw_id is None or not raw_id.isdigit():
                 continue
             center = detection.bbox.center  # world_T_marker_aggregated (frame_id == world)
             self.observe(
-                marker_id,
+                int(raw_id),
                 matrix_from_pose7(
                     (
                         center.position.x,
@@ -107,14 +95,13 @@ class FiducialPrior:
                 ),
             )
 
-    def observe(self, marker_id: int, world_T_marker_aggregated: np.ndarray) -> str | None:
-        """Compose this tag's map_T_world fix from one aggregated pose; returns ``unmapped_id`` or ``None``."""
+    def observe(self, marker_id: int, world_T_marker_aggregated: np.ndarray) -> None:
+        """Compose this tag's map_T_world fix from one aggregated pose."""
         map_T_marker = self._map_T_marker.get(marker_id)
         if map_T_marker is None:
-            return "unmapped_id"
+            return
         with self._pending_lock:
             self._pending[marker_id] = map_T_marker @ np.linalg.inv(world_T_marker_aggregated)
-        return None
 
     @property
     def has_pending(self) -> bool:
@@ -126,7 +113,7 @@ class FiducialPrior:
         global_map: o3d.geometry.PointCloud,
         local_map: o3d.geometry.PointCloud,
     ) -> list[np.ndarray]:
-        # Consume on use (re-offering a drained fix scores worse, world has drifted); swap under the lock or observe()'s read-modify-write tears here into a "dict changed size during iteration" dropped cycle.
+        # consume on use (a re-offered fix scores worse, world has drifted); locked against observe()'s read-modify-write on another thread
         with self._pending_lock:
             pending, self._pending = self._pending, {}
         return list(pending.values())

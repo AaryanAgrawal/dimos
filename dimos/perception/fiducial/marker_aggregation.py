@@ -30,15 +30,6 @@ if TYPE_CHECKING:
 # Frame-invariant marker pose 7-vector: (x, y, z, qx, qy, qz, qw), meters + xyzw.
 Pose7 = tuple[float, float, float, float, float, float, float]
 
-# Per-glimpse gate thresholds (see gate_reason).
-DEFAULT_MAX_VIEW_ANGLE_DEG = 45.0  # line-of-sight vs tag normal; grazing views mis-solve
-DEFAULT_MAX_REPROJ_PX = 2.0  # RMS solvePnP corner reprojection error
-DEFAULT_MIN_TAG_PX = 24.0  # tag side in px (sqrt of quad area); apparent size, so it bounds range and tag size at once
-# streaming: span back from the newest glimpse, not a between-sightings gap
-DEFAULT_TIME_WINDOW_S = 5.0
-DEFAULT_MIN_OBSERVATIONS = 3  # clusters thinner than this are unreliable
-DEFAULT_ROTATION_WEIGHT_M_PER_RAD = 0.5  # 1 rad of rot ~ 0.5 m of trans in pose distance
-DEFAULT_HUBER_DELTA_M = 0.05  # residual (m) past which a sample is down-weighted
 _HUBER_ITERATIONS = 5  # IRLS weights settle within ~5 iters at huber_delta_m scale
 
 # Reference geometry where tag_noise_scale == 1.0 (pose carries unscaled covariance).
@@ -51,15 +42,17 @@ MIN_TAG_NOISE_SCALE = 0.25  # dimensionless floor, so no read claims near-zero v
 
 @dataclass(frozen=True)
 class AggregationConfig:
-    """Per-glimpse gate thresholds + clustering/aggregation knobs."""
+    """Per-glimpse gate thresholds (see gate_reason) + clustering/aggregation knobs."""
 
-    max_view_angle_deg: float = DEFAULT_MAX_VIEW_ANGLE_DEG
-    max_reproj_px: float = DEFAULT_MAX_REPROJ_PX
-    min_tag_px: float = DEFAULT_MIN_TAG_PX
-    min_observations: int = DEFAULT_MIN_OBSERVATIONS
-    rotation_weight_m_per_rad: float = DEFAULT_ROTATION_WEIGHT_M_PER_RAD
-    huber_delta_m: float = DEFAULT_HUBER_DELTA_M
-    time_window_s: float = DEFAULT_TIME_WINDOW_S  # streaming sliding-window span
+    max_view_angle_deg: float = 45.0  # line-of-sight vs tag normal; grazing views mis-solve
+    max_reproj_px: float = 2.0  # RMS solvePnP corner reprojection error
+    min_tag_px: float = (
+        24.0  # tag side in px (sqrt of quad area); bounds range and tag size at once
+    )
+    min_observations: int = 3  # clusters thinner than this are unreliable
+    rotation_weight_m_per_rad: float = 0.5  # 1 rad of rot ~ 0.5 m of trans in pose distance
+    huber_delta_m: float = 0.05  # residual (m) past which a sample is down-weighted
+    time_window_s: float = 5.0  # streaming: span back from the newest glimpse, not a sightings gap
 
 
 @dataclass(frozen=True)
@@ -86,21 +79,6 @@ class TagEstimate:
     reproj_px: float | None = None
 
 
-def pose7_from_matrix(matrix: np.ndarray) -> Pose7:
-    """4x4 homogeneous transform -> ``(x, y, z, qx, qy, qz, qw)``."""
-    translation = matrix[:3, 3]
-    quaternion = Rotation.from_matrix(matrix[:3, :3]).as_quat()  # x, y, z, w
-    return (
-        float(translation[0]),
-        float(translation[1]),
-        float(translation[2]),
-        float(quaternion[0]),
-        float(quaternion[1]),
-        float(quaternion[2]),
-        float(quaternion[3]),
-    )
-
-
 def matrix_from_pose7(pose: tuple[float, ...] | list[float]) -> np.ndarray:
     """``(x, y, z, qx, qy, qz, qw)`` -> 4x4 homogeneous transform."""
     matrix = np.eye(4)
@@ -109,27 +87,40 @@ def matrix_from_pose7(pose: tuple[float, ...] | list[float]) -> np.ndarray:
     return matrix
 
 
-def view_quality(optical_T_marker: tuple[float, ...] | list[float]) -> tuple[float, float]:
-    """``(distance_m, view_angle_deg)`` for a tag pose in the CAMERA optical frame (view_angle is line-of-sight vs the tag normal, 0 == head-on; camera-relative for the gate)."""
-    translation = np.array(optical_T_marker[:3], dtype=np.float64)
-    distance_m = float(np.linalg.norm(translation))
-    normal = Rotation.from_quat(optical_T_marker[3:7]).as_matrix()[:, 2]
-    line_of_sight = translation / (distance_m + 1e-9)  # m; guards zero range
-    cos_angle = abs(float(np.dot(line_of_sight, normal)))
-    view_angle_deg = math.degrees(math.acos(min(1.0, cos_angle)))
-    return distance_m, view_angle_deg
-
-
 def camera_relative_quality(
     det: Detection3DMarker, world_T_marker: Pose7
 ) -> tuple[float | None, float | None]:
-    """``(distance_m, view_angle_deg)`` of this glimpse, or ``(None, None)`` when no camera transform rode along."""
+    """``(distance_m, view_angle_deg)`` of this glimpse camera-relative, 0 deg == head-on; ``(None, None)`` when no camera transform rode along."""
     if det.transform is None:
         # smoothing_window > 0 emits an averaged pose with transform=None, so the two camera-relative gates go quiet
         return None, None
     # det.transform IS world_T_optical; this inverse exactly undoes the compose that built world_T_marker.
     optical_T_marker = np.linalg.inv(det.transform.to_matrix()) @ matrix_from_pose7(world_T_marker)
-    return view_quality(pose7_from_matrix(optical_T_marker))
+    translation = optical_T_marker[:3, 3]
+    distance_m = float(np.linalg.norm(translation))
+    line_of_sight = translation / (distance_m + 1e-9)  # m; guards zero range
+    cos_angle = abs(float(line_of_sight @ optical_T_marker[:3, 2]))  # tag normal IS the pose z axis
+    return distance_m, math.degrees(math.acos(min(1.0, cos_angle)))
+
+
+def marker_pose7(det: Detection3DMarker) -> Pose7:
+    """``world_T_marker`` 7-vec off one detection."""
+    c, o = det.center, det.orientation
+    return (c.x, c.y, c.z, o.x, o.y, o.z, o.w)
+
+
+def tag_observation(det: Detection3DMarker, ts: float, pose: Pose7) -> TagObservation:
+    """One glimpse's gate inputs; ``pose`` is the frame it aggregates in -- world live, PGO-corrected in the survey."""
+    distance_m, view_angle_deg = camera_relative_quality(det, marker_pose7(det))
+    return TagObservation(
+        ts=ts,
+        marker_id=det.marker_id,
+        pose=pose,
+        distance_m=distance_m,
+        view_angle_deg=view_angle_deg,
+        reproj_px=det.reprojection_error,
+        tag_px=tag_side_px(det.corners_px),
+    )
 
 
 def tag_side_px(corners_px: np.ndarray) -> float:
@@ -148,18 +139,6 @@ def tag_noise_scale(distance_m: float | None, reproj_px: float | None) -> float:
     range_term = (max(distance_m, MIN_SCALE_DISTANCE_M) / REF_DISTANCE_M) ** 2
     reproj_term = (max(reproj_px, MIN_SCALE_REPROJ_PX) / REF_REPROJ_PX) ** 2
     return max(range_term * reproj_term, MIN_TAG_NOISE_SCALE)
-
-
-def tag_covariance(pose: tuple[float, ...] | list[float], scale: float) -> np.ndarray:
-    """6x6 covariance for an aggregated tag pose, built in the tag frame and rotated into the pose's frame."""
-    R = Rotation.from_quat(pose[3:7]).as_matrix()
-    covariance = np.zeros((6, 6))
-    # ROS is TRANSLATION-first, so these blocks sit swapped vs jnav's rotation-first GTSAM Pose3.
-    # m^2: 5 cm in-plane, 50 cm along the tag normal (PnP's weak axis)
-    covariance[:3, :3] = R @ np.diag([0.0025, 0.0025, 0.25]) @ R.T
-    # rad^2: 11.5 deg about the mirror axes, 2.9 deg spin
-    covariance[3:, 3:] = R @ np.diag([0.04, 0.04, 0.0025]) @ R.T
-    return covariance * scale
 
 
 def gate_reason(obs: TagObservation, config: AggregationConfig) -> str | None:
@@ -257,9 +236,7 @@ def _median_present(values: list[float | None]) -> float | None:
 
 
 def aggregate_by_marker_id(
-    observations: list[TagObservation],
-    rotation_weight_m_per_rad: float = DEFAULT_ROTATION_WEIGHT_M_PER_RAD,
-    huber_delta_m: float = DEFAULT_HUBER_DELTA_M,
+    observations: list[TagObservation], config: AggregationConfig
 ) -> dict[int, tuple[Pose7, int]]:
     """Batch: group observations by marker_id and fuse each group to one robust pose; id -> (7-vec, n)."""
     by_id: dict[int, list[TagObservation]] = defaultdict(list)
@@ -267,7 +244,7 @@ def aggregate_by_marker_id(
         by_id[obs.marker_id].append(obs)
     return {
         marker_id: (
-            robust_cluster_pose(group, rotation_weight_m_per_rad, huber_delta_m),
+            robust_cluster_pose(group, config.rotation_weight_m_per_rad, config.huber_delta_m),
             len(group),
         )
         for marker_id, group in by_id.items()

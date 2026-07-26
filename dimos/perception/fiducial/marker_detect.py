@@ -31,7 +31,6 @@ from dimos.perception.fiducial.marker_pose import (
     camera_optical_frame_id,
     create_aruco_detector,
     marker_corners_to_bbox,
-    marker_reprojection_error,
     rvec_tvec_to_transform,
 )
 
@@ -96,7 +95,7 @@ def detect_markers_in_image(
         if pose is None:
             continue
 
-        rvec, tvec = pose
+        rvec, tvec, reprojection_error = pose
         t_optical_marker = rvec_tvec_to_transform(
             rvec,
             tvec,
@@ -108,15 +107,6 @@ def detect_markers_in_image(
 
         corners_2d = corner_set.reshape(4, 2).astype(np.float32)
         bbox = marker_corners_to_bbox(corners_2d)
-        reprojection_error = marker_reprojection_error(
-            corners_2d,
-            marker_length_m,
-            camera_matrix,
-            dist_coeffs,
-            rvec,
-            tvec,
-            distortion_model=camera_info.distortion_model,
-        )
 
         detections.append(
             Detection3DMarker(

@@ -194,10 +194,8 @@ def refine_candidates(
     upright = [T for T in candidates if _gravity_tilt_deg(T) <= GRAVITY_TILT_MAX_DEG]
     if not upright:
         raise NoUprightCandidateError(
-            f"no candidate within the gravity gate: {len(candidates)} candidate(s), "
-            f"none within {GRAVITY_TILT_MAX_DEG} deg -- refusing"
+            f"all {len(candidates)} candidate(s) tilt past {GRAVITY_TILT_MAX_DEG} deg"
         )
-    pool = upright
 
     # Build WALL-ONLY clouds for scoring + polish. Floor/ceiling points have
     # vertical normals; they fit equally well in any yaw rotation (flat planes
@@ -219,8 +217,7 @@ def refine_candidates(
     if n_src_walls < MIN_WALL_POINTS or n_tgt_walls < MIN_WALL_POINTS:
         # floors-only scoring is rotation-blind, so there is nothing to fall back to
         raise InsufficientWallEvidenceError(
-            f"insufficient wall evidence: submap walls={n_src_walls}, "
-            f"map walls={n_tgt_walls} < {MIN_WALL_POINTS} — skipping solve"
+            f"submap walls={n_src_walls}, map walls={n_tgt_walls} < {MIN_WALL_POINTS}"
         )
 
     # Stage 1: rank all candidates by WALL-only fine-scale fitness.
@@ -228,7 +225,7 @@ def refine_candidates(
         r = _reg.evaluate_registration(src_walls, tgt_walls, RERANK_DIST, T)
         return float(r.fitness)
 
-    top_k = sorted(pool, key=fine_fitness, reverse=True)[:10]
+    top_k = sorted(upright, key=fine_fitness, reverse=True)[:10]
 
     # Stage 2: run a moderate-distance ICP on each top-10 on WALL clouds.
     # Wall correspondences drive yaw and xy; the rerank then picks the

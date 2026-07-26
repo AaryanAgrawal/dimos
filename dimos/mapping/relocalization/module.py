@@ -27,11 +27,11 @@ from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.mapping.relocalization.eval import SourceTally, format_eval_summary
 from dimos.mapping.relocalization.fiducial import FiducialPrior, FiducialPriorConfig
-from dimos.mapping.relocalization.prior import PriorConfigBase, RelocPrior, relocalize_with_prior
-from dimos.mapping.relocalization.ransac import RansacPrior, RansacPriorConfig
+from dimos.mapping.relocalization.prior import PriorConfigBase, RansacPrior, RansacPriorConfig
 from dimos.mapping.relocalization.relocalize import (
     InsufficientWallEvidenceError,
     NoUprightCandidateError,
+    refine_candidates,
 )
 from dimos.mapping.voxels import VoxelGrid
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -57,6 +57,9 @@ ACCEPTED_FIX_TYPE = {"ransac": "location", "fiducial": "object"}
 MAX_ACCEPTED_FIXES = 500  # a 730 s survey polls RANSAC ~365 times, so a whole run fits
 
 _PriorConfigT = TypeVar("_PriorConfigT", bound=PriorConfigBase)
+
+# A prior proposes candidates; it must not self-select a winner -- that is refine_candidates' job.
+RelocPrior = RansacPrior | FiducialPrior
 
 # Discriminated on ``type`` (kinematics/config.py:54 is the exemplar); assembled here, its only consumer, so prior.py stays unaware of the leaves.
 PriorConfig = Annotated[
@@ -91,7 +94,7 @@ class Config(ModuleConfig):
             key: entry.model_copy(deep=True)
             for key, entry in cls.model_fields["priors"].default.items()
         }
-        pool.update({k: {**v, "type": k} if isinstance(v, dict) else v for k, v in overlay.items()})
+        pool.update({k: {**v, "type": k} for k, v in overlay.items()})
         return {**data, "priors": pool}
 
 
@@ -113,16 +116,9 @@ class RelocalizationModule(Module):
         self._accepted_fixes: deque[Marker] = deque(maxlen=MAX_ACCEPTED_FIXES)
         self._world_to_map: Subject[Transform | None] = Subject()
         # Prior objects are built ONCE, not per frame: the fiducial holds pending-fix state across bursts that a fresh instance would reset. The RANSAC prior is a pure source; the module owns its poll timer (below).
-        ransac = self._enabled_entry(RansacPriorConfig)
-        self._ransac_prior = RansacPrior() if ransac else None
-        # Per-source accept gate {prior name: min wall fitness}. Key = the entry's `type` discriminator, which equals the ``name`` of the prior it builds.
-        self._accept_threshold: dict[str, float] = {
-            p.type: p.fitness_threshold for p in self.config.priors.values()
-        }
-        # RANSAC poll timer and its point floor, both read only while the prior is up (0 while it is down). Last fire None == never fired, so the first dense-enough frame relocalizes immediately.
-        self._ransac_interval_s = ransac.interval_s if ransac else 0.0
-        self._ransac_min_local_points = ransac.min_local_points if ransac else 0
-        self._last_ransac_fired_s: float | None = None
+        self._ransac = self._enabled_entry(RansacPriorConfig)
+        self._ransac_prior = RansacPrior() if self._ransac else None
+        self._last_ransac_fired_s: float | None = None  # None: fire on the first dense frame
         # Built in start(), where the prior loads its own marker map.
         self._fiducial_prior: FiducialPrior | None = None
         # Latest global_map, so a completed tag burst is judged the instant it lands. Sound because the stream ACCUMULATES in the world frame: the previous cloud scores wall fitness as well as the newest, and the tag candidate needs no lidar at all.
@@ -173,11 +169,7 @@ class RelocalizationModule(Module):
         )
         # Both priors default on and the blueprint names none, so this is where an operator sees what actually came up: an enabled fiducial entry with no marker map is inert.
         live = [p.name for p in (self._ransac_prior, self._fiducial_prior) if p is not None]
-        logger.info(
-            "relocalize priors",
-            live=live,
-            inert=[p.type for p in self.config.priors.values() if p.type not in live],
-        )
+        logger.info("relocalize priors", live=live)
 
     @rpc
     def stop(self) -> None:
@@ -210,14 +202,6 @@ class RelocalizationModule(Module):
             log(event, **kw)
             self._last_skip_log = now
 
-    def _has_enough_points(self, msg: PointCloud2) -> bool:
-        return len(msg) >= self._ransac_min_local_points
-
-    def _publish_tf(self, tf: Transform | None) -> None:
-        if tf is None:
-            return
-        self._world_to_map.on_next(tf)
-
     def _on_aggregated_detections(self, msg: Detection3DArray) -> None:
         """Hand the burst to the fiducial prior, then fire it."""
         if self._fiducial_prior is None:
@@ -230,18 +214,20 @@ class RelocalizationModule(Module):
 
     def _fire(self, prior: RelocPrior, local_map: PointCloud2) -> None:
         """Run this prior's ONE relocalization and publish the resulting TF."""
-        self._publish_tf(self._try_relocalize(local_map, prior))
+        tf = self._try_relocalize(local_map, prior)
+        if tf is not None:
+            self._world_to_map.on_next(tf)
 
     def _on_local_map(self, msg: PointCloud2) -> None:
         """Poll the RANSAC prior on the module's timer; on cold start fire a pending fiducial fix."""
         self._last_local_map = msg  # what a burst-triggered fire judges against
         now = time.monotonic()
-        if self._ransac_prior is not None:
+        if self._ransac is not None and self._ransac_prior is not None:
             time_due = (
                 self._last_ransac_fired_s is None
-                or now - self._last_ransac_fired_s >= self._ransac_interval_s
+                or now - self._last_ransac_fired_s >= self._ransac.interval_s
             )
-            if time_due and self._has_enough_points(msg):
+            if time_due and len(msg) >= self._ransac.min_local_points:
                 self._last_ransac_fired_s = now
                 self._fire(self._ransac_prior, msg)
             elif time_due:
@@ -249,7 +235,7 @@ class RelocalizationModule(Module):
                 self._throttled_warn(
                     "relocalize skipped: sparse submap",
                     n_pts=len(msg),
-                    min_local_points=self._ransac_min_local_points,
+                    min_local_points=self._ransac.min_local_points,
                 )
 
         if self._fiducial_prior is not None and self._fiducial_prior.has_pending:
@@ -277,9 +263,13 @@ class RelocalizationModule(Module):
     def _solve(self, msg: PointCloud2, prior: RelocPrior) -> tuple[np.ndarray, float] | None:
         """Judge this prior's candidates, turning each refusal into a None sentinel."""
         assert self._premap is not None, "start() loads the premap before any fire"
+        global_map, local_map = self._premap.pointcloud, msg.pointcloud
         try:
-            # None here is the double-fire race: the other thread's propose() drained the pending tag fix first and already published it -- benign no-op.
-            return relocalize_with_prior(self._premap.pointcloud, msg.pointcloud, prior)
+            # empty is the double-fire race: the other thread's propose() drained the pending tag fix and published it
+            candidates = prior.propose(global_map, local_map)
+            if not candidates:
+                return None
+            return refine_candidates(global_map, local_map, candidates)
         except InsufficientWallEvidenceError as e:
             # Too few wall points to judge the pool (a sparse acquisition cloud a tag burst is allowed to fire on): drop the unjudged fix -- a pose scored against <100 walls isn't trustworthy, and the tag is re-seen as the robot moves into structure.
             self._throttled_warn(
@@ -298,21 +288,19 @@ class RelocalizationModule(Module):
 
     def _fitness_ok(self, prior: RelocPrior, fitness: float, dt: float, n_pts: int) -> bool:
         """Gate the fix on its own prior's bar."""
-        threshold = self._accept_threshold[prior.name]
+        threshold = self.config.priors[prior.name].fitness_threshold
         if fitness >= threshold:
             return True
         if self.config.eval:
             self._eval_tally.setdefault(prior.name, SourceTally()).rejects += 1
-        # threshold= IS the reason: this is the only fitness reject path, and the operator's next move is to compare the two numbers.
-        extra: dict[str, Any] = (
-            {"time_cost_s": round(dt, 1), "n_pts": n_pts} if self.config.eval else {}
-        )
+        # threshold= IS the reason: the operator's next move is to compare the two numbers.
         logger.warning(
             "relocalize rejected",
             source=prior.name,
             fitness=round(fitness, 3),
             threshold=threshold,
-            **extra,
+            time_cost_s=round(dt, 1),
+            n_pts=n_pts,
         )
         return False
 
@@ -320,9 +308,6 @@ class RelocalizationModule(Module):
         self, map_T_world: np.ndarray, prior: RelocPrior, fitness: float, dt: float, n_pts: int
     ) -> Transform:
         """Return the accepted fix as the world->map TF."""
-        # relocalize(scan, map) returns T such that scan_in_map_frame = T(scan_raw).
-        # We are publishing a TF for map_in_scan_frame, notice that the base frame is `world`
-        # so inverse the transform T here to get map_in_scan_frame
         world_T_map = np.linalg.inv(map_T_world)
         self._log_accept(prior, fitness, dt, n_pts, map_T_world, world_T_map)
         self._publish_accepted_fixes(prior, fitness, world_T_map)
@@ -348,11 +333,13 @@ class RelocalizationModule(Module):
             entry.accepts += 1
             entry.fitnesses.append(round(fitness, 3))
         logger.info(
-            f"relocalize: fitness={fitness:.3f} time_cost={dt:.1f}s n_pts={n_pts} "
-            f"reloc_t={map_T_world[:3, 3].round(3).tolist()} "
-            f"TF {FRAME_WORLD!r} -> {FRAME_MAP!r} "
-            f"published_t={world_T_map[:3, 3].round(3).tolist()} "
-            f"source={prior.name} "
+            "relocalize accepted",
+            source=prior.name,
+            fitness=round(fitness, 3),
+            time_cost_s=round(dt, 1),
+            n_pts=n_pts,
+            reloc_t_m=map_T_world[:3, 3].round(3).tolist(),
+            published_t_m=world_T_map[:3, 3].round(3).tolist(),
         )
 
     def _publish_accepted_fixes(
@@ -367,7 +354,7 @@ class RelocalizationModule(Module):
             Marker(
                 entity_id=prior.name,
                 label=f"{fitness:.2f}",
-                entity_type=ACCEPTED_FIX_TYPE.get(prior.name, ""),
+                entity_type=ACCEPTED_FIX_TYPE[prior.name],
                 x=float(x),
                 y=float(y),
                 z=float(z),
