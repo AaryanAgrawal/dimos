@@ -760,7 +760,12 @@ def generate(seed: int, rules: GenRules | None = None, emb: Embodiment = GO2) ->
 # Generated-set defaults: the suite and the CLI share these.
 GEN_COUNT = 40
 GEN_SEED = 0
-_CACHE = _CACHE_BASE / ".gen_cache.pkl"
+
+
+def _gen_cache(count: int, seed: int) -> FilePath:
+    """One cache file per battery: a 40-world set and a 20-world OOD set
+    must not clobber each other (the key check alone made them alternate)."""
+    return _CACHE_BASE / f".gen_cache_{count}_{seed}.pkl"
 
 
 def _gen_hash(count: int, seed: int, rules: GenRules, emb: Any) -> str:
@@ -780,9 +785,12 @@ def generated(
     emb=None mixes the roster: each seed gets EMBODIMENTS[seed % len]."""
     rules = rules or GenRules()
     key = _gen_hash(count, seed, rules, emb if emb is not None else tuple(EMBODIMENTS))
-    if _CACHE.exists():
+    cache = _gen_cache(count, seed)
+    if not cache.exists() and (legacy := _CACHE_BASE / ".gen_cache.pkl").exists():
+        cache = legacy  # pre-split cache; read-only fallback, new writes split
+    if cache.exists():
         try:
-            payload = pickle.loads(_CACHE.read_bytes())
+            payload = pickle.loads(cache.read_bytes())
             if payload.get("key") == key:
                 return list(payload["scenarios"])
         except Exception:
@@ -794,5 +802,5 @@ def generated(
         scenarios.append(generate(s, rules, emb if emb is not None else roster[s % len(roster)]))
     print(file=sys.stderr)
     if not _CACHE_RO:
-        _write_atomic(_CACHE, pickle.dumps({"key": key, "scenarios": scenarios}))
+        _write_atomic(_gen_cache(count, seed), pickle.dumps({"key": key, "scenarios": scenarios}))
     return scenarios

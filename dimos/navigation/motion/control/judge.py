@@ -169,6 +169,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
             xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
             xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
             churn=round(plan_churn(result), 4),
+            plan_tight=round(min(result.plan_min_clear), 4) if result.plan_min_clear else math.inf,
             tilt_p99=round(float(np.percentile(result.tilt, 99)), 4) if len(result.tilt) else 0.0,
             total=0.0,
         )
@@ -217,6 +218,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
         xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
         churn=round(churn, 4),
+        plan_tight=round(min(result.plan_min_clear), 4) if result.plan_min_clear else math.inf,
         tilt_p99=round(tilt_p99, 4),
         saturation=round(sat, 4),
         plan_ms=round(float(np.max(result.plan_ms)), 2) if result.plan_ms else 0.0,
@@ -251,5 +253,6 @@ def print_row(row: dict[str, Any], sc: Scenario) -> None:
         f"{row['name']:<18s} {row['outcome']:<9s} {ttg}"
         f"  clear {mc_s}  below {row.get('below_floor', 0.0):4.2f}"
         f"  xt95 {row.get('xtrack_p95', 0.0):5.2f}  churn {row.get('churn', 0.0):5.2f}"
+        f"  ptight {row.get('plan_tight', 0.0):5.2f}"
         f"  tilt99 {row.get('tilt_p99', 0.0):5.2f}  {row['total']:6.2f}  {sc.note}"
     )

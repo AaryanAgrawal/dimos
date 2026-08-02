@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from dimos.navigation.motion.control.controller import PursuitController
-from dimos.navigation.motion.control.episode import run_episode
+from dimos.navigation.motion.control.episode import EpisodeConfig, run_episode
 from dimos.navigation.motion.control.judge import score_episode
 from dimos.navigation.motion.planner.autoresearch.scenarios import SCENARIOS
 from dimos.navigation.motion.simulation.policy import FreePolicy
@@ -38,8 +38,10 @@ def _scenario(name: str):  # type: ignore[no-untyped-def]
     return next(s for s in SCENARIOS if s.name == name)
 
 
-def test_corridor_reaches_goal(policy: FreePolicy) -> None:
-    result = run_episode(_scenario("corridor"), PursuitController(), policy)
+def test_corridor_reaches_goal_plan_once(policy: FreePolicy) -> None:
+    result = run_episode(
+        _scenario("corridor"), PursuitController(), policy, EpisodeConfig(replan_hz=0.0)
+    )
     assert len(result.plan_t) == len(result.plans) == 1
     assert result.outcome == "goal"
     assert result.time_to_goal is not None and result.time_to_goal < 25.0
@@ -80,3 +82,20 @@ def test_commands_respect_hardware_slew(policy: FreePolicy) -> None:
     from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
     assert (steps <= COMMAND_SLEW[None, :] + 1e-9).all()
+
+
+def test_corridor_replan_battery_serial(policy: FreePolicy) -> None:
+    """Reality mode (5 Hz replanning) through the battery path, one world."""
+    from dimos.navigation.motion.control.battery import group_summaries, run_battery
+
+    rows = run_battery(
+        [(_scenario("corridor"), "curated")],
+        policy_path="ml-trajectory-research/freewalk_mcf.bin",
+        controller_name="pursuit",
+        cfg=EpisodeConfig(),
+        jobs=1,
+    )
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "goal"
+    assert rows[0]["plan_tight"] > 0.1  # corridor plans keep real margins
+    assert group_summaries(rows) == {"curated": rows[0]["total"]}

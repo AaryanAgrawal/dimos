@@ -68,7 +68,7 @@ class EpisodeConfig:
     actuator_tau: float = FITTED_ACTUATOR_TAU
     odom_hz: float = 29.0  # pointlio cadence (mid360_athens_stairs: 28.9)
     odom_latency: float = 0.0  # pipeline latency knob; staleness is odom_hz's job
-    replan_hz: float = 0.0  # 0 = plan once
+    replan_hz: float = 5.0  # reality replans; 0 = plan-once (lenient diagnostic mode)
     planner: str = "target"  # referee registry name or "module:factory"
     settle: float = 0.5  # policy warmup before the first command (walk.py)
     timeout: float = 40.0
@@ -122,6 +122,7 @@ class EpisodeResult:
     plan: Path  # the (last) planned path, world frame
     plans: list[RefereePath]  # every plan the episode produced
     plan_t: list[float]  # when each plan became active (s)
+    plan_min_clear: list[float]  # min planned clearance per plan (annotation space)
     plan_ms: list[float]  # planner CPU time per call
     time_to_goal: float | None
     cfg: EpisodeConfig  # what actually ran (post-DR values included)
@@ -272,6 +273,7 @@ def run_episode(
 
     plans: list[RefereePath] = []
     plan_t: list[float] = []
+    plan_min_clear: list[float] = []
     plan_ms: list[float] = []
     nav_path = Path(frame_id=frame_id, poses=[])
     clearance: np.ndarray | None = None
@@ -309,8 +311,12 @@ def run_episode(
                     plans.append(ref)
                     plan_t.append(t)
                     nav_path = world.to_nav_path(ref, ts=t, frame_id=frame_id)
+                    # always computed for the judge's plan_tight diagnostic;
+                    # the controller only sees it when annotation is on
+                    clr = world.path_clearance(ref, cloud, sc.emb)
+                    plan_min_clear.append(float(np.min(clr)) if len(clr) else math.inf)
                     if cfg.annotate_clearance:
-                        clearance = world.path_clearance(ref, cloud, sc.emb)
+                        clearance = clr
                     next_plan_t = t + replan_period
                     if viewer is not None:
                         _draw_plan(viewer, ref, sc)
@@ -391,6 +397,7 @@ def run_episode(
         plan=nav_path,
         plans=plans,
         plan_t=plan_t,
+        plan_min_clear=plan_min_clear,
         plan_ms=plan_ms,
         time_to_goal=time_to_goal,
         cfg=cfg,

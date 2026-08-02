@@ -26,6 +26,7 @@ import json
 
 import numpy as np
 
+from dimos.navigation.motion.control.battery import group_summaries, ood_worlds, run_battery
 from dimos.navigation.motion.control.controller import load as load_controller
 from dimos.navigation.motion.control.episode import (
     DomainRandomization,
@@ -49,7 +50,7 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=1.0, help="viewer speed factor")
     ap.add_argument("--score", action="store_true", help="judge each episode + summary")
     ap.add_argument("--json", action="store_true", help="summary as JSON only")
-    ap.add_argument("--replan-hz", type=float, default=0.0, help="0 = plan once")
+    ap.add_argument("--replan-hz", type=float, default=5.0, help="0 = plan once (lenient)")
     ap.add_argument("--policy", default=DEFAULT_POLICY, help="FREE policy blob")
     ap.add_argument("--planner", default="target", help="referee planner registry name")
     ap.add_argument(
@@ -58,39 +59,64 @@ def main() -> None:
     ap.add_argument("--blind", action="store_true", help="drop the clearance annotation")
     ap.add_argument("--dr", action="store_true", help="randomize mechanisms per episode")
     ap.add_argument("--seed", type=int, default=0, help="rng seed for --dr")
+    ap.add_argument("--draws", type=int, default=1, help="DR draws per world (implies --dr)")
+    ap.add_argument("--ood", type=int, default=0, help="add N held-out-rules worlds")
+    ap.add_argument("--jobs", type=int, default=1, help="parallel episode workers")
     args = ap.parse_args()
 
-    scenarios = list(SCENARIOS)
+    tagged = [(sc, "curated") for sc in SCENARIOS]
     if args.gen:
-        scenarios += generated(args.gen)
+        tagged += [(sc, "gen") for sc in generated(args.gen)]
+    if args.ood:
+        tagged += [(sc, "ood") for sc in ood_worlds(args.ood)]
     if args.ls:
-        for sc in scenarios:
+        for sc, group in tagged:
             emb = f" [{sc.emb.tag}]" if sc.emb.tag != "go2" else ""
-            print(f"{sc.name:<20s} {sc.expect:<7s}{emb} {sc.note}")
+            print(f"{sc.name:<20s} {group:<8s} {sc.expect:<7s}{emb} {sc.note}")
         return
     if args.scenario:
-        scenarios = [s for s in scenarios if s.name == args.scenario]
-        if not scenarios:
+        tagged = [(s, g) for s, g in tagged if s.name == args.scenario]
+        if not tagged:
             ap.error(f"no scenario named {args.scenario!r}")
+    if args.jobs > 1 and args.view:
+        ap.error("--jobs > 1 cannot render; --view runs serially")
 
-    policy = FreePolicy.load(get_data(args.policy))
     cfg = EpisodeConfig(
         replan_hz=args.replan_hz, planner=args.planner, annotate_clearance=not args.blind
     )
-    dr = DomainRandomization() if args.dr else None
-    make_controller = load_controller(args.controller)
-    rng = np.random.default_rng(args.seed)
+    dr = DomainRandomization() if (args.dr or args.draws > 1) else None
 
-    rows = []
-    for sc in scenarios:
-        result = run_episode(
-            sc, make_controller(), policy, cfg, view=args.view, speed=args.speed, dr=dr, rng=rng
+    if args.view:
+        policy = FreePolicy.load(get_data(args.policy))
+        make_controller = load_controller(args.controller)
+        rng = np.random.default_rng(args.seed)
+        rows = []
+        for sc, group in tagged:
+            result = run_episode(
+                sc, make_controller(), policy, cfg, view=True, speed=args.speed, dr=dr, rng=rng
+            )
+            row = score_episode(result)
+            row["group"] = group
+            rows.append(row)
+            if not args.json:
+                print_row(row, sc)
+    else:
+        by_name = {sc.name: sc for sc, _ in tagged}
+        rows = run_battery(
+            tagged,
+            policy_path=args.policy,
+            controller_name=args.controller,
+            cfg=cfg,
+            dr=dr,
+            seed=args.seed,
+            draws=args.draws,
+            jobs=args.jobs,
         )
-        row = score_episode(result)
-        rows.append(row)
         if not args.json:
-            print_row(row, sc)
+            for row in rows:
+                print_row(row, by_name[row["name"]])
     summary = summarize(rows)
+    summary["groups"] = group_summaries(rows)
     print(json.dumps({"summary": summary} if args.json else summary))
 
 

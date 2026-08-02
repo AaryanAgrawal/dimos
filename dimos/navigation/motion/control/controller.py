@@ -115,7 +115,9 @@ class PursuitController:
         self, pose: PoseStamped, path: Path, t: float, clearance: np.ndarray | None = None
     ) -> Twist:
         cfg = self.config
-        if len(path) == 0:
+        if len(path) < 2:
+            # empty path or a single-pose veto stub: there is nothing to
+            # follow -- hold position (the planner is saying "stop")
             return Twist(Vector3(0, 0, 0), Vector3(0, 0, 0))
         xy = np.array([[p.position.x, p.position.y] for p in path.poses])
         yaws = np.array([p.yaw for p in path.poses])

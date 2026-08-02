@@ -66,6 +66,7 @@ def _result(
         plan=world.to_nav_path(_plan()),
         plans=[_plan()],
         plan_t=[0.5],
+        plan_min_clear=[0.29],
         plan_ms=[2.0],
         time_to_goal=time_to_goal,
         cfg=EpisodeConfig(),
