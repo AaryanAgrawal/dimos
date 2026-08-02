@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import hashlib
 import inspect
 import math
+import os
 from pathlib import Path as FilePath
 import pickle
 import sys
@@ -386,9 +387,24 @@ def _route(
     return bfs_path(boxes, a, b, radius, bounds) is not None
 
 
+# Cache location and write policy. AUTORESEARCH_CACHE_DIR redirects both
+# pickle caches (harnesses point workers/worktrees at one shared dir);
+# AUTORESEARCH_CACHE_RO suppresses writes — the caches are whole-file
+# read-modify-write pickles, so concurrent writers lose updates.
+_CACHE_BASE = FilePath(os.environ.get("AUTORESEARCH_CACHE_DIR") or FilePath(__file__).parent)
+_CACHE_RO = bool(os.environ.get("AUTORESEARCH_CACHE_RO"))
+
+
+def _write_atomic(path: FilePath, payload: bytes) -> None:
+    """Atomic replace: a crash mid-write can never leave a torn pickle."""
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp.write_bytes(payload)
+    os.replace(tmp, path)
+
+
 # The true body footprint, sampled densely enough that a 4 cm slat cannot
 # slip between sample points (GO2 box 0.85 x 0.31, centered -0.025).
-_SE2_CACHE = FilePath(__file__).parent / ".se2_cache.pkl"
+_SE2_CACHE = _CACHE_BASE / ".se2_cache.pkl"
 
 
 def se2_search(
@@ -628,10 +644,11 @@ def se2_path(
         fgx, fgy, sdf_grid, (x0, y0, x1, y1), start, goal, emb, margin, cell, yaw_bins
     )
     memo[key] = result
-    try:
-        _SE2_CACHE.write_bytes(pickle.dumps(memo))
-    except Exception:
-        pass
+    if not _CACHE_RO:
+        try:
+            _write_atomic(_SE2_CACHE, pickle.dumps(memo))
+        except Exception:
+            pass
     return result
 
 
@@ -743,7 +760,7 @@ def generate(seed: int, rules: GenRules | None = None, emb: Embodiment = GO2) ->
 # Generated-set defaults: the suite and the CLI share these.
 GEN_COUNT = 40
 GEN_SEED = 0
-_CACHE = FilePath(__file__).parent / ".gen_cache.pkl"
+_CACHE = _CACHE_BASE / ".gen_cache.pkl"
 
 
 def _gen_hash(count: int, seed: int, rules: GenRules, emb: Any) -> str:
@@ -776,5 +793,6 @@ def generated(
         roster = list(EMBODIMENTS.values())
         scenarios.append(generate(s, rules, emb if emb is not None else roster[s % len(roster)]))
     print(file=sys.stderr)
-    _CACHE.write_bytes(pickle.dumps({"key": key, "scenarios": scenarios}))
+    if not _CACHE_RO:
+        _write_atomic(_CACHE, pickle.dumps({"key": key, "scenarios": scenarios}))
     return scenarios

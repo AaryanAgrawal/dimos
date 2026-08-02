@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import itertools
 import math
 import time
+from typing import Any
 
 import numpy as np
 
@@ -480,6 +481,124 @@ def render(
     strip("robot/body_top", body.outline(0.4), [255, 200, 0])
 
 
+def _record(v: Verdict, sc: Scenario, score: bool) -> dict[str, Any]:
+    """One world's result as plain data: table row fields + score dict."""
+    side = "L" if v.lat_mean > 0.02 else ("R" if v.lat_mean < -0.02 else "-")
+    return {
+        "name": sc.name,
+        "note": sc.note,
+        "expect": sc.expect,
+        "emb": sc.emb.tag,
+        "side": side,
+        "lat_max": v.lat_max,
+        "min_scored": v.min_scored,
+        "min_truth": v.min_truth,
+        "veto": v.veto,
+        "fans": v.fans,
+        "flicker": v.flicker,
+        "consist": v.consist,
+        "avoid_ms": v.avoid_ms,
+        "gold_ms": v.gold_ms,
+        "timed_out": v.timed_out,
+        "world": score_world(v) if score else None,
+    }
+
+
+def _print_row(r: dict[str, Any], score: bool) -> None:
+    score_col = ""
+    if score:
+        w = r["world"]
+        score_col = f"{'DQ' if w['dq'] else w['total']:>8}"
+    print(
+        f"{r['name']:<14}{r['side']:>6}{r['lat_max']:>9.2f}{r['min_scored']:>9.2f}"
+        f"{r['min_truth']:>9.2f}{r['veto']!s:>6}{r['fans']:>6}{r['flicker']:>9.3f}"
+        f"{r['consist']:>9.3f}{r['avoid_ms']:>7.1f}{r['gold_ms']:>7.1f}{score_col}  {r['note']}"
+    )
+
+
+def _worker_main(
+    core: int | None,
+    planner: str,
+    time_limit_ms: float | None,
+    inq: Any,
+    outq: Any,
+) -> None:
+    """Battery worker: judge scenarios pulled from inq, push (idx, record).
+
+    Each worker is its own process pinned to its own core, so
+    time.process_time() inside judge() measures exactly this worker's CPU —
+    parallel workers do not contaminate each other's avoid_ms. (They do share
+    L3/memory bandwidth and the turbo budget, so absolute timings carry a
+    small conservative bias vs a serial run; gold and consistency are exact.)
+    """
+    import os
+
+    if core is not None:
+        try:
+            os.sched_setaffinity(0, {core})
+        except (AttributeError, OSError):
+            pass  # non-Linux: unpinned, timings advisory
+    while True:
+        item = inq.get()
+        if item is None:
+            return
+        idx, sc = item
+        v = judge(sc, AvoidanceConfig(), planner=planner, time_limit_ms=time_limit_ms)
+        outq.put((idx, _record(v, sc, score=True)))
+
+
+def _run_parallel(
+    todo: list[Scenario], planner: str, time_limit_ms: float | None, jobs: int
+) -> list[dict[str, Any]]:
+    """Fan the battery over worker processes, one pinned core each.
+
+    The parent warms both pickle caches serially first (they are whole-file
+    read-modify-write, unsafe under concurrent writers), then spawns workers
+    with AUTORESEARCH_CACHE_RO=1 in the inherited environment — spawn
+    re-imports scenarios.py in each child, which reads the flag at import.
+    """
+    import multiprocessing as mp
+    import os
+
+    for sc in todo:  # warm the gold cache with the judge's exact queries
+        se2_path(sc.boxes, sc.start, sc.goal, sc.emb)
+
+    try:
+        cores = sorted(os.sched_getaffinity(0))
+    except AttributeError:
+        cores = []
+    jobs = max(1, min(jobs, len(todo), len(cores) or jobs))
+    ctx = mp.get_context("spawn")
+    inq: Any = ctx.Queue()
+    outq: Any = ctx.Queue()
+    for item in enumerate(todo):
+        inq.put(item)
+    for _ in range(jobs):
+        inq.put(None)
+
+    os.environ["AUTORESEARCH_CACHE_RO"] = "1"
+    try:
+        workers = [
+            ctx.Process(
+                target=_worker_main,
+                args=(cores[i] if cores else None, planner, time_limit_ms, inq, outq),
+                daemon=True,
+            )
+            for i in range(jobs)
+        ]
+        for w in workers:
+            w.start()
+        results: dict[int, dict[str, Any]] = {}
+        for _ in range(len(todo)):
+            idx, rec = outq.get()
+            results[idx] = rec
+        for w in workers:
+            w.join()
+    finally:
+        del os.environ["AUTORESEARCH_CACHE_RO"]
+    return [results[i] for i in range(len(todo))]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-s", "--scenario", help="run one scenario by name")
@@ -516,13 +635,47 @@ def main() -> None:
         default=None,
         help="per-plan-call budget for scored runs (default 6000 with --score)",
     )
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="worker processes for the battery, one pinned core each (default 1: "
+        "serial, identical to the classic run). Speed timings are per-process "
+        "CPU time, so they stay valid; gold/consistency are exact either way.",
+    )
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON document with per-world records + summary (implies --score)",
+    )
+    ap.add_argument(
+        "--build",
+        action="store_true",
+        help="build + install the rust candidate (maturin develop --release) first",
+    )
     args = ap.parse_args()
 
+    if args.build:
+        import pathlib
+        import subprocess
+
+        manifest = pathlib.Path(__file__).parent / "rust" / "Cargo.toml"
+        subprocess.run(
+            ["uv", "run", "maturin", "develop", "--uv", "--release", "-m", str(manifest)],
+            check=True,
+        )
+    if args.json:
+        args.score = True
+    if args.jobs > 1 and (args.view or args.spawn):
+        ap.error("--jobs > 1 cannot render (--view/--spawn); run those serially")
+    if args.jobs > 1 and not args.score:
+        args.score = True  # parallel runs exist for scoring; records carry scores
     if args.score and args.time_limit_ms is None:
         args.time_limit_ms = 6000.0
-    if args.score:
+    if args.score and args.jobs == 1:
         # Scored runs are timing runs: pin to one core so candidate threads
         # cannot help (single-thread rule) and ms is stable under load.
+        # (With --jobs > 1 each WORKER pins itself; the parent stays free.)
         import os
 
         try:
@@ -549,7 +702,7 @@ def main() -> None:
         f"{'scenario':<14}{'side':>6}{'lat_max':>9}{'scored':>9}{'truth':>9}"
         f"{'veto':>6}{'fans':>6}{'flicker':>9}{'consist':>9}{'ms':>7}{'gold':>7}  note"
     )
-    if not args.quiet:
+    if not args.quiet and not args.json:
         print(hdr)
         print("-" * len(hdr))
     # Grid placement from geometry alone, so rendering streams per case.
@@ -566,28 +719,41 @@ def main() -> None:
             cur_x += (e[1] - e[0]) + gap
         top -= max(e[3] - e[2] for e in exts) + gap
 
-    scores = []
-    for sc in todo:
-        v = judge(sc, cfg, planner=args.planner, time_limit_ms=args.time_limit_ms)
-        side = "L" if v.lat_mean > 0.02 else ("R" if v.lat_mean < -0.02 else "-")
-        score_col = ""
-        if args.score:
-            w = score_world(v)
-            scores.append(w)
-            score_col = f"{'DQ' if w['dq'] else w['total']:>8}"
-        if not args.quiet:
-            print(
-                f"{sc.name:<14}{side:>6}{v.lat_max:>9.2f}{v.min_scored:>9.2f}"
-                f"{v.min_truth:>9.2f}{v.veto!s:>6}{v.fans:>6}{v.flicker:>9.3f}"
-                f"{v.consist:>9.3f}{v.avoid_ms:>7.1f}{v.gold_ms:>7.1f}{score_col}  {sc.note}"
-            )
-        if args.view or args.spawn:
-            dx, dy, e = place[sc.name]
-            render(v, dx=dx, dy=dy, ext=e)
+    records: list[dict[str, Any]] = []
+    if args.jobs > 1:
+        records = _run_parallel(todo, args.planner, args.time_limit_ms, args.jobs)
+        if not args.quiet and not args.json:
+            for rec in records:
+                _print_row(rec, score=True)
+    else:
+        for sc in todo:
+            v = judge(sc, cfg, planner=args.planner, time_limit_ms=args.time_limit_ms)
+            rec = _record(v, sc, score=args.score)
+            records.append(rec)
+            if not args.quiet and not args.json:
+                _print_row(rec, score=args.score)
+            if args.view or args.spawn:
+                dx, dy, e = place[sc.name]
+                render(v, dx=dx, dy=dy, ext=e)
+
     if args.score:
         import json
 
-        print(json.dumps(summarize(scores)))
+        scores = [r["world"] for r in records]
+        if args.json:
+
+            def finite(o: Any) -> Any:
+                if isinstance(o, float):
+                    return o if math.isfinite(o) else None
+                if isinstance(o, dict):
+                    return {k: finite(x) for k, x in o.items()}
+                if isinstance(o, list):
+                    return [finite(x) for x in o]
+                return o
+
+            print(json.dumps(finite({"summary": summarize(scores), "worlds": records})))
+        else:
+            print(json.dumps(summarize(scores)))
 
     if args.spawn:
         # The last burst of logs must reach the viewer before we exit.
