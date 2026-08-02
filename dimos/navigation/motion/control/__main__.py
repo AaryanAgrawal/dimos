@@ -14,7 +14,9 @@
 
 """Run and score closed-loop episodes.
 
+python -m dimos.navigation.motion.control --ls                 # scenario names
 python -m dimos.navigation.motion.control --view -s corridor   # watch one
+python -m dimos.navigation.motion.control --view --gen 8 -s gen003   # a generated one
 python -m dimos.navigation.motion.control --score              # curated battery
 python -m dimos.navigation.motion.control --score --gen 8      # + generated
 """
@@ -41,6 +43,7 @@ DEFAULT_POLICY = "ml-trajectory-research/freewalk_mcf.bin"
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-s", "--scenario", help="run a single scenario by name")
+    ap.add_argument("--ls", action="store_true", help="list scenario names and exit")
     ap.add_argument("--gen", type=int, default=0, help="add N generated worlds")
     ap.add_argument("--view", action="store_true", help="live MuJoCo viewer")
     ap.add_argument("--speed", type=float, default=1.0, help="viewer speed factor")
@@ -60,6 +63,11 @@ def main() -> None:
     scenarios = list(SCENARIOS)
     if args.gen:
         scenarios += generated(args.gen)
+    if args.ls:
+        for sc in scenarios:
+            emb = f" [{sc.emb.tag}]" if sc.emb.tag != "go2" else ""
+            print(f"{sc.name:<20s} {sc.expect:<7s}{emb} {sc.note}")
+        return
     if args.scenario:
         scenarios = [s for s in scenarios if s.name == args.scenario]
         if not scenarios:

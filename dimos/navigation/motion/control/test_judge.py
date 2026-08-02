@@ -64,7 +64,8 @@ def _result(
         used_cmd=cmd.copy(),
         contact=np.zeros(n, dtype=bool),
         plan=world.to_nav_path(_plan()),
-        plans=[],
+        plans=[_plan()],
+        plan_t=[0.5],
         plan_ms=[2.0],
         time_to_goal=time_to_goal,
         cfg=EpisodeConfig(),
@@ -163,3 +164,35 @@ def test_summarize_counts() -> None:
     assert s["outcomes"] == {"goal": 1, "collision": 1}
     assert s["worst"]["total"] == 0.0
     assert s["score"] == pytest.approx((rows[0]["total"] + 0.0) / 2, abs=0.01)
+
+
+def test_active_cross_track_scores_against_the_plan_of_the_time() -> None:
+    from dimos.navigation.motion.control.judge import active_cross_track
+
+    r = _result(lateral=0.3)
+    # a replan at t=7 that starts at the (drifted) robot: y=0.3
+    late = RefereePath(
+        frame_id="world",
+        poses=[RefereePose(frame_id="world", position=[i * 0.1, 0.3, 0.0]) for i in range(41)],
+    )
+    r.plans = [_plan(), late]
+    r.plan_t = [0.5, 7.0]
+    xt = active_cross_track(r)
+    early, after = xt[r.t < 7.0], xt[r.t >= 7.0]
+    assert float(np.min(early)) > 0.25  # drift vs the original plan stays scored
+    assert float(np.max(after)) < 0.05  # the new plan is followed cleanly
+
+
+def test_plan_churn_measures_forced_replans() -> None:
+    from dimos.navigation.motion.control.judge import plan_churn
+
+    r = _result()
+    straight = _plan()
+    detour = RefereePath(
+        frame_id="world",
+        poses=[RefereePose(frame_id="world", position=[i * 0.1, 0.2, 0.0]) for i in range(41)],
+    )
+    r.plans, r.plan_t = [straight, straight], [0.5, 7.0]
+    assert plan_churn(r) < 1e-9  # identical replans: follower held the line
+    r.plans = [straight, detour]
+    assert 0.15 < plan_churn(r) < 0.25  # follower forced a 0.2 m re-route

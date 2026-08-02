@@ -40,6 +40,7 @@ def _scenario(name: str):  # type: ignore[no-untyped-def]
 
 def test_corridor_reaches_goal(policy: FreePolicy) -> None:
     result = run_episode(_scenario("corridor"), PursuitController(), policy)
+    assert len(result.plan_t) == len(result.plans) == 1
     assert result.outcome == "goal"
     assert result.time_to_goal is not None and result.time_to_goal < 25.0
     assert not result.contact.any()

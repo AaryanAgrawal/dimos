@@ -42,6 +42,7 @@ from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 CRUISE = 0.35  # m/s the executor should hold through curves; pace=1 at this
 GRACE_S = 2.0  # flat allowance: settle, first-step lag, terminal deceleration
 TILT_SCALE = 0.35  # tilt p99 (rad, ~20 deg) at which stability hits 0
+CHURN_SCALE = 0.25  # forced-replan deviation (m) at which calm hits 0 (referee CONSIST_SCALE)
 
 
 def cross_track(pos_xy: np.ndarray, path_xy: np.ndarray) -> np.ndarray:
@@ -80,6 +81,60 @@ def _plan_xy(result: EpisodeResult) -> np.ndarray:
     return np.array([[p.position.x, p.position.y] for p in result.plan.poses]).reshape(-1, 2)
 
 
+def _ref_xy(ref: Any) -> np.ndarray:
+    return np.array([[p.position.x, p.position.y] for p in ref.poses]).reshape(-1, 2)
+
+
+def active_cross_track(result: EpisodeResult) -> np.ndarray:
+    """Cross-track of each tick against the plan that was ACTIVE at that tick.
+
+    Under receding horizon every replan starts at the robot, so error against
+    the latest plan resets to ~zero exactly when the follower drifts — the
+    replan must not amnesty the executor. Past ticks stay scored against the
+    instruction they were actually following.
+    """
+    if not result.plans or not len(result.t):
+        return np.zeros(0)
+    starts = np.asarray(result.plan_t)
+    which = np.clip(np.searchsorted(starts, result.t, side="right") - 1, 0, len(starts) - 1)
+    out = np.zeros(len(result.t))
+    for k in range(len(starts)):
+        m = which == k
+        if m.any():
+            out[m] = cross_track(result.pos[m, :2], _ref_xy(result.plans[k]))
+    return out
+
+
+CHURN_HORIZON = 2.0  # compare plans over this much arc ahead (m)
+
+
+def plan_churn(result: EpisodeResult) -> float:
+    """How much the follower forced the planner to re-route (m).
+
+    The world is static and the planner deterministic, so any difference
+    between plan n+1 and plan n's remainder is caused by the executor being
+    off the line (plus pose staleness). Max near-field deviation of each new
+    plan from its predecessor's remainder, over the first CHURN_HORIZON of
+    arc — the same consistency idea the referee applies to the planner,
+    pointed back at the executor.
+    """
+    worst = 0.0
+    for prev, new in zip(result.plans[:-1], result.plans[1:], strict=False):
+        pxy, nxy = _ref_xy(prev), _ref_xy(new)
+        if len(pxy) < 2 or len(nxy) < 1:
+            continue
+        # remainder of the previous plan from the point nearest the new start
+        i = int(np.argmin(np.linalg.norm(pxy - nxy[0], axis=1)))
+        remainder = pxy[i:]
+        if len(remainder) < 2:
+            continue
+        arcs = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(nxy, axis=0), axis=1))])
+        near = nxy[arcs <= CHURN_HORIZON]
+        if len(near):
+            worst = max(worst, float(np.max(cross_track(near, remainder))))
+    return worst
+
+
 def _saturation(result: EpisodeResult) -> float:
     """Fraction of active ticks where the hardware slew clipped the request."""
     if len(result.twist_cmd) < 2:
@@ -99,9 +154,24 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         "time_to_goal": result.time_to_goal,
     }
 
-    # Gate: physics vetoes everything else.
+    # Gate: physics vetoes everything else -- but the diagnostics still tell
+    # the story of HOW it died.
     if out["dq"]:
-        out.update(arrived=0.0, precision=0.0, pace=0.0, total=0.0)
+        clear = executed_clearance(result)
+        xt = active_cross_track(result)
+        out.update(
+            arrived=0.0,
+            precision=0.0,
+            pace=0.0,
+            composure=0.0,
+            min_clear=round(float(np.min(clear)), 4) if len(clear) else math.inf,
+            below_floor=round(float(np.mean(clear < sc.emb.precision)), 4) if len(clear) else 0.0,
+            xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
+            xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
+            churn=round(plan_churn(result), 4),
+            tilt_p99=round(float(np.percentile(result.tilt, 99)), 4) if len(result.tilt) else 0.0,
+            total=0.0,
+        )
         return out
 
     refused_ok = refuse_world and result.outcome in ("refused", "timeout")
@@ -113,11 +183,15 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
     below = float(np.mean(clear < floor)) if len(clear) else 0.0
     precision = 1.0 if refused_ok else max(0.0, 1.0 - below)
 
-    # Pace: arrival at cruise over the plan's own arc. Bottom tier, like the
-    # referee's speed pillar -- it never buys back a precision violation.
-    plan_xy = _plan_xy(result)
+    # Pace: arrival at cruise over the FIRST plan's arc -- the original task
+    # length; under replanning the latest plan shrinks to nothing as the
+    # robot closes in. Bottom tier, like the referee's speed pillar: it
+    # never buys back a precision violation.
+    first_xy = _ref_xy(result.plans[0]) if result.plans else _plan_xy(result)
     arc = (
-        float(np.sum(np.linalg.norm(np.diff(plan_xy, axis=0), axis=1))) if len(plan_xy) > 1 else 0.0
+        float(np.sum(np.linalg.norm(np.diff(first_xy, axis=0), axis=1)))
+        if len(first_xy) > 1
+        else 0.0
     )
     if refused_ok:
         pace = 1.0
@@ -128,9 +202,11 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
     tilt_p99 = float(np.percentile(result.tilt, 99)) if len(result.tilt) else 0.0
     stability = max(0.0, 1.0 - tilt_p99 / TILT_SCALE)
     sat = _saturation(result)
-    composure = 0.5 * stability + 0.5 * (1.0 - sat)
+    churn = plan_churn(result)
+    calm = max(0.0, 1.0 - churn / CHURN_SCALE)
+    composure = (stability + (1.0 - sat) + calm) / 3.0
 
-    xt = cross_track(result.pos[:, :2], plan_xy) if len(result.pos) else np.zeros(0)
+    xt = active_cross_track(result)
     out.update(
         arrived=arrived,
         precision=round(precision, 4),
@@ -140,6 +216,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         below_floor=round(below, 4),
         xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
         xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
+        churn=round(churn, 4),
         tilt_p99=round(tilt_p99, 4),
         saturation=round(sat, 4),
         plan_ms=round(float(np.max(result.plan_ms)), 2) if result.plan_ms else 0.0,
@@ -173,6 +250,6 @@ def print_row(row: dict[str, Any], sc: Scenario) -> None:
     print(
         f"{row['name']:<18s} {row['outcome']:<9s} {ttg}"
         f"  clear {mc_s}  below {row.get('below_floor', 0.0):4.2f}"
-        f"  xt95 {row.get('xtrack_p95', 0.0):5.2f}  tilt99 {row.get('tilt_p99', 0.0):5.2f}"
-        f"  {row['total']:6.2f}  {sc.note}"
+        f"  xt95 {row.get('xtrack_p95', 0.0):5.2f}  churn {row.get('churn', 0.0):5.2f}"
+        f"  tilt99 {row.get('tilt_p99', 0.0):5.2f}  {row['total']:6.2f}  {sc.note}"
     )

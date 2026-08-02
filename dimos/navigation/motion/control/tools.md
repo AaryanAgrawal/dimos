@@ -4,8 +4,10 @@ Closed-loop episodes: referee world -> evolved planner -> controller -> matched 
 Run from the repo root. Blue floor boxes in the viewer = the plan's expected body poses.
 
 ```bash
-# watch one scenario (names from planner/autoresearch/scenarios.py)
+# list scenario names / watch one (curated or generated)
+python -m dimos.navigation.motion.control --ls
 python -m dimos.navigation.motion.control --view -s corridor
+python -m dimos.navigation.motion.control --view --gen 8 -s gen003
 
 # slow motion, receding horizon
 python -m dimos.navigation.motion.control --view -s zigzag_room --speed 0.5 --replan-hz 5
@@ -36,5 +38,9 @@ max 111 (referee scale). Gate 0 on wall contact or fall; refusal counts as
 arrival on `expect="refuse"` worlds. Precision is judged in clearance space:
 the share of ticks the body spent under the embodiment's 0.05 m floor against
 truth — deviation with room around it is free, the same deviation beside a
-wall is the violation. Columns: min body clearance, below-floor fraction,
-cross-track p95 (diagnostic), tilt p99.
+wall is the violation. Under replanning, cross-track is scored against the
+plan that was ACTIVE at each tick (a replan never amnesties past drift) and
+`churn` measures how far the follower forced the deterministic planner to
+re-route -- plan flip-flop reads as churn, not as clean tracking. Columns:
+min body clearance, below-floor fraction, cross-track p95 (diagnostic),
+churn, tilt p99.

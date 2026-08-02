@@ -121,6 +121,7 @@ class EpisodeResult:
     contact: np.ndarray  # (n,) bool, wall touch at this tick
     plan: Path  # the (last) planned path, world frame
     plans: list[RefereePath]  # every plan the episode produced
+    plan_t: list[float]  # when each plan became active (s)
     plan_ms: list[float]  # planner CPU time per call
     time_to_goal: float | None
     cfg: EpisodeConfig  # what actually ran (post-DR values included)
@@ -270,6 +271,7 @@ def run_episode(
     delay_queue.append((0.0, np.zeros(3)))
 
     plans: list[RefereePath] = []
+    plan_t: list[float] = []
     plan_ms: list[float] = []
     nav_path = Path(frame_id=frame_id, poses=[])
     clearance: np.ndarray | None = None
@@ -305,6 +307,7 @@ def run_episode(
                     ref = planner.plan(cloud, visible_pose, sc.goal)
                     plan_ms.append((_time.process_time() - t0) * 1e3)
                     plans.append(ref)
+                    plan_t.append(t)
                     nav_path = world.to_nav_path(ref, ts=t, frame_id=frame_id)
                     if cfg.annotate_clearance:
                         clearance = world.path_clearance(ref, cloud, sc.emb)
@@ -387,6 +390,7 @@ def run_episode(
         contact=np.array(contact, dtype=bool),
         plan=nav_path,
         plans=plans,
+        plan_t=plan_t,
         plan_ms=plan_ms,
         time_to_goal=time_to_goal,
         cfg=cfg,
