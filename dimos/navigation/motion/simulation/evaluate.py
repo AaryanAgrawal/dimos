@@ -158,6 +158,9 @@ FITTED_PHYSICS = {
 FITTED_COMMAND_DELAY = 0.00898
 FITTED_ACTUATOR_TAU = 0.01510
 
+# The searched parameter space; apply_physics/_physics accept nothing else.
+PHYSICS_KEYS = frozenset(FITTED_PHYSICS)
+
 
 def virtual_tracker(
     pos: np.ndarray, quat: np.ndarray, *, mount_yaw: float, tracker_z: float
@@ -177,69 +180,69 @@ def virtual_tracker(
     return out
 
 
+def apply_physics(model: mujoco.MjModel, overrides: dict[str, float]) -> None:
+    """Patch fitted physics onto a compiled model, in place.
+
+    The keys are the 9 searched parameters (see :data:`FITTED_PHYSICS`);
+    anything else raises. Callers building their own scenes (obstacle worlds)
+    use this directly; recording-driven paths go through :func:`_physics`.
+    """
+    unknown = set(overrides) - PHYSICS_KEYS
+    if unknown:
+        raise ValueError(f"unknown physics override(s): {sorted(unknown)}")
+    if "armature" in overrides:
+        model.dof_armature[LEG_DOFS] = overrides["armature"]
+    if "damping" in overrides:
+        model.dof_damping[LEG_DOFS] = overrides["damping"]
+    if "frictionloss" in overrides:
+        model.dof_frictionloss[LEG_DOFS] = overrides["frictionloss"]
+    # A heavier or more rotationally sluggish trunk is the competing
+    # explanation for the turn lag: inertia delays *and* smooths the
+    # response, where transport delay only shifts it.
+    trunk = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
+    if "trunk_mass_scale" in overrides:
+        model.body_mass[trunk] *= overrides["trunk_mass_scale"]
+    if "trunk_inertia_scale" in overrides:
+        model.body_inertia[trunk] *= overrides["trunk_inertia_scale"]
+    # Payload placement, not just payload mass: the lidar and tracker sit
+    # forward and top of the trunk, which body_mass scaling cannot express.
+    if "trunk_com_x" in overrides:
+        model.body_ipos[trunk][0] += overrides["trunk_com_x"]
+    # Real legs carry covers and cabling the MJCF omits; heavier swing
+    # inertia damps how high a foot flies for the same action.
+    if "leg_mass_scale" in overrides:
+        for prefix in FOOT_GEOMS:
+            for part in ("thigh", "calf"):
+                bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{prefix}_{part}")
+                model.body_mass[bid] *= overrides["leg_mass_scale"]
+                model.body_inertia[bid] *= overrides["leg_mass_scale"]
+    # geom_friction columns are (tangential, torsional, rolling); the foot
+    # has priority 1, so its values dictate the foot-floor contact pair.
+    # Torsional is what resists pivoting the stance feet in a turn.
+    for name in FOOT_GEOMS:
+        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        if "foot_friction" in overrides:
+            model.geom_friction[gid, 0] = overrides["foot_friction"]
+        if "foot_friction_torsional" in overrides:
+            model.geom_friction[gid, 1] = overrides["foot_friction_torsional"]
+
+
 @contextlib.contextmanager
 def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
     """Temporarily patch leg-joint parameters onto every model that gets built."""
     if not overrides:
         yield
         return
-    unknown = set(overrides) - {
-        "armature",
-        "damping",
-        "frictionloss",
-        "trunk_mass_scale",
-        "trunk_inertia_scale",
-        "foot_friction",
-        "foot_friction_torsional",
-        "trunk_com_x",
-        "leg_mass_scale",
-    }
+    unknown = set(overrides) - PHYSICS_KEYS
     if unknown:
         raise ValueError(f"unknown physics override(s): {sorted(unknown)}")
 
     original = go2_model.load
     original_ghost = go2_model.load_with_ghost
 
-    def _apply(model: mujoco.MjModel) -> None:
-        if "armature" in overrides:
-            model.dof_armature[LEG_DOFS] = overrides["armature"]
-        if "damping" in overrides:
-            model.dof_damping[LEG_DOFS] = overrides["damping"]
-        if "frictionloss" in overrides:
-            model.dof_frictionloss[LEG_DOFS] = overrides["frictionloss"]
-        # A heavier or more rotationally sluggish trunk is the competing
-        # explanation for the turn lag: inertia delays *and* smooths the
-        # response, where transport delay only shifts it.
-        trunk = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
-        if "trunk_mass_scale" in overrides:
-            model.body_mass[trunk] *= overrides["trunk_mass_scale"]
-        if "trunk_inertia_scale" in overrides:
-            model.body_inertia[trunk] *= overrides["trunk_inertia_scale"]
-        # Payload placement, not just payload mass: the lidar and tracker sit
-        # forward and top of the trunk, which body_mass scaling cannot express.
-        if "trunk_com_x" in overrides:
-            model.body_ipos[trunk][0] += overrides["trunk_com_x"]
-        # Real legs carry covers and cabling the MJCF omits; heavier swing
-        # inertia damps how high a foot flies for the same action.
-        if "leg_mass_scale" in overrides:
-            for prefix in FOOT_GEOMS:
-                for part in ("thigh", "calf"):
-                    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{prefix}_{part}")
-                    model.body_mass[bid] *= overrides["leg_mass_scale"]
-                    model.body_inertia[bid] *= overrides["leg_mass_scale"]
-        # geom_friction columns are (tangential, torsional, rolling); the foot
-        # has priority 1, so its values dictate the foot-floor contact pair.
-        # Torsional is what resists pivoting the stance feet in a turn.
-        for name in FOOT_GEOMS:
-            gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
-            if "foot_friction" in overrides:
-                model.geom_friction[gid, 0] = overrides["foot_friction"]
-            if "foot_friction_torsional" in overrides:
-                model.geom_friction[gid, 1] = overrides["foot_friction_torsional"]
-
     def patched(menagerie: Path | None = None) -> tuple[mujoco.MjModel, mujoco.MjData]:
         model, data = original(menagerie)
-        _apply(model)
+        apply_physics(model, overrides)
         return model, data
 
     # The ghost loader builds its own model, so it must be patched too --
@@ -249,7 +252,7 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
         rgba: tuple[float, float, float, float] = (0.2, 1.0, 0.2, 0.35),
     ) -> tuple[mujoco.MjModel, mujoco.MjData]:
         model, data = original_ghost(menagerie, rgba)
-        _apply(model)
+        apply_physics(model, overrides)
         return model, data
 
     go2_model.load = patched  # type: ignore[assignment]

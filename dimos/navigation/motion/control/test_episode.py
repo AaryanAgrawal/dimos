@@ -1,0 +1,63 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""End-to-end episode smokes: real planner, real policy, matched physics.
+
+Each case is a full closed-loop MuJoCo rollout (~1 s wall per 10 s sim), so
+this file stays small; the battery lives behind the CLI.
+"""
+
+import numpy as np
+import pytest
+
+from dimos.navigation.motion.control.controller import PursuitController
+from dimos.navigation.motion.control.episode import run_episode
+from dimos.navigation.motion.control.judge import score_episode
+from dimos.navigation.motion.planner.autoresearch.scenarios import SCENARIOS
+from dimos.navigation.motion.simulation.policy import FreePolicy
+from dimos.utils.data import get_data
+
+
+@pytest.fixture(scope="module")
+def policy() -> FreePolicy:
+    return FreePolicy.load(get_data("ml-trajectory-research/freewalk_mcf.bin"))
+
+
+def _scenario(name: str):  # type: ignore[no-untyped-def]
+    return next(s for s in SCENARIOS if s.name == name)
+
+
+def test_corridor_reaches_goal(policy: FreePolicy) -> None:
+    result = run_episode(_scenario("corridor"), PursuitController(), policy)
+    assert result.outcome == "goal"
+    assert result.time_to_goal is not None and result.time_to_goal < 25.0
+    assert not result.contact.any()
+    row = score_episode(result)
+    assert not row["dq"]
+    assert row["total"] > 80.0
+
+
+def test_boxed_in_refuses(policy: FreePolicy) -> None:
+    result = run_episode(_scenario("boxed_in"), PursuitController(), policy)
+    assert result.outcome == "refused"
+    row = score_episode(result)
+    assert row["progress"] == 1.0 and row["total"] > 100.0
+
+
+def test_commands_respect_hardware_slew(policy: FreePolicy) -> None:
+    result = run_episode(_scenario("empty"), PursuitController(), policy)
+    steps = np.abs(np.diff(result.used_cmd, axis=0))
+    from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
+
+    assert (steps <= COMMAND_SLEW[None, :] + 1e-9).all()
