@@ -1,28 +1,24 @@
 # ml-trajectory-control research
 
-Self-contained: needs only this worktree's venv. No `~/coding/go2` checkout.
+Self-contained: needs only this project's venv. No `~/coding/go2` checkout.
 
 Data is the `ml-trajectory-research` LFS archive —
 `get_data("ml-trajectory-research/unitree_himloco01.mcap")`, or the paths below
 once extracted under `data/`.
 
-```bash
-cd ~/coding/dimos-ml-trajectory-control
-D=data/ml-trajectory-research
-```
-
 **Tests**
 
 ```bash
-direnv exec . python -m pytest dimos/navigation/motion/trajectory/research -q
-direnv exec . python -m mypy dimos/navigation/motion/trajectory/research
+python -m pytest dimos/navigation/motion/trajectory/research -q
+python -m mypy dimos/navigation/motion/trajectory/research
 ```
 
 **Watch the policy walk** (MuJoCo window; recorded commands drive it)
 
 ```bash
-direnv exec . python -m dimos.navigation.motion.trajectory.research \
-  $D/unitree_himloco01.mcap --policy $D/freewalk_mcf.bin --view
+python -m dimos.navigation.motion.trajectory.research \
+  data/ml-trajectory-research/unitree_himloco01.mcap \
+  --policy data/ml-trajectory-research/freewalk_mcf.bin --view
 ```
 
 Add `--speed 0.5` for slow motion, `--seconds 20` to cut it short.
@@ -30,17 +26,20 @@ Add `--speed 0.5` for slow motion, `--seconds 20` to cut it short.
 **Headless, with numbers**
 
 ```bash
-direnv exec . python -m dimos.navigation.motion.trajectory.research \
-  $D/unitree_himloco01.mcap --policy $D/freewalk_mcf.bin --seconds 8
+python -m dimos.navigation.motion.trajectory.research \
+  data/ml-trajectory-research/unitree_himloco01.mcap \
+  --policy data/ml-trajectory-research/freewalk_mcf.bin --seconds 8
 ```
 
 **Constant command instead of a recording**
 
 ```python
+import numpy as np
 from dimos.navigation.motion.trajectory.research.policy import FreePolicy
 from dimos.navigation.motion.trajectory.research.walk import walk
-import numpy as np
-walk(FreePolicy.load(f"{D}/freewalk_mcf.bin"), command=np.array([0.5, 0, 0]), seconds=4, view=True)
+
+policy = FreePolicy.load("data/ml-trajectory-research/freewalk_mcf.bin")
+walk(policy, command=np.array([0.5, 0.0, 0.0]), seconds=4, view=True)
 ```
 
 **Replay `lowcmd` instead of the policy** — drop `--policy`. The robot collapses;
