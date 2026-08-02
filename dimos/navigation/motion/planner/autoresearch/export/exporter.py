@@ -14,7 +14,7 @@
 
 """Export a self-contained autoresearch lab from this package.
 
-    python -m dimos.navigation.motion.autoresearch.export <dest>
+    python -m dimos.navigation.motion.planner.autoresearch.export <dest>
 
 The output is a standalone research workspace: the referee copied as
 `referee/`, the current rust planner seeded as `candidate/`, the bench/
@@ -42,7 +42,7 @@ import sys
 from . import caches, locks
 
 HERE = Path(__file__).resolve().parent
-PACKAGE = HERE.parent  # dimos/navigation/motion/autoresearch
+PACKAGE = HERE.parent  # dimos/navigation/motion/planner/autoresearch
 
 # Baseline of the seeded candidate, measured on the source package's battery
 # (56 worlds, gen 40 seed 0) at kit-authoring time. gold/consistency are

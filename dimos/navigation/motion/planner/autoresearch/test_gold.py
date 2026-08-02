@@ -29,15 +29,15 @@ from __future__ import annotations
 
 import pytest
 
-from dimos.navigation.motion.autoresearch.geometry import AvoidanceConfig
-from dimos.navigation.motion.autoresearch.scenarios import (
+from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.autoresearch.scenarios import (
     EMBODIMENTS,
     SCENARIOS,
     Scenario,
     generate,
 )
-from dimos.navigation.motion.autoresearch.score import score_world
-from dimos.navigation.motion.autoresearch.sim import Verdict, judge
+from dimos.navigation.motion.planner.autoresearch.score import score_world
+from dimos.navigation.motion.planner.autoresearch.sim import Verdict, judge
 
 GEN_SEEDS = [0, 28, 30]
 WORLD_IDS = [sc.name for sc in SCENARIOS] + [f"gen{s:03d}" for s in GEN_SEEDS]

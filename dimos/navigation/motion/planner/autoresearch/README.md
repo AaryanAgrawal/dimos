@@ -13,29 +13,29 @@ anywhere yields a working referee — that is the basis of the lab export
 
 ```bash
 # build the latest candidate planner and score the full battery
-uv run python -m dimos.navigation.motion.autoresearch --build --score --gen 40
+uv run python -m dimos.navigation.motion.planner.autoresearch --build --score --gen 40
 
 # visual check in rerun (writes sim2d.rrd; --spawn opens a live viewer)
-uv run python -m dimos.navigation.motion.autoresearch --view -s gen028
+uv run python -m dimos.navigation.motion.planner.autoresearch --view -s gen028
 
 # machine-readable per-world results
-uv run python -m dimos.navigation.motion.autoresearch --json --gen 40 | jq .summary
+uv run python -m dimos.navigation.motion.planner.autoresearch --json --gen 40 | jq .summary
 
 # parallel battery: N worker processes, one pinned core each
-uv run python -m dimos.navigation.motion.autoresearch --score --gen 40 --jobs 8
+uv run python -m dimos.navigation.motion.planner.autoresearch --score --gen 40 --jobs 8
 
 # reference planners
-uv run python -m dimos.navigation.motion.autoresearch --score --planner gold
-uv run python -m dimos.navigation.motion.autoresearch --score --planner target-py
+uv run python -m dimos.navigation.motion.planner.autoresearch --score --planner gold
+uv run python -m dimos.navigation.motion.planner.autoresearch --score --planner target-py
 
 # tests: the gold oracle must survive its own judge
-uv run pytest dimos/navigation/motion/autoresearch -q
+uv run pytest dimos/navigation/motion/planner/autoresearch -q
 # optional behavioral tests of the rust crate (not a harness gate)
 cargo test --release --no-default-features --manifest-path \
-    dimos/navigation/motion/autoresearch/rust/Cargo.toml
+    dimos/navigation/motion/planner/autoresearch/rust/Cargo.toml
 ```
 
-Always enter through `python -m dimos.navigation.motion.autoresearch` (the
+Always enter through `python -m dimos.navigation.motion.planner.autoresearch` (the
 package `__main__`): it pins the BLAS thread pools before numpy loads, which
 the CPU-time speed measurement needs to be stable (measured: identical-code
 score spread 0.334 → 0.0069).

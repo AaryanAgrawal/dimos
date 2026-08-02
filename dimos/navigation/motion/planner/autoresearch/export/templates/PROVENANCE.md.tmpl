@@ -6,7 +6,7 @@ job; this file is its raw material.
 
 - **Exported:** $export_date
 - **Source:** `$source_repo` @ `$source_commit`$dirty_note
-  (package `dimos/navigation/motion/autoresearch`, copied as `referee/`)
+  (package `dimos/navigation/motion/planner/autoresearch`, copied as `referee/`)
 - **Referee tree hash:** `$referee_sha256`
   (sha256 over sorted relpath+bytes of `referee/**/*.py`; the value
   `battery.py` records as `referee_sha256` in every summary)
@@ -23,7 +23,7 @@ job; this file is its raw material.
   densify fix). Scores from earlier epochs are not comparable and are
   deliberately not included.
 - **Re-export:** exported labs do not re-export. Regenerate from the dimos
-  repo: `python -m dimos.navigation.motion.autoresearch.export <dest>`
+  repo: `python -m dimos.navigation.motion.planner.autoresearch.export <dest>`
   (at the source commit above, or newer — newer means re-baselining).
 
 ## Not included, on purpose

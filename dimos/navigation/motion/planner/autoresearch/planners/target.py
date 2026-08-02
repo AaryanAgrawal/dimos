@@ -35,9 +35,7 @@ Z_BAND = (0.05, 0.45)  # cloud slice that can touch the body
 FINE = 0.05
 PAD = 1.5
 
-BUILD_CMD = (
-    "uv run maturin develop --uv --release -m dimos/navigation/motion/autoresearch/rust/Cargo.toml"
-)
+BUILD_CMD = "uv run maturin develop --uv --release -m dimos/navigation/motion/planner/autoresearch/rust/Cargo.toml"
 
 
 class TargetEpisode:

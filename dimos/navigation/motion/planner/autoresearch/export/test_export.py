@@ -19,7 +19,7 @@ tmpdir under the ambient interpreter, then prove the tree, the trust chain,
 and the tamper detection all work. Slow tier (needs cargo + uv): a real
 build + 2-world battery — run manually or nightly:
 
-    AUTORESEARCH_FULL_EXPORT=1 uv run pytest dimos/navigation/motion/autoresearch/export
+    AUTORESEARCH_FULL_EXPORT=1 uv run pytest dimos/navigation/motion/planner/autoresearch/export
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import sys
 
 import pytest
 
-from dimos.navigation.motion.autoresearch.export.exporter import BENCH_TEMPLATES, HERE, run
+from dimos.navigation.motion.planner.autoresearch.export.exporter import BENCH_TEMPLATES, HERE, run
 
 
 @pytest.fixture(scope="module")

@@ -19,8 +19,8 @@ the candidate planner runs at the start pose and the resulting plan is
 judged against the exact world (dense truth sampling the planner never
 sees), not the planner's own map.
 
-  python -m dimos.navigation.motion.autoresearch            # battery table
-  python -m dimos.navigation.motion.autoresearch --view     # write sim2d.rrd
+  python -m dimos.navigation.motion.planner.autoresearch            # battery table
+  python -m dimos.navigation.motion.planner.autoresearch --view     # write sim2d.rrd
 """
 
 from __future__ import annotations

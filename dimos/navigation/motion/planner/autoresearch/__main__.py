@@ -22,7 +22,7 @@ pinning the pools took identical-code score spread from 0.334 to 0.0069.
 
 The env vars only work if they are set before numpy is first imported,
 which is why this file sets them before importing anything else — run the
-battery as `python -m dimos.navigation.motion.autoresearch`.
+battery as `python -m dimos.navigation.motion.planner.autoresearch`.
 """
 
 import os
