@@ -185,6 +185,11 @@ def run(
     _render("gates.json.tmpl", dest / "gates.json", values)
     _render("README.md.tmpl", dest / "README.md", values)
     _render("pyproject.toml.tmpl", dest / "pyproject.toml", values)
+    # Pin the lab's python to the exporting interpreter's minor version:
+    # referee.lock pins live co_code hashes, and CPython bytecode changes
+    # across minor versions -- a lab synced under a different python would
+    # fail ext_invariants for what is really an interpreter mismatch.
+    (dest / ".python-version").write_text(f"{sys.version_info.major}.{sys.version_info.minor}\n")
     locks.write_frozen(dest)
 
     # -- venv --------------------------------------------------------------

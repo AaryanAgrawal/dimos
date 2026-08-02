@@ -59,6 +59,7 @@ def test_tree_shape(lab: Path) -> None:
         "pyproject.toml",
         ".gitignore",
         "eval",
+        ".python-version",
         "referee/sim.py",
         "referee/scenarios.py",
         "referee/score.py",
