@@ -275,6 +275,46 @@ def test_command_slew_ramps_a_step_at_the_hardware_rate():
     assert np.abs(np.diff(unslewed.cmd[:, 2])).max() == pytest.approx(2.0)
 
 
+def test_gait_height_schedule_reaches_obs_channel_45():
+    """A 46-channel policy must see the commanded height at index 45, held at
+    nominal before the first entry; a 45-channel policy must see nothing --
+    the frame stays 45 wide."""
+    from dimos.navigation.motion.trajectory.research import walk as walk_mod
+
+    class FakePolicy:
+        hist, act_dim, obs_per_frame = 1, 12, 46
+        default_pose = np.zeros(12)
+        kp, kd = np.full(12, 40.0), np.full(12, 1.0)
+
+        def __init__(self):
+            self.frames = []
+
+        def normalize(self, raw):
+            self.frames.append(raw.copy())
+            return raw
+
+        def act(self, _p_obs, _cmd):
+            return np.zeros(12), self.default_pose
+
+    t = np.arange(0.0, 4.0, 0.1)
+    cmd = np.stack([np.zeros_like(t)] * 3, 1)
+    heights = (np.array([2.0]), np.array([0.15]))
+    policy = FakePolicy()
+    track = walk_mod.walk(policy, schedule=(t, cmd), heights=heights, seconds=4.0)
+
+    # frames = hist warm-up, then one per control tick past the settle window
+    stamped = np.array([f[45] for f in policy.frames[policy.hist :]])
+    grid = track.t[track.t >= 0.5][: len(stamped)]
+    assert len(stamped) == len(grid)
+    assert np.all(stamped[grid < 1.9] == pytest.approx(walk_mod.NOMINAL_GAIT_HEIGHT))
+    assert np.all(stamped[grid > 2.1] == pytest.approx(0.15))
+
+    narrow = FakePolicy()
+    narrow.obs_per_frame = 45
+    walk_mod.walk(narrow, schedule=(t, cmd), heights=heights, seconds=1.0)
+    assert narrow.frames and all(f.size == 45 for f in narrow.frames)
+
+
 def test_actuator_step_is_a_pass_through_when_ideal():
     from dimos.navigation.motion.trajectory.research.walk import actuator_step
 

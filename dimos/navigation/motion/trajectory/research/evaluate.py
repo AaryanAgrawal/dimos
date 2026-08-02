@@ -263,6 +263,7 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
 def _noise_floor(
     policy: FreePolicy,
     sched: Any,
+    heights: Any,
     start: float,
     seconds: float,
     seeds: int,
@@ -276,7 +277,9 @@ def _noise_floor(
         rng = np.random.default_rng(seed)
         object.__setattr__(policy, "default_pose", base + rng.normal(0, PERTURB_RAD, 12))
         try:
-            t2 = walk_mod.walk(policy, schedule=sched, seconds=seconds, start=start)
+            t2 = walk_mod.walk(
+                policy, schedule=sched, heights=heights, seconds=seconds, start=start
+            )
         finally:
             object.__setattr__(policy, "default_pose", base)
         p2 = virtual_tracker(t2.pos, t2.quat, mount_yaw=mount_yaw, tracker_z=tracker_z)
@@ -303,9 +306,10 @@ def measure_noise(
     """
     policy = FreePolicy.load(policy_bin)
     sched = walk_mod.read_control_log(dataset)
+    heights = walk_mod.read_gait_height(dataset)
     if seconds is None:
         seconds = float(sched[0][-1]) - start
-    return _noise_floor(policy, sched, start, seconds, seeds)
+    return _noise_floor(policy, sched, heights, start, seconds, seeds)
 
 
 @dataclass
@@ -388,6 +392,7 @@ def evaluate(
     """
     policy = FreePolicy.load(policy_bin)
     sched = walk_mod.read_control_log(dataset)
+    heights = walk_mod.read_gait_height(dataset)
     if seconds is None:
         # Score the entire recording. A judge windowed to the first 20 s once
         # certified a config that visibly degraded after t=26 -- unscored time
@@ -398,6 +403,7 @@ def evaluate(
         track = walk_mod.walk(
             policy,
             schedule=sched,
+            heights=heights,
             seconds=seconds,
             start=start,
             command_delay=command_delay,
@@ -406,7 +412,9 @@ def evaluate(
         sim_p = virtual_tracker(track.pos, track.quat, mount_yaw=mount_yaw, tracker_z=tracker_z)
         sim = _summarize_run(track.t, sim_p, track.quat, sched, start)
         if noise is None:
-            noise = _noise_floor(policy, sched, start, seconds, seeds, mount_yaw, tracker_z)
+            noise = _noise_floor(
+                policy, sched, heights, start, seconds, seeds, mount_yaw, tracker_z
+            )
 
     sim_legs = leg_stats(track.t, track.target)
     try:

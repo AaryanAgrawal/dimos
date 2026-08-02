@@ -70,8 +70,8 @@ def test_rotation_applies_in_the_expected_direction():
     np.testing.assert_allclose(m @ np.array([1.0, 0, 0]), [0, 1, 0], atol=1e-6)
 
 
-def _write(tmp_path, pos, quat, *, walk_at=None, t_host_shift=None):
-    """A minimal mcap carrying vive/pose (and optionally walk commands)."""
+def _write(tmp_path, pos, quat, *, walk_at=None, t_host_shift=None, heights_at=()):
+    """A minimal mcap carrying vive/pose (and optionally control_log entries)."""
     import json
 
     from mcap.writer import Writer
@@ -88,10 +88,14 @@ def _write(tmp_path, pos, quat, *, walk_at=None, t_host_shift=None):
                 d["t_host"] = i * 0.01 + t_host_shift
             payload = json.dumps(d).encode()
             w.add_message(cid, log_time=int(i * 1e7), data=payload, publish_time=int(i * 1e7))
-        if walk_at is not None:
+        if walk_at is not None or heights_at:
             wid = w.register_channel("control_log", "json", sid)
+        if walk_at is not None:
             payload = json.dumps({"action": "walk", "vx": 0.5, "vy": 0.0, "vyaw": 0.0}).encode()
             w.add_message(wid, log_time=int(walk_at * 1e9), data=payload, publish_time=0)
+        for at, gh in heights_at:
+            payload = json.dumps({"action": "gait_height", "gh": gh, "type": "policy"}).encode()
+            w.add_message(wid, log_time=int(at * 1e9), data=payload, publish_time=0)
         w.finish()
     return path
 
@@ -220,6 +224,30 @@ def test_read_policy_lowcmd_remaps_and_shares_the_epoch(tmp_path):
     np.testing.assert_allclose(t, [-0.02, -0.01, 0.0], atol=1e-9)
     # training order FL,FR,RL,RR
     np.testing.assert_allclose(q[0], [20, 21, 22, 10, 11, 12, 40, 41, 42, 30, 31, 32])
+
+
+def test_read_gait_height_shares_the_epoch(tmp_path):
+    """Height commands must land on the same clock as everything else: t=0 at
+    the first walk command, not at the first slider touch."""
+    from dimos.navigation.motion.trajectory.research.walk import read_gait_height
+
+    path = _write(
+        tmp_path,
+        [[0.0, 0, 0]] * 2,
+        [[1.0, 0, 0, 0]] * 2,
+        walk_at=0.02,
+        heights_at=[(0.01, 0.2), (0.05, 0.33)],
+    )
+    t, h = read_gait_height(path)
+    np.testing.assert_allclose(t, [-0.01, 0.03], atol=1e-9)
+    np.testing.assert_allclose(h, [0.2, 0.33])
+
+
+def test_read_gait_height_is_empty_without_height_commands(tmp_path):
+    from dimos.navigation.motion.trajectory.research.walk import read_gait_height
+
+    t, h = read_gait_height(_write(tmp_path, [[0.0, 0, 0]] * 2, [[1.0, 0, 0, 0]] * 2, walk_at=0.0))
+    assert len(t) == 0 and len(h) == 0
 
 
 def test_mount_rotation_is_a_proper_rotation():

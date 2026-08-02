@@ -46,6 +46,11 @@ TORQUE_LIMITS = np.array([23.0, 23.0, 35.0] * 4)
 # command delay can reproduce.
 COMMAND_SLEW = np.array([0.05, 0.04, 0.10])
 
+# Body height a gait-height net is commanded to hold when nobody moves the
+# slider (go2web policy.rs). Fed raw in metres as obs channel 45; the blob's
+# own ob_mean/ob_scale normalize it. 45-channel policies never see it.
+NOMINAL_GAIT_HEIGHT = 0.31
+
 
 @dataclass
 class Track:
@@ -107,6 +112,34 @@ def read_control_log(dataset: str | Path) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"{dataset}: no walk commands in control_log")
     t = np.array(ts)
     return t - t[0], np.array(cmds)
+
+
+def read_gait_height(dataset: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Commanded body heights: ``(t, h)`` in metres, first-walk-command epoch.
+
+    ``gait_height`` entries only exist when the operator moved the height
+    slider against a net that listens (obs 46, e.g. v11); empty arrays
+    otherwise, which :func:`walk` reads as the nominal height throughout.
+    """
+    from mcap.reader import make_reader
+
+    ts: list[float] = []
+    hs: list[float] = []
+    first_walk: float | None = None
+    with Path(dataset).open("rb") as f:
+        for _schema, _channel, msg in make_reader(f).iter_messages(topics=["control_log"]):
+            d = json.loads(msg.data)
+            t_cmd = msg.log_time / 1e9
+            if d.get("action") == "walk":
+                first_walk = t_cmd if first_walk is None else min(first_walk, t_cmd)
+            elif d.get("action") == "gait_height":
+                ts.append(t_cmd)
+                hs.append(d["gh"])
+    if not ts:
+        return np.array([]), np.array([])
+    t = np.array(ts)
+    zero = t[0] if first_walk is None else first_walk
+    return t - zero, np.array(hs)
 
 
 def _parse_lowcmd_q(b: bytes) -> list[float]:
@@ -171,6 +204,7 @@ def walk(
     *,
     command: np.ndarray | None = None,
     schedule: tuple[np.ndarray, np.ndarray] | None = None,
+    heights: tuple[np.ndarray, np.ndarray] | None = None,
     seconds: float | None = None,
     start: float = 0.0,
     command_delay: float = 0.0,
@@ -203,6 +237,13 @@ def walk(
     MuJoCo ``motor`` actuator produces exactly the requested torque on the same
     step; a real BLDC through a gearbox has finite current-loop bandwidth and
     reaches it over a few milliseconds. Zero reproduces the ideal actuator.
+
+    ``heights`` is a ``(t, h)`` gait-height command schedule as returned by
+    :func:`read_gait_height`, held zero-order like the velocity schedule and
+    subject to the same ``command_delay`` -- but not slewed, because the
+    hardware clamps this command without ramping it. ``None`` or empty holds
+    :data:`NOMINAL_GAIT_HEIGHT`. Only a policy with more than 45 observation
+    channels ever sees the value.
 
     ``slew`` applies the robot's own per-axis command rate limit
     (:data:`COMMAND_SLEW`) between the schedule and the policy, exactly as the
@@ -243,12 +284,17 @@ def walk(
     target = policy.default_pose.copy()
     applied = np.zeros(12)  # torque actually delivered, lagging the request
 
-    def observe(cmd: np.ndarray) -> np.ndarray:
+    def observe(cmd: np.ndarray, height: float) -> np.ndarray:
         q = data.qpos[7:19]
         dq = data.qvel[6:18]
         raw = np.concatenate(
             [cmd, data.qvel[3:6], projected_gravity(data.qpos[3:7]), q, dq, last_action]
         )
+        extra = policy.obs_per_frame - raw.size
+        if extra > 0:
+            # index 45 is the commanded height in raw metres; anything past it
+            # is zero (go2web himloco.rs raw_frame).
+            raw = np.concatenate([raw, [height], np.zeros(extra - 1)])
         return policy.normalize(raw)
 
     def cmd_at(t: float) -> np.ndarray:
@@ -260,12 +306,19 @@ def walk(
         ]
         return held
 
+    def height_at(t: float) -> float:
+        if heights is None or len(heights[0]) == 0:
+            return NOMINAL_GAIT_HEIGHT
+        i = int(np.searchsorted(heights[0], t + start - command_delay, side="right")) - 1
+        # before the first slider touch the robot holds the nominal height
+        return float(heights[1][i]) if i >= 0 else NOMINAL_GAIT_HEIGHT
+
     # The live command the policy sees; starts converged on the schedule, the
     # same steady state the real slew is in mid-run.
     vel_cmd = cmd_at(0.0).astype(float).copy()
 
     for _ in range(policy.hist):
-        hist.append(observe(vel_cmd))
+        hist.append(observe(vel_cmd, height_at(0.0)))
 
     ts: list[float] = []
     pos: list[np.ndarray] = []
@@ -297,7 +350,7 @@ def walk(
                     vel_cmd = cmd_target.astype(float).copy()
                 cmd = vel_cmd
                 if t >= settle:
-                    hist.append(observe(cmd))
+                    hist.append(observe(cmd, height_at(t)))
                     # deque is oldest..newest; the nets want newest first.
                     p_obs = np.concatenate(list(hist)[::-1])
                     last_action, target = policy.act(p_obs, cmd)

@@ -120,10 +120,15 @@ def main() -> None:
 
     if args.policy:
         from dimos.navigation.motion.trajectory.research.policy import FreePolicy
-        from dimos.navigation.motion.trajectory.research.walk import read_control_log, walk
+        from dimos.navigation.motion.trajectory.research.walk import (
+            read_control_log,
+            read_gait_height,
+            walk,
+        )
 
         policy = FreePolicy.load(args.policy)
         schedule = read_control_log(args.dataset)
+        heights = read_gait_height(args.dataset)
         ghost = None
         if args.ghost:
             from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation
@@ -137,6 +142,11 @@ def main() -> None:
             )
             print(f"vive: {len(ghost[0])} samples over {ghost[0][-1]:.1f}s")
         print(f"control_log: {len(schedule[0])} walk cmds over {schedule[0][-1]:.1f}s")
+        if len(heights[0]):
+            print(
+                f"gait_height: {len(heights[0])} cmds, "
+                f"{heights[1].min():.2f}-{heights[1].max():.2f} m"
+            )
         if overrides or delay or tau:
             shown = " ".join(f"{k}={v:g}" for k, v in sorted(overrides.items()))
             print(f"config: {shown} command_delay={delay:g} actuator_tau={tau:g}")
@@ -144,6 +154,7 @@ def main() -> None:
             track = walk(
                 policy,
                 schedule=schedule,
+                heights=heights,
                 seconds=args.seconds,
                 start=args.start,
                 command_delay=delay,
