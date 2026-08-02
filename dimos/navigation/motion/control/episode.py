@@ -36,6 +36,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.control import world
 from dimos.navigation.motion.control.controller import TrajectoryController
+from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
 from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
@@ -315,6 +316,9 @@ def run_episode(
                     # the controller only sees it when annotation is on
                     clr = world.path_clearance(ref, cloud, sc.emb)
                     plan_min_clear.append(float(np.min(clr)) if len(clr) else math.inf)
+                    # the wire dialect: precision rides the stamps, sim and
+                    # robot paths speak identically (control/profile.py)
+                    encode_precision(nav_path, clr, t0=t)
                     if cfg.annotate_clearance:
                         clearance = clr
                     next_plan_t = t + replan_period

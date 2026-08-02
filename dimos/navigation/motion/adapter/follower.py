@@ -48,6 +48,7 @@ from dimos.navigation.motion.control.controller import (
     TrajectoryController,
     load,
 )
+from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -211,7 +212,10 @@ class TrajectoryFollower(Module):
         with self._lock:
             cloud = self._cloud
         if cloud is None:
-            return None
+            # no local map: fall back to the precision the planner stamped
+            # into the path's own timestamps (control/profile.py dialect)
+            ceilings = decode_ceilings(path)
+            return ceilings_to_clearance(ceilings) if ceilings is not None else None
         key = (id(path), id(cloud))
         if key != self._clearance_key:
             wp = np.array([[p.position.x, p.position.y] for p in path.poses]).reshape(-1, 2)

@@ -42,6 +42,8 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.navigation.motion.control import world as world_bridge
+from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.autoresearch.planners.base import PlannerEpisode, load
 from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS, Scenario
@@ -52,6 +54,13 @@ from dimos.navigation.motion.planner.autoresearch.types import (
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
+
+
+def annotate(ref: RefereePath, cloud: RefereeCloud, emb: Any, ts: float, frame_id: str) -> Path:
+    """Referee path -> stamped nav Path: precision profile in the timestamps."""
+    nav = to_nav_path(ref, ts=ts, frame_id=frame_id)
+    clearance = world_bridge.path_clearance(ref, cloud, emb)
+    return encode_precision(nav, clearance, t0=ts)
 
 
 def to_nav_path(ref: RefereePath, ts: float = 0.0, frame_id: str = "odom") -> Path:
@@ -118,6 +127,7 @@ class MotionPlanner(Module):
         self._pose: tuple[float, float, float] | None = None
         self._global_xy: np.ndarray | None = None
         self._episode: PlannerEpisode | None = None
+        self._emb = EMBODIMENTS["go2"]
         self._stop_event = Event()
         self._thread: Thread | None = None
 
@@ -125,6 +135,7 @@ class MotionPlanner(Module):
     def start(self) -> None:
         super().start()
         sc = Scenario("live", [], goal=(0.0, 0.0), emb=EMBODIMENTS[self.config.embodiment])
+        self._emb = sc.emb
         self._episode = load(self.config.planner)(sc, AvoidanceConfig())
         self._episode.reset()
         self.register_disposable(Disposable(self.local_map.subscribe(self._on_local_map)))
@@ -184,4 +195,6 @@ class MotionPlanner(Module):
         except Exception:
             logger.exception("planner failed; keeping the last published path")
             return
-        self.path.publish(to_nav_path(ref, ts=time.time(), frame_id=self.config.world_frame))
+        self.path.publish(
+            annotate(ref, ref_cloud, self._emb, ts=time.time(), frame_id=self.config.world_frame)
+        )
