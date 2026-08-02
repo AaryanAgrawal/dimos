@@ -192,6 +192,31 @@ python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-researc
 
 # Next steps
 
+## A0. Joint two-recording fit — candidate, needs the eye
+
+A 300-trial CMA-ES on both recordings at once (v11's collapsed noise floor
+clamped by himloco01's + 5% of |real|; v11's polluted `gait_hz`/`height_std`
+excluded) halves the joint loss: stock 8.93, current preset 3.44, **joint
+best 1.52**. The candidate relocates the payload story: trunk back to
+near-stock (mass x0.94, inertia x0.86, com_x ~0 — the +4.4 cm was partly
+himloco-style absorption), legs heavy instead (x1.62), frictionloss 0.365,
+command_delay down to 9 ms. It trades a little himloco01 precision (front
+lift 0.071 vs 0.066 m) for large v11 gains (speed 0.354 vs 0.351 m/s,
+pitch_std 0.035 vs 0.030 where the current preset gives 0.050).
+
+```
+armature 0.00712   damping 0.2850   frictionloss 0.3650
+foot_friction 0.7860   foot_friction_torsional 0.00613
+trunk_mass_scale 0.9412   trunk_inertia_scale 0.8601
+trunk_com_x -0.00685   leg_mass_scale 1.6160
+command_delay 0.00898   actuator_tau 0.0151
+```
+
+**Not promoted to `FITTED_*`**: the current preset is the visually confirmed
+one, and a judge has certified prancing before. View this candidate on both
+recordings (`--physics` string above + `--command-delay 0.00898
+--actuator-tau 0.0151`); if the eye agrees on both, it becomes the preset.
+
 ## A. Validate on the held-out recording — DONE, partial transfer
 
 Result is in the status section: the mechanism side of the fit (command
