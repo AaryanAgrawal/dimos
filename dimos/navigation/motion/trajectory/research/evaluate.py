@@ -68,6 +68,20 @@ NOT_COMPARABLE = ("height_mean",)
 # to fitting is the friction values, not the contact dimensionality.
 FOOT_GEOMS = ("FL", "FR", "RL", "RR")
 
+# Best-known configuration: the point the multi-objective search collapsed to
+# on himloco01 (see FINDINGS). Every statistic at or below its noise floor.
+FITTED_PHYSICS = {
+    "armature": 0.01395,
+    "damping": 0.2381,
+    "frictionloss": 0.7372,
+    "trunk_mass_scale": 1.326,
+    "trunk_inertia_scale": 1.487,
+    "foot_friction": 0.5692,
+    "foot_friction_torsional": 0.003138,
+}
+FITTED_COMMAND_DELAY = 0.0231
+FITTED_ACTUATOR_TAU = 0.0289
+
 
 def virtual_tracker(
     pos: np.ndarray, quat: np.ndarray, *, mount_yaw: float, tracker_z: float

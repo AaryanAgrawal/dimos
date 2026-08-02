@@ -64,6 +64,14 @@ def main() -> None:
         help="leg-joint overrides, e.g. armature=0.03,damping=2.0",
     )
     ap.add_argument(
+        "--fitted",
+        action="store_true",
+        help="use the best-known configuration from FINDINGS (physics, command "
+        "delay, actuator lag); --physics entries override individual keys",
+    )
+    ap.add_argument("--command-delay", type=float, default=None, help="seconds")
+    ap.add_argument("--actuator-tau", type=float, default=None, help="seconds")
+    ap.add_argument(
         "--mount-yaw",
         type=float,
         default=94.0,
@@ -78,16 +86,25 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    from dimos.navigation.motion.trajectory.research import evaluate as ev
+
+    overrides = dict(
+        (k, float(v)) for k, v in (p.split("=", 1) for p in args.physics.split(",") if p)
+    )
+    delay = args.command_delay
+    tau = args.actuator_tau
+    if args.fitted:
+        overrides = {**ev.FITTED_PHYSICS, **overrides}
+        delay = ev.FITTED_COMMAND_DELAY if delay is None else delay
+        tau = ev.FITTED_ACTUATOR_TAU if tau is None else tau
+    delay = 0.0 if delay is None else delay
+    tau = 0.0 if tau is None else tau
+
     if args.eval:
         if not args.policy:
             raise SystemExit("--eval needs --policy <bin>")
-        from dimos.navigation.motion.trajectory.research.evaluate import evaluate
-
-        overrides = dict(
-            (k, float(v)) for k, v in (p.split("=", 1) for p in args.physics.split(",") if p)
-        )
         print(
-            evaluate(
+            ev.evaluate(
                 args.dataset,
                 args.policy,
                 start=args.start,
@@ -95,6 +112,8 @@ def main() -> None:
                 mount_yaw=args.mount_yaw,
                 tracker_z=args.tracker_z,
                 physics=overrides,
+                command_delay=delay,
+                actuator_tau=tau,
             ).table()
         )
         return
@@ -118,15 +137,21 @@ def main() -> None:
             )
             print(f"vive: {len(ghost[0])} samples over {ghost[0][-1]:.1f}s")
         print(f"control_log: {len(schedule[0])} walk cmds over {schedule[0][-1]:.1f}s")
-        track = walk(
-            policy,
-            schedule=schedule,
-            seconds=args.seconds,
-            start=args.start,
-            view=args.view,
-            speed=args.speed,
-            ghost=ghost,
-        )
+        if overrides or delay or tau:
+            shown = " ".join(f"{k}={v:g}" for k, v in sorted(overrides.items()))
+            print(f"config: {shown} command_delay={delay:g} actuator_tau={tau:g}")
+        with ev._physics(overrides):
+            track = walk(
+                policy,
+                schedule=schedule,
+                seconds=args.seconds,
+                start=args.start,
+                command_delay=delay,
+                actuator_tau=tau,
+                view=args.view,
+                speed=args.speed,
+                ghost=ghost,
+            )
         drift = float(np.linalg.norm(track.pos[-1] - track.pos[0]))
         print(f"simulated {track.t[-1]:.1f}s  net displacement {drift:.3f} m")
         print(f"base z: {track.pos[0, 2]:.3f} -> {track.pos[-1, 2]:.3f} m")

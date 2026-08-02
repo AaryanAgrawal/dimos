@@ -23,11 +23,16 @@ Add `--speed 0.5` for slow motion, `--seconds 20` to cut it short, and
 `--start 6` to skip the stand-up at the beginning of a run — the simulator
 always begins standing, so t=0 is not a fair comparison.
 
-**With the recorded pose as a ghost box**
+**With the recorded pose as a ghost box, at the fitted configuration**
 
 ```bash
-python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost
+python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost --fitted --start 6
 ```
+
+`--fitted` applies the best-known physics, command delay and actuator lag from
+FINDINGS; without it you are watching default menagerie physics, which
+oscillates visibly harder than the real robot. `--physics k=v` overrides
+individual keys on top.
 
 The green box is the recorded `base` pose, anchored so t=0 sits at the robot's
 start pose.
