@@ -46,12 +46,22 @@ def main() -> None:
     ap.add_argument(
         "--start",
         type=float,
-        default=0.0,
+        default=6.0,
         help="skip this many seconds of the recording; the sim always begins "
         "standing, so use this to step over a stand-up",
     )
     ap.add_argument(
         "--ghost", action="store_true", help="draw the recorded vive base_link as a box"
+    )
+    ap.add_argument(
+        "--eval",
+        action="store_true",
+        help="score the rollout against the recording and print the table",
+    )
+    ap.add_argument(
+        "--physics",
+        default="",
+        help="leg-joint overrides, e.g. armature=0.03,damping=2.0",
     )
     ap.add_argument(
         "--mount-yaw",
@@ -67,6 +77,27 @@ def main() -> None:
         "down in world because the tracker is mounted inverted",
     )
     args = ap.parse_args()
+
+    if args.eval:
+        if not args.policy:
+            raise SystemExit("--eval needs --policy <bin>")
+        from dimos.navigation.motion.trajectory.research.evaluate import evaluate
+
+        overrides = dict(
+            (k, float(v)) for k, v in (p.split("=", 1) for p in args.physics.split(",") if p)
+        )
+        print(
+            evaluate(
+                args.dataset,
+                args.policy,
+                start=args.start,
+                seconds=args.seconds if args.seconds else 30.0,
+                mount_yaw=args.mount_yaw,
+                tracker_z=args.tracker_z,
+                physics=overrides,
+            ).table()
+        )
+        return
 
     if args.policy:
         from dimos.navigation.motion.trajectory.research.policy import FreePolicy

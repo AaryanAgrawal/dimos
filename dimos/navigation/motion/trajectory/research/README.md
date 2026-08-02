@@ -54,6 +54,25 @@ policy = FreePolicy.load("data/ml-trajectory-research/freewalk_mcf.bin")
 walk(policy, command=np.array([0.5, 0.0, 0.0]), seconds=4, view=True)
 ```
 
+**Score sim against the recording** (~1.6 s)
+
+```bash
+python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --eval
+```
+
+Add `--physics armature=0.03,damping=2.0` to try parameter values. Each row is
+a statistic, scaled by its own noise floor — SNR under ~1 means sim and hardware
+agree to within what chaos already does to a rollout.
+
+**Search physics for the best match** (~1.6 s per trial)
+
+```bash
+python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --trials 100
+```
+
+Optuna + CMA-ES. `--storage sqlite:///search.db` to resume, `--json out.json` to
+save the result.
+
 **Replay `lowcmd` instead of the policy** — drop `--policy`. The robot collapses;
 that is the data, not a bug. See `FINDINGS.md`.
 
@@ -66,6 +85,8 @@ that is the data, not a bug. See `FINDINGS.md`.
 | `model.py` | menagerie go2 scene (with or without ghost body), motor permutation |
 | `vive.py` | recorded tracker pose → base track, anchored at a chosen time |
 | `metrics.py` | filtering + chaos-tolerant statistics for comparing runs |
+| `evaluate.py` | one call: run, summarize both sides, weight by noise floor |
+| `search.py` | Optuna/CMA-ES over leg-joint physics |
 | `replay.py` | the `lowcmd` replay path |
 | `FINDINGS.md` | what the recordings do and don't contain |
 

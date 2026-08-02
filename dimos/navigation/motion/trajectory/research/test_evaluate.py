@@ -1,0 +1,126 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Scoring plumbing: the physics patch, the SNR weighting, and the loss."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from dimos.navigation.motion.trajectory.research import model as go2_model
+from dimos.navigation.motion.trajectory.research.evaluate import (
+    LEG_DOFS,
+    NOT_COMPARABLE,
+    Report,
+    _physics,
+)
+from dimos.navigation.motion.trajectory.research.metrics import Summary
+
+
+def _summary(**kw):
+    base = dict(
+        speed=0.4,
+        speed_gain=0.9,
+        yaw_rate_gain=0.5,
+        height_mean=0.3,
+        height_std=0.03,
+        gait_hz=2.0,
+        speed_lag=0.2,
+        yaw_lag=0.1,
+    )
+    base.update(kw)
+    return Summary(**base)
+
+
+def _report(sim, real, noise):
+    return Report(sim=sim, real=real, noise=noise, seconds=10.0, start=6.0)
+
+
+def test_snr_divides_by_each_statistic_own_noise():
+    r = _report(
+        _summary(speed=0.50),
+        _summary(speed=0.40),
+        dict.fromkeys(_summary().as_dict(), 0.05),
+    )
+    assert r.snr()["speed"] == pytest.approx(2.0)
+    assert r.snr()["gait_hz"] == pytest.approx(0.0)
+
+
+def test_snr_excludes_the_statistics_that_cannot_be_compared():
+    r = _report(_summary(), _summary(), dict.fromkeys(_summary().as_dict(), 0.1))
+    for key in NOT_COMPARABLE:
+        assert key not in r.snr()
+    assert "height_mean" in r.sim.as_dict()  # still reported, just not scored
+
+
+def test_zero_noise_is_infinite_snr_not_a_crash():
+    noise = dict.fromkeys(_summary().as_dict(), 0.1)
+    noise["speed"] = 0.0
+    r = _report(_summary(speed=0.5), _summary(speed=0.4), noise)
+    assert r.snr()["speed"] == float("inf")
+
+
+def test_loss_is_zero_when_sim_matches_real():
+    r = _report(_summary(), _summary(), dict.fromkeys(_summary().as_dict(), 0.1))
+    assert r.loss() == pytest.approx(0.0)
+
+
+def test_loss_rises_with_the_gap():
+    noise = dict.fromkeys(_summary().as_dict(), 0.1)
+    near = _report(_summary(speed=0.45), _summary(speed=0.40), noise).loss()
+    far = _report(_summary(speed=0.80), _summary(speed=0.40), noise).loss()
+    assert far > near > 0
+
+
+def test_table_mentions_the_physics_it_ran_with():
+    r = Report(
+        sim=_summary(),
+        real=_summary(),
+        noise=dict.fromkeys(_summary().as_dict(), 0.1),
+        seconds=10.0,
+        start=6.0,
+        physics={"armature": 0.03},
+    )
+    assert "armature=0.03" in r.table()
+
+
+def test_physics_override_applies_and_restores():
+    original = go2_model.load
+    model, _ = go2_model.load()
+    before = float(model.dof_armature[LEG_DOFS][0])
+
+    with _physics({"armature": 0.07, "frictionloss": 1.5}):
+        patched, _ = go2_model.load()
+        np.testing.assert_allclose(patched.dof_armature[LEG_DOFS], 0.07)
+        np.testing.assert_allclose(patched.dof_frictionloss[LEG_DOFS], 1.5)
+        # untouched keys keep the MJCF value
+        assert float(patched.dof_damping[LEG_DOFS][0]) == pytest.approx(2.0)
+
+    assert go2_model.load is original
+    restored, _ = go2_model.load()
+    assert float(restored.dof_armature[LEG_DOFS][0]) == pytest.approx(before)
+
+
+def test_physics_override_rejects_unknown_keys():
+    with pytest.raises(ValueError, match="unknown physics override"), _physics({"mass": 1.0}):
+        pass
+
+
+def test_empty_physics_is_a_no_op():
+    original = go2_model.load
+    with _physics(None):
+        assert go2_model.load is original
+    with _physics({}):
+        assert go2_model.load is original

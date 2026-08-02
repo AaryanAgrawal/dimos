@@ -156,6 +156,8 @@ dependencies = [
     # at module load; DimSim is a non-extra-gated robot connection backend.
     "websocket-client>=1.8",
     "mnn>=3.6.1",
+    "optuna>=4.9.0",
+    "cmaes>=0.13.0",
 ]
 
 

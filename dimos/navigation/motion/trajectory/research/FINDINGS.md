@@ -494,3 +494,62 @@ Worth searching next: `armature`, `damping`, `frictionloss`, geom `friction`
 (currently 0.6), contact `solref`/`solimp`, and trunk mass/inertia. But not
 before the judge is trustworthy -- a search against a statistic that swings
 2x on window length will happily fit the noise.
+
+---
+
+# Un-retraction: the gait *is* twice as fast, the FFT was just unstable
+
+Replacing the FFT peak with the first peak of the height autocorrelation makes
+`gait_hz` steady across every window:
+
+| window | sim | real |
+|---|---|---|
+| 15 s | 3.33 | 1.69 |
+| 25 s | 3.23 | 1.61 |
+| 40 s | 3.33 | 1.52 |
+| 45 s | 3.33 | 1.61 |
+
+So the earlier "simulated gait is about twice as fast" reading was right, and
+the retraction above was caused by the estimator rather than the claim: an FFT
+on a 40 s window sometimes locked onto the fundamental and sometimes onto its
+harmonic. Autocorrelation asks a steadier question and the first peak inside
+the gait band is the stride rather than a multiple of it.
+
+# The search works, and joint friction is the answer
+
+`evaluate.py` scores one configuration; `search.py` drives it with Optuna's
+CMA-ES sampler. The noise floor is measured once and reused, which takes a
+trial from 7.3 s to **1.6 s** -- and, more importantly, keeps losses comparable
+between trials, since recomputing it would let a trial win by getting noisier.
+
+30 trials over armature / damping / frictionloss:
+
+| statistic | baseline SNR | best SNR | sim before | sim after | real |
+|---|---|---|---|---|---|
+| gait_hz | 5.2 | **0.4** | 3.333 | 1.562 | 1.695 |
+| height_std | 4.9 | **1.5** | 0.033 | 0.026 | 0.023 |
+| yaw_rate_gain | 4.3 | **3.0** | 0.483 | 0.545 | 0.696 |
+| speed_lag | 0.7 | 2.0 | 0.370 | 0.290 | 0.410 |
+| yaw_lag | 10.0 | 10.5 | 0.060 | 0.040 | 0.460 |
+
+Loss 4.97 -> 4.27. Winning parameters:
+
+    armature      0.0089   (menagerie 0.01  -- essentially unchanged)
+    damping       1.67     (menagerie 2.0   -- essentially unchanged)
+    frictionloss  1.23     (menagerie 0.2   -- 6x)
+
+**Joint friction was the missing physics.** Raising it alone closes the gait
+frequency gap almost exactly and cuts the body bob to within 1.5 noise floors.
+That is consistent with real gearboxes: menagerie's 0.2 N*m models a much
+freer joint than the robot has.
+
+## What friction does not explain
+
+`yaw_lag` does not move: the simulator answers a turn command in 0.04-0.06 s
+against 0.46 s on hardware, and it stays at ~10 noise floors through the whole
+search. No leg-joint parameter can fix that, because it is not a leg-joint
+property -- it is command transport and filtering between the operator and the
+policy on the real robot. Modelling it means an explicit delay on the command
+path, not a physics parameter. It is the single largest remaining term in the
+loss and should be handled separately before the next search, or it will just
+drag every other parameter around trying to compensate.

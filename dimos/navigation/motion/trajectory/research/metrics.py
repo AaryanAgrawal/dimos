@@ -99,6 +99,33 @@ def yaw_of(quat: np.ndarray) -> np.ndarray:
     return yaw
 
 
+def gait_frequency(z: np.ndarray, *, rate: float = RESAMPLE_HZ) -> float:
+    """Bob frequency, from the autocorrelation of the high-passed height.
+
+    An FFT peak is not usable here: on a 40 s window a harmonic can outscore
+    the fundamental, and the same rollout then reads 1.5 Hz on three window
+    lengths and 3.3 Hz on the fourth. Autocorrelation asks a steadier question
+    -- what delay does this signal most resemble itself at -- and the first
+    peak inside the gait band is the stride, not a harmonic of it.
+    """
+    bob = z - _moving_average(z, int(rate))  # drop the drift around the room
+    bob = bob - bob.mean()
+    if not np.any(bob):
+        return 0.0
+    ac = np.correlate(bob, bob, mode="full")[len(bob) - 1 :]
+    ac = ac / ac[0]
+    lo = int(rate / GAIT_BAND_HZ[1])  # shortest plausible stride, samples
+    hi = min(int(rate / GAIT_BAND_HZ[0]), len(ac) - 1)
+    if hi <= lo:
+        return 0.0
+    window = ac[lo:hi]
+    # first local maximum, not the global one: at low frequencies the envelope
+    # can rise again and outscore the true stride peak.
+    peaks = np.where((window[1:-1] > window[:-2]) & (window[1:-1] >= window[2:]))[0] + 1
+    idx = int(peaks[0]) if len(peaks) else int(np.argmax(window))
+    return float(rate / (lo + idx))
+
+
 def _best_lag(achieved: np.ndarray, commanded: np.ndarray, rate: float) -> int:
     """Samples of delay that best aligns the response with the command.
 
@@ -189,14 +216,6 @@ def summarize(
     )
     n = min(len(yaw_rate), len(c))
 
-    # High-pass by subtracting a 1 s moving average: the raw signal is dominated
-    # by the robot drifting up and down the room, not by its gait.
-    bob = z - _moving_average(z, int(RESAMPLE_HZ))
-    bob = bob * np.hanning(len(bob))
-    freqs = np.fft.rfftfreq(len(bob), 1.0 / RESAMPLE_HZ)
-    power = np.abs(np.fft.rfft(bob))
-    band = (freqs >= GAIT_BAND_HZ[0]) & (freqs <= GAIT_BAND_HZ[1])
-
     speed_gain, speed_lag = _gain(speed, cmd_speed, moving_threshold)
     yaw_gain, yaw_lag = _gain(yaw_rate[:n], c[:n, 2], 0.2)
 
@@ -206,7 +225,7 @@ def summarize(
         yaw_rate_gain=yaw_gain,
         height_mean=float(z.mean()),
         height_std=float(z.std()),
-        gait_hz=float(freqs[band][np.argmax(power[band])]) if band.any() else 0.0,
+        gait_hz=gait_frequency(z),
         speed_lag=speed_lag,
         yaw_lag=yaw_lag,
     )
