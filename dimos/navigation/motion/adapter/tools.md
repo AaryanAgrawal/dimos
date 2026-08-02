@@ -12,6 +12,12 @@ dimos run go2-zenoh-motion
 # the rust planner must be built first
 uv run maturin develop --uv --release -m dimos/navigation/motion/planner/autoresearch/rust/Cargo.toml
 
+# replay a real recording through the planner: rerun view with the
+# required-precision circles (radius = clearance hint, red/yellow/green =
+# creep/governed/full-speed) computed from the REAL Point-LIO clouds
+python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --spawn
+python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save athens.rrd --every 3
+
 # tests and types
 python -m pytest dimos/navigation/motion/adapter -q
 python -m mypy dimos/navigation/motion/adapter

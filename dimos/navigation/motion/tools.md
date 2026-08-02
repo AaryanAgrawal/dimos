@@ -13,7 +13,8 @@ full menus.
 python -m dimos.navigation.motion.planner.autoresearch --score
 python -m dimos.navigation.motion.planner.autoresearch --score --gen 40 --jobs 8
 
-# watch a plan in rerun (2D referee view: truth, cloud, sweep, gold)
+# watch a plan in rerun (2D referee view: truth, cloud, sweep, gold,
+# required-precision circles along the candidate path)
 python -m dimos.navigation.motion.planner.autoresearch --spawn --score -s corridor_reverse
 
 # rebuild the crate after editing rust/
@@ -46,6 +47,10 @@ python -m dimos.navigation.motion.control --score
 # the loop on a real go2 (onboard laptop, robot runs the go2web zenoh bridge):
 # raycaster -> MLS carrot -> local planner -> follower -> cmd_vel
 dimos run go2-zenoh-motion
+
+# validate against reality: replay a mem2 recording through the planner,
+# precision circles over real Point-LIO clouds
+python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --spawn
 ```
 
 Both batteries score `gate * (100 + 10 + 1)`-shaped pillars, max 111: the
