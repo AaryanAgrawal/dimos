@@ -2,23 +2,31 @@
 
 Goal: make MuJoCo behave like the real Go2 well enough to train against.
 
-**Status.** The loop is closed and measurable. The same HIMLoco policy that ran
+**Status: matched, on the fitted recording.** The same HIMLoco policy that ran
 on the robot runs in sim, driven by the recorded commands, scored against
-VR-tracker ground truth. Two modelling gaps have been found, fixed and
-validated; one remains.
+VR-tracker ground truth — and after modelling three mechanisms and fixing two
+judge artifacts, the multi-objective search collapses to a single point with
+**every statistic at or below its noise floor**:
 
-Best configuration, in noise-floor units (1.0 = as close as two identical
-simulators land from each other):
+    gait 0.23    translation 0.85    rotation 0.16
 
-    gait 0.67    translation 2.20    rotation 2.06
-
-against an untouched baseline where the turn lag alone was **10**.
+(noise-floor units: 1.0 = as close as two identical simulators land from each
+other under a 3° initial-pose perturbation, measured at default physics). In
+absolute terms: speed 0.404 vs 0.427 m/s, yaw gain 0.699 vs 0.678, yaw lag
+0.170 vs 0.170 s, pitch bob 0.021 vs 0.020 rad, gait 1.72 vs 1.67 Hz.
 
 ```
-armature 0.0201   damping 0.5648   frictionloss 1.6276
-command_delay 0.3172   actuator_tau 0.0448
-trunk_mass_scale 1.4063   trunk_inertia_scale 3.399
+armature 0.0140   damping 0.2381   frictionloss 0.7372
+foot_friction 0.5692   foot_friction_torsional 0.0031
+trunk_mass_scale 1.326   trunk_inertia_scale 1.487
+command_delay 0.0231   actuator_tau 0.0289
 ```
+
+These are *physical*: armature near the 0.01 spec, trunk 33% heavier (it
+carries a tracker and mounts), inertia ×1.5 rather than the ×3.4 an earlier
+contaminated fit produced, and a 23 ms genuine transport delay.
+
+The honest caveat: fitted and validated on **one recording**. See Next steps.
 
 ---
 
@@ -28,7 +36,7 @@ trunk_mass_scale 1.4063   trunk_inertia_scale 3.399
 
 | stream | rate | use |
 |---|---|---|
-| `control_log` | 48 Hz | the policy's input: `{"action":"walk","vx","vy","vyaw"}` |
+| `control_log` | 48 Hz | the operator's command: `{"action":"walk","vx","vy","vyaw"}` |
 | `vive_pose` | 253 Hz | ground-truth body pose (JSON: `p`, `q`, `t_host`) |
 | `policy_state` | once | which policy — check it matches the `.bin` |
 
@@ -41,62 +49,82 @@ This also means the simulator's initial pose cannot be restored from a
 recording — it always starts standing, so `--start 6` is needed to skip the
 robot getting to its feet.
 
+**Both streams share one epoch: the first walk command.** `t_host` and
+`log_time` are the same clock (2.5 ms apart, no drift), but the vive stream
+starts recording before the operator presses walk — 0.31 s earlier on
+himloco01, 4.4 s on v11. Zeroing each stream at its own first message paired
+every real pose with a command from its future, and a search then "fitted"
+0.317 s of command delay, within 4 ms of the bookkeeping offset.
+
 ## 2. Calibration that is settled
 
 **Target frame.** The official URDF root link is `base` (there is no
-`base_link`), collision box `0.3762 x 0.0935 x 0.114` at origin, i.e. the trunk's
-geometric centre, level with the hips. menagerie inherits it one-to-one, so
-MuJoCo `qpos[0:3]` *is* that frame — nothing to map.
+`base_link`), origin at the trunk's geometric centre, level with the hips.
+menagerie inherits it one-to-one, so MuJoCo `qpos[0:3]` *is* that frame.
 
 **Tracker mount**, fitted sim-free from the recording:
 
 * quaternion is **wxyz**, frame is **z-up**
 * tracker is mounted **inverted** — `R[2,2] = -0.997`
-* robot forward is **+94°** in the tracker's xy plane, i.e. along tracker +y.
-  Two independent fits agree (93.6° circular mean; 94.0° by maximizing
-  cos(velocity, command)). This was the "mirrored" look.
+* robot forward is **+94°** in the tracker's xy plane — i.e. the mount is ~4°
+  skewed from square, which is why this is fitted, not assumed. Two
+  independent fits agree (93.6° circular mean; 94.0° by maximizing
+  cos(velocity, command)).
 
 **Not settled: the tracker's translation.** `--tracker-z 0.207` is a guess and
-the in-plane offset is unmodelled. It cannot be recovered from these recordings
-— the Vive origin is the room calibration, not the floor.
+the in-plane offset is unmodelled. Its influence is now *contained* rather
+than fixed: height is compared in sensor space and the orientation statistics
+are immune to it (§3). A ruler measurement would end it.
 
-## 3. Why the judge is distributional
+## 3. How the judge works
 
-The gait is chaotic. A 3° initial-pose perturbation grows to 136 cm of position
-error in 12 s, **non-monotonically** — a 17° perturbation ends up closer. By a
-10 s horizon the sim-vs-real gap is *smaller* than the gap between two identical
-simulators. Trajectory error carries no information about physics.
+**Distributional, because the gait is chaotic.** A 3° initial-pose
+perturbation grows to 136 cm of position error in 12 s, non-monotonically; by
+a 10 s horizon the sim-vs-real gap is smaller than the gap between two
+identical simulators. Trajectory error carries no information about physics,
+so `metrics.py` compares distributions — speed, gains, response lags, bob
+amplitude and frequency, pitch/roll oscillation — and `evaluate.py` divides
+each difference by its own noise floor from perturbed rollouts.
 
-So `metrics.py` compares distributions — speed, gains, response lags, body-bob
-amplitude and frequency — and `evaluate.py` divides each by its own noise floor,
-measured from perturbed rollouts. Nothing is fitted against a statistic whose
-sim-real difference does not exceed its own noise.
+**Height in sensor space.** Inverting the guessed tracker offset on the real
+data injected the guess into the ground truth: 11.4 mm of the "real" z std was
+lever-arm swing against 5.6 mm of actual tracker bob. Instead the real side
+keeps the raw tracker height and the sim mounts a *virtual tracker* with the
+same guess — the guess distorts both sides identically and cancels.
 
-## 4. Mechanisms found so far
+**Orientation statistics.** `pitch_std` / `roll_std` (detrended, so a constant
+mount or room-calibration tilt drops out) carry the gait's body oscillation
+and owe nothing to the tracker translation. They are what pinned the sim
+oscillating ~2× too fast and ~2.5× too hard before the physics fit — visible
+by eye as the exaggerated leg lifts, and confirmed independently on z, pitch
+and roll.
 
-**Command delay ≈ 0.45 s.** On hardware the operator's command crosses a network
-and the robot's filtering before the policy sees it; in sim it lands on the same
-tick. Cross-correlation measures 0.46–0.50 s directly (sharp peak, 0.88 against
-0.66 at zero lag) and the search independently recovered 0.451 s.
+## 4. The three mechanisms
 
-*Not inertia* — the alternative hypothesis. Tripling trunk rotational inertia
-moves the lag not at all (0.06 → 0.06 against 0.46 real). The policy is a 50 Hz
-closed loop: it compensates for a heavier body on the first tick, but cannot
-compensate for a command it has not received.
+**Command slew — known constants, not a knob.** The robot rate-limits operator
+commands per-axis before the policy sees them (go2web `policy.rs
+ramp_velocity`): max 0.05 / 0.04 / 0.10 (vx/vy/vyaw) per 20 ms tick. The
+recorded `control_log` carries the operator *target*; the policy on hardware
+only ever saw the ramp. A yaw reversal ramps for 0.4 s where a speed nudge
+ramps for a tenth of that — which is why the real yaw answers ~0.1 s later
+than the real speed does, an axis-dependent lag no uniform delay could fit
+(the pre-slew search traded translation 0.79 against rotation 3.03 and could
+not have both). With the slew alone, default physics puts sim yaw_lag at
+0.170 vs real 0.170.
 
-**Actuator lag ≈ 10–45 ms.** A MuJoCo motor delivers requested torque on the
-same step; a real BLDC through a gearbox does not. Adding it collapsed the
-Pareto front *toward the origin* rather than sliding it along:
+**Actuator lag ≈ 20–30 ms.** A MuJoCo motor delivers requested torque on the
+same step; a real BLDC through a gearbox does not. First-order lag on the
+torque; every Pareto-optimal trial keeps it (searched from 0, so an ideal
+actuator is free — none chose it).
 
-| | without | with |
-|---|---|---|
-| min distance to origin | 3.82 | **2.87** |
-| best worst-objective | 2.71 | **2.20** |
-| best gait | 1.05 | **0.67** |
+**Command delay ≈ 23 ms.** What genuinely remains of transport latency once
+the epoch artifact is gone.
 
-The decisive evidence: `actuator_tau` is searched from 0, so an ideal actuator
-is free — and **not one of twenty Pareto-optimal trials chose zero** (median
-0.022 s). A spurious knob would leave some optima at the identity value.
+**Corrected en route:** the menagerie feet are *not* frictionless — the
+`condim="1"` default class only governs the calf capsules; the foot geoms
+override with `priority="1" condim="6"` and a full friction cone. The open
+question was the friction *values*; the search settled on much lower torsional
+friction (0.003 vs the shipped 0.02).
 
 ## 5. How to run it
 
@@ -108,73 +136,61 @@ python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-researc
 python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost
 
 # multi-objective search, Pareto front
-python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --multi --trials 150
+python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --multi --trials 300
 ```
 
 ---
 
 # Next steps
 
-## A. Foot contact — the standing hypothesis
+## A. Validate on the held-out recording
 
-Rotation is the worst remaining objective (2.06) and is the one thing neither
-mechanism so far touches: both model *when* torque arrives, neither models what
-the foot does once it lands.
+Everything above is fitted and scored on `unitree_himloco01`. The v11 run is
+untouched and is now a *meaningful* held-out check — the per-recording epoch
+is handled, and slew/actuator/delay are supposed to be properties of the
+platform, not the run. It needs the 46-channel observation threading first
+(gait height as channel 45), which `walk.py` does not do.
 
-The menagerie Go2 sets **`condim="1"`** on its geoms — frictionless point
-contacts that generate **no tangential force at all**. A quadruped turns by
-shearing its feet against the ground. This is the obvious suspect.
+If the fitted physics transfers, the sim is ready to train against. If it
+does not, the failure pattern says which parameter was soaking up run-specific
+error. This is the single highest-value next step.
 
-Try, in order: `condim=3` with the existing `friction=0.6`, then friction as a
-search parameter, then `solref`/`solimp` contact stiffness and damping. Judge
-by the same test: does the front collapse toward the origin, and does the search
-decline to return the parameter to its default?
+## B. Measure the tracker translation
 
-*Cost:* small — `condim` and `friction` are `model.geom_condim` /
-`model.geom_friction` patches in the same `_physics` context manager.
+A ruler against the trunk centre ends the `--tracker-z 0.207` guess, unlocks
+`height_mean` as a tenth statistic, and removes the last systematic the
+sensor-space trick only cancels to first order. Ten minutes on the robot.
 
-## B. Pin the tracker translation
+## C. Capture data that answers what these cannot
 
-`--tracker-z 0.207` is a guess, the in-plane offset is unmodelled, and
-`height_mean` is excluded from scoring entirely because of it. Two routes:
+* **Low-level control enabled**, if the hardware supports it, so
+  `lowcmd`/`lowstate` carry real joint data. That upgrades the whole method
+  from distributional matching to short-horizon prediction error
+  (re-initialize sim from real state, score 0.5 s predictions) — far better
+  conditioned, chaos-free, and it can localize error to individual joints.
+* **Deliberate pitch and roll**, to make the tracker lever arm observable.
+* **Longer straight lines** — the current runs live in a 1.5 m box.
 
-1. **Measure it** with a ruler against the trunk centre. Ten minutes, ends the
-   ambiguity.
-2. **Fit it** from the `v = ω × r` lever-arm signature — sim-free, but weakly
-   conditioned here (body tilt is only 3.7° mean). A recording with deliberate
-   pitching would fix that.
+## D. Housekeeping
 
-Route 1 is better value. It also unlocks `height_mean` as an eighth statistic.
+* Three parameters sit at or near search bounds (damping at the 0.238 floor,
+  torsional friction near 0.002, actuator_tau near 0.029 of 0.05). With every
+  objective sub-noise the basin is flat, so their exact values are weakly
+  identified — widen the ranges before quoting them as measurements.
+* The noise floor shrinks ~10–100× at the fitted physics (the matched sim is
+  much less statistically chaotic than the default one), so a standalone
+  `--eval` at the best config reports inflated/infinite SNR against its own
+  floor. Compare absolute sim/real columns there, or reuse a default-physics
+  floor. Four-seed peak-to-peak is also a fragile spread estimator; more seeds
+  would firm it up.
+* `speed_lag` is the weakest surviving statistic (sim 0.12 vs real 0.08 s,
+  the one residual above 1 after the collapse in absolute terms).
 
-## C. Validate on the second recording
+## E. Then: train against it
 
-Everything so far is fitted and scored on `unitree_himloco01`. The v11 run is
-untouched and would be a genuine held-out check — but it needs the 46-channel
-observation threading first (gait height as channel 45), which `walk.py` does
-not do.
-
-Fitting and validating on one recording is the weakest part of the current
-result. This is how to fix it.
-
-## D. Capture data that answers what these cannot
-
-Worth doing on the next robot session:
-
-* **A run with deliberate pitch and roll** — makes the lever arm observable and
-  strengthens every rotational statistic.
-* **A run with low-level control actually enabled**, if the hardware supports
-  it, so `lowcmd`/`lowstate` carry real joint data. That would let the
-  comparison move from body pose to joint space, which is a much tighter test.
-* **Longer straight-line segments** — the current runs stay inside a 1.5 m box,
-  so translation statistics rest on very little travel.
-
-## E. Housekeeping
-
-* `speed_lag` regressed (0.7 → 3.0) when command delay was introduced and has
-  not been revisited.
-* The search fits one recording's mount and delay as global constants; if a
-  second recording disagrees, they are per-run properties and the harness needs
-  to say so.
+The project goal. With A green, the matched sim is the environment; the
+fitted config is the domain-randomization centre, and the noise-floor
+machinery doubles as a regression test that future sim changes stay matched.
 
 ---
 
@@ -182,22 +198,30 @@ Worth doing on the next robot session:
 
 Each of these produced a plausible, finite, wrong number.
 
-* **Filter by time, not samples.** Differentiating a 253 Hz recording and a
-  50 Hz rollout with the same 25-*sample* window smooths them by 0.1 s and 0.5 s.
-  Reported a Go2 walking at 3.87 m/s.
-* **Gains are regression slopes, not means of ratios.** Ratios explode near zero
-  command and cancel across sign flips — reported the simulator turning
-  backwards.
-* **Fit response lag before fitting a gain.** A command alternating faster than
-  the response lag reads as no response at all.
-* **Autocorrelation, not FFT, for gait frequency.** An FFT peak flips between
-  fundamental and harmonic across window lengths (1.5 Hz vs 3.3 Hz on the same
-  rollout). This caused a retraction that then had to be un-retracted.
-* **Never fit the mount against the simulator.** The rollout diverges within
-  seconds; a sim-vs-ghost yaw score is nearly flat and its argmin is ~180° wrong.
-  The mount is a property of the recording.
-* **Check that a patch applied.** A silently failed edit left `--start` shifting
-  the ghost but not the commands, so the simulator ran the first seconds of a
-  run against a ghost six seconds later — for several rounds of "results".
-* **`|q| < 4 rad` is not a validity check.** Against real joint limits, 0.0% of
-  recorded calf angles are physical, not the 75% that filter suggested.
+* **Put both streams on one epoch.** Zeroing each stream at its own first
+  message turned "how long the tracker ran before the operator pressed walk"
+  into 0.31 s of phantom command delay — which a search then confidently
+  fitted, within 4 ms. Per-recording, and 4.4 s on the other run.
+* **Never invert a guessed extrinsic onto the ground truth.** The lever-arm
+  correction made the "real" height mostly an artifact of the guessed offset.
+  Simulate the sensor instead of correcting the measurement.
+* **A mechanism beats a knob.** The axis-dependent lag was unfittable by any
+  of nine parameters, and was ten lines of the robot's own command shaping
+  with published constants. When a search trades two objectives it should be
+  able to satisfy, go read the executor.
+* **Check what a fitted value is absorbing.** trunk_inertia ×3.4 and 8× spec
+  frictionloss were the search compensating for the two artifacts above; they
+  relaxed to ×1.5 and 3.7× once the artifacts died. Implausible fitted values
+  are structural-error alarms, not measurements.
+* **Filter by time, not samples; regression slopes, not means of ratios;
+  autocorrelation, not FFT, for gait frequency; fit the lag before the gain.**
+  Estimator bugs that each reported confident nonsense (a 3.9 m/s Go2, a
+  backwards-turning simulator, a retraction that had to be un-retracted).
+* **Never fit the mount against the simulator** — rollouts diverge in seconds,
+  so the sim-vs-ghost score is flat and its argmin ~180° wrong. The mount is a
+  property of the recording.
+* **Check that a patch applied, and don't append a mutable array** — one
+  silent edit failure and one aliased `vel_cmd` buffer each invalidated a
+  round of numbers; both now have regression tests.
+* **`|q| < 4 rad` is not a validity check.** Against real joint limits, 0.0%
+  of recorded calf angles are physical.

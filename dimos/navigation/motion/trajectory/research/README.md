@@ -94,7 +94,8 @@ that is the data, not a bug. See `FINDINGS.md`.
 
 ## Where this is going
 
-`FINDINGS.md` is the state of the sim-to-real work: what is calibrated, what
-the two recordings can and cannot answer, the modelling gaps found so far,
-and the proposed next steps — the sim oscillating roughly twice as fast and
-twice as hard as the real robot is the dominant open gap.
+`FINDINGS.md` is the state of the sim-to-real work: the sim now matches the
+fitted recording on every statistic to within the noise floor, via three
+modelled mechanisms (command slew, actuator lag, transport delay) and a
+physics fit. The open work is validation on the held-out v11 recording and a
+new capture with joint data.
