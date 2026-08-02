@@ -55,6 +55,13 @@ class Track:
     pos: np.ndarray = field(repr=False)  # (n, 3)
     quat: np.ndarray = field(repr=False)  # (n, 4) wxyz
     cmd: np.ndarray = field(repr=False)  # (n, 3) vx, vy, vyaw applied
+    joint_q: np.ndarray = field(repr=False)  # (n, 12) leg angles, FL FR RL RR
+    foot_z: np.ndarray = field(repr=False)  # (n, 4) foot centre heights, FL FR RL RR
+
+    def clearance(self) -> np.ndarray:
+        """Foot-ground clearance (n, 4); the foot sphere radius is 0.022."""
+        out: np.ndarray = self.foot_z - 0.022
+        return out
 
 
 def actuator_step(applied: np.ndarray, requested: np.ndarray, dt: float, tau: float) -> np.ndarray:
@@ -206,6 +213,9 @@ def walk(
     pos: list[np.ndarray] = []
     quat: list[np.ndarray] = []
     used: list[np.ndarray] = []
+    joint_q: list[np.ndarray] = []
+    foot_z: list[np.ndarray] = []
+    feet = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, n) for n in ("FL", "FR", "RL", "RR")]
 
     viewer_cm = None
     if view:
@@ -242,6 +252,8 @@ def walk(
                 pos.append(data.qpos[0:3].copy())
                 quat.append(data.qpos[3:7].copy())
                 used.append(cmd.copy())  # vel_cmd mutates in place; snapshot it
+                joint_q.append(data.qpos[7:19].copy())
+                foot_z.append(data.geom_xpos[feet, 2].copy())
 
             tau = policy.kp * (target - data.qpos[7:19]) - policy.kd * data.qvel[6:18]
             tau = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)
@@ -263,4 +275,11 @@ def walk(
         if viewer_cm is not None:
             viewer_cm.__exit__(None, None, None)
 
-    return Track(t=np.array(ts), pos=np.array(pos), quat=np.array(quat), cmd=np.array(used))
+    return Track(
+        t=np.array(ts),
+        pos=np.array(pos),
+        quat=np.array(quat),
+        cmd=np.array(used),
+        joint_q=np.array(joint_q),
+        foot_z=np.array(foot_z),
+    )

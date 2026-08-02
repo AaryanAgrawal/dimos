@@ -115,6 +115,8 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
         "trunk_inertia_scale",
         "foot_friction",
         "foot_friction_torsional",
+        "trunk_com_x",
+        "leg_mass_scale",
     }
     if unknown:
         raise ValueError(f"unknown physics override(s): {sorted(unknown)}")
@@ -137,6 +139,18 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
             model.body_mass[trunk] *= overrides["trunk_mass_scale"]
         if "trunk_inertia_scale" in overrides:
             model.body_inertia[trunk] *= overrides["trunk_inertia_scale"]
+        # Payload placement, not just payload mass: the lidar and tracker sit
+        # forward and top of the trunk, which body_mass scaling cannot express.
+        if "trunk_com_x" in overrides:
+            model.body_ipos[trunk][0] += overrides["trunk_com_x"]
+        # Real legs carry covers and cabling the MJCF omits; heavier swing
+        # inertia damps how high a foot flies for the same action.
+        if "leg_mass_scale" in overrides:
+            for prefix in FOOT_GEOMS:
+                for part in ("thigh", "calf"):
+                    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{prefix}_{part}")
+                    model.body_mass[bid] *= overrides["leg_mass_scale"]
+                    model.body_inertia[bid] *= overrides["leg_mass_scale"]
         # geom_friction columns are (tangential, torsional, rolling); the foot
         # has priority 1, so its values dictate the foot-floor contact pair.
         # Torsional is what resists pivoting the stance feet in a turn.
