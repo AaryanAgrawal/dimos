@@ -2,35 +2,38 @@
 
 Goal: make MuJoCo behave like the real Go2 well enough to train against.
 
-**Status: matched, base AND legs, on the fitted recording.** The same HIMLoco
-policy that ran on the robot runs in sim, driven by the recorded commands,
+**Status: matched, base AND legs, on BOTH recordings.** The same HIMLoco
+policies that ran on the robot run in sim, driven by the recorded commands,
 scored against VR-tracker ground truth *and* the executor's own commanded
-joint targets (`policy/lowcmd`). The four-objective search's balanced point:
-
-    gait 1.06    translation 0.98    rotation 0.45    legs 0.81
-
-(noise-floor units, default-physics floor). In absolute terms: commanded front
-foot lift **0.060 vs 0.065 m** — the base-only fit high-stepped at 0.217 and
-looked like prancing — rear 0.039 vs 0.035, pitch bob 0.018 vs 0.020 rad,
-gait 1.82 vs 1.67 Hz, speed 0.417 vs 0.427 m/s, yaw lag 0.160 vs 0.170 s.
+joint targets (`policy/lowcmd`). `FITTED_*` in `evaluate.py` is the **joint
+two-recording fit** — 300 CMA-ES trials scored on himloco01 and v11 at once,
+seeded with the himloco-only preset so it had to beat it:
 
 ```
-armature 0.0069   damping 0.1797   frictionloss 0.0327
-foot_friction 0.9013   foot_friction_torsional 0.0298
-trunk_mass_scale 1.20   trunk_inertia_scale 1.316
-trunk_com_x +0.0437   leg_mass_scale 0.716
-command_delay 0.0321   actuator_tau 0.0232
+armature 0.00712   damping 0.2850   frictionloss 0.3650
+foot_friction 0.7860   foot_friction_torsional 0.00613
+trunk_mass_scale 0.9412   trunk_inertia_scale 0.8601
+trunk_com_x -0.00685   leg_mass_scale 1.616
+command_delay 0.00898   actuator_tau 0.01510
 ```
 
-Physically coherent: the com moves **4.4 cm forward — where the lidar and
-head actually sit**, torsional friction lands at 0.030 against the shipped
-0.02, trunk 20% heavier for the payload. A hard lesson is baked in here: the
-earlier base-only fit reached "everything sub-noise" while commanding 3x the
-real front foot lift. **A judge only constrains what it can see.**
+Joint loss **3.44 → 1.52**, reproduced at 2.80 → 1.44 on fresh 6-seed floors.
+Commanded front foot lift 0.071 vs 0.066 m real on himloco01 and 0.112 vs
+0.115 on v11 — the base-only fit high-stepped at 0.217 and looked like
+prancing. **Ivan has confirmed it in the viewer on both recordings.**
 
-Ivan has confirmed the fitted config **looks right in the viewer** (after
-fixing a bug where `--ghost` mode silently ran stock physics — the "almost
-falling" he reported was the unfitted model).
+A hard lesson is baked in here: that earlier base-only fit reached "everything
+sub-noise" while commanding 3x the real front foot lift. **A judge only
+constrains what it can see.** (A `--ghost` bug that silently ran stock physics
+under `--fitted` cost a round of false "almost falling" reports too.)
+
+The **himloco-only** preset it replaced — com +4.4 cm forward, trunk 20%
+heavier, legs 0.72x, delay 32 ms — read as physically coherent (that is where
+the lidar and head sit) and was viewer-confirmed on himloco01. The joint fit
+reverses that story: trunk near stock, legs 1.62x, delay 9 ms. **Two
+recordings constrain these parameters where one did not**, and §D already
+flagged this cluster as weakly identified — so the payload interpretation was
+partly policy-style absorption, not measurement.
 
 The judge now scores the **entire recording** (a 20 s window once certified a
 config that was never scored past t=26), carries **tilt_p99** as a stability
@@ -56,12 +59,22 @@ verified end-to-end: commanded 0.31→0.10 m, the sim base drops 0.14 m where
 the real tracker drops 0.11 m, and both follow the raise to 0.37 m.
 
 v11-specific judge caveats: the policy is so strongly stabilizing that the
-4-seed noise floor collapses (SNR/loss degenerate — compare absolute errors);
+4-seed noise floor collapses (SNR/loss degenerate — hence `usable_floor`);
 body-bob `gait_hz` reads the sway/height envelope, not the steps (real 1.0 Hz
 vs 2.9 Hz in the joint commands — use `cmd_gait_hz`); `height_std` in the
-height-play window is dominated by the commanded crouches. Real tilt_p99 is
-0.32 rad (18°) — the robot genuinely nearly fell during the 0.10 m crouch,
-and both configs underestimate that tail (fitted 0.21, stock 0.18).
+height-play window is dominated by the commanded crouches. The last two are
+declared per-recording in `search.INVALID_STATS` and dropped from the joint
+objective. Real tilt_p99 is 0.32 rad (18°) — the robot genuinely nearly fell
+during the 0.10 m crouch, and both configs underestimate that tail.
+
+**What the joint fit bought** (`search.run_joint`), against the himloco-only
+preset, as absolute error vs real: v11 `pitch_std` 0.020 → 0.004, `roll_std`
+0.010 → 0.003, `speed_gain` 0.129 → 0.016; himloco `gait_hz` 0.146 → 0.026,
+`thigh_span_rear` 0.118 → 0.019. Front lift improves on *both* recordings
+(0.011 → 0.005, 0.006 → 0.003), so it does not re-open the prancing failure.
+It gives up `thigh_span_front` (0.006 → 0.043 on himloco) and v11
+`yaw_rate_gain` (0.001 → 0.073). That is the texture gap the held-out check
+exposed, closed by the recording that exposed it.
 
 ---
 
@@ -158,13 +171,15 @@ than the real speed does, an axis-dependent lag no uniform delay could fit
 not have both). With the slew alone, default physics puts sim yaw_lag at
 0.170 vs real 0.170.
 
-**Actuator lag ≈ 20–30 ms.** A MuJoCo motor delivers requested torque on the
+**Actuator lag ≈ 15–30 ms.** A MuJoCo motor delivers requested torque on the
 same step; a real BLDC through a gearbox does not. First-order lag on the
 torque; every Pareto-optimal trial keeps it (searched from 0, so an ideal
-actuator is free — none chose it).
+actuator is free — none chose it). The joint fit puts it at 15 ms.
 
-**Command delay ≈ 23 ms.** What genuinely remains of transport latency once
-the epoch artifact is gone.
+**Command delay ≈ 9–32 ms.** What genuinely remains of transport latency once
+the epoch artifact is gone. The single-recording fit said 32 ms and the joint
+fit 9 ms — it trades against actuator lag and trunk inertia, so treat the
+sum of the three as the identified quantity, not any one of them.
 
 **Corrected en route:** the menagerie feet are *not* frictionless — the
 `condim="1"` default class only governs the calf capsules; the foot geoms
@@ -186,49 +201,30 @@ python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-
 
 # the v11 gait-height run, same flow (crouches to 0.10 m around t=32)
 python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_v11_gait_height01.mcap --policy data/ml-trajectory-research/v11_final.bin --view --ghost --fitted --start 6
+
+# joint fit across both recordings, starting from the current preset
+python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --also data/ml-trajectory-research/unitree_v11_gait_height01.mcap data/ml-trajectory-research/v11_final.bin --seed-fitted --trials 300
 ```
 
 ---
 
 # Next steps
 
-## A0. Joint two-recording fit — candidate, needs the eye
+## A. Validate on the held-out recording — DONE, then folded in
 
-A 300-trial CMA-ES on both recordings at once (v11's collapsed noise floor
-clamped by himloco01's + 5% of |real|; v11's polluted `gait_hz`/`height_std`
-excluded) halves the joint loss: stock 8.93, current preset 3.44, **joint
-best 1.52**. The candidate relocates the payload story: trunk back to
-near-stock (mass x0.94, inertia x0.86, com_x ~0 — the +4.4 cm was partly
-himloco-style absorption), legs heavy instead (x1.62), frictionloss 0.365,
-command_delay down to 9 ms. It trades a little himloco01 precision (front
-lift 0.071 vs 0.066 m) for large v11 gains (speed 0.354 vs 0.351 m/s,
-pitch_std 0.035 vs 0.030 where the current preset gives 0.050).
+The v11 check did its job twice over. First as a *test*: the mechanism side
+of the himloco-only fit (command response, leg geometry, stability tail)
+transferred and beat stock, while the mm-level oscillation texture did not —
+localizing the run-specific absorption to exactly the parameters §D flagged
+as weakly identified. Then as *data*: the joint fit over both recordings
+(§ status) closed that gap and is now the preset.
 
-```
-armature 0.00712   damping 0.2850   frictionloss 0.3650
-foot_friction 0.7860   foot_friction_torsional 0.00613
-trunk_mass_scale 0.9412   trunk_inertia_scale 0.8601
-trunk_com_x -0.00685   leg_mass_scale 1.6160
-command_delay 0.00898   actuator_tau 0.0151
-```
-
-**Not promoted to `FITTED_*`**: the current preset is the visually confirmed
-one, and a judge has certified prancing before. View this candidate on both
-recordings (`--physics` string above + `--command-delay 0.00898
---actuator-tau 0.0151`); if the eye agrees on both, it becomes the preset.
-
-## A. Validate on the held-out recording — DONE, partial transfer
-
-Result is in the status section: the mechanism side of the fit (command
-response, leg geometry, stability tail) transfers to v11 and beats stock;
-the mm-level oscillation texture does not — stock edges it there, which
-localizes the run-specific absorption to exactly the parameters §D already
-flagged as weakly identified. The failure pattern to chase next: both
-configs underestimate v11's tilt tail during deep crouches, so whatever
-limits the sim's near-fall dynamics (torque limits? contact during
-crouched stance?) is the next mechanism to find. A joint fit across both
-recordings — or a search scored only on v11's crouch window — would
-separate platform from policy for the texture parameters.
+What v11 has NOT answered: both configs still underestimate its tilt tail
+during the deep crouch (0.21 sim vs 0.32 rad real). No parameter in the
+current space moved it, which is the signature of a **missing mechanism**
+rather than a mis-set value — torque saturation, or contact behaviour in a
+deeply crouched stance, are the candidates. That is the next thing to find,
+and it wants a third recording or a crouch-window-only search to isolate.
 
 ## B. Measure the tracker translation
 
@@ -248,24 +244,27 @@ sensor-space trick only cancels to first order. Ten minutes on the robot.
 
 ## D. Housekeeping
 
-* Three parameters sit at or near search bounds (damping at the 0.238 floor,
-  torsional friction near 0.002, actuator_tau near 0.029 of 0.05). With every
-  objective sub-noise the basin is flat, so their exact values are weakly
-  identified — widen the ranges before quoting them as measurements.
+* The joint fit pulled every parameter well inside its bounds, which the
+  single-recording fit did not — but the payload cluster (trunk mass/inertia/
+  com_x vs leg_mass_scale) and the latency cluster (command_delay vs
+  actuator_tau vs trunk inertia) still trade against each other. Quote the
+  configuration, not the individual values, until a measurement pins one.
 * The noise floor shrinks ~10–100× at the fitted physics (the matched sim is
   much less statistically chaotic than the default one), so a standalone
   `--eval` at the best config reports inflated/infinite SNR against its own
-  floor. Compare absolute sim/real columns there, or reuse a default-physics
-  floor. Four-seed peak-to-peak is also a fragile spread estimator; more seeds
-  would firm it up.
+  floor. Compare absolute sim/real columns there, reuse a default-physics
+  floor, or use `search.usable_floor`. Four-seed peak-to-peak is also a
+  fragile spread estimator; the joint fit was re-checked at six.
 * `speed_lag` is the weakest surviving statistic (sim 0.12 vs real 0.08 s,
   the one residual above 1 after the collapse in absolute terms).
 
-## E. Then: train against it
+## E. Now: train against it
 
-The project goal. With A green, the matched sim is the environment; the
+The project goal, and A is green. The matched sim is the environment; the
 fitted config is the domain-randomization centre, and the noise-floor
 machinery doubles as a regression test that future sim changes stay matched.
+Randomize *around* the fitted point along the traded clusters above — that
+is where the identified uncertainty actually lives.
 
 ---
 
