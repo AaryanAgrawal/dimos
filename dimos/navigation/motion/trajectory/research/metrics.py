@@ -43,6 +43,16 @@ import numpy as np
 RESAMPLE_HZ = 100.0
 VELOCITY_WINDOW_S = 0.4
 
+# Gait band. HIMLoco free_walk has no clocked gait -- the only explicit rate in
+# the fleet is 1.5 Hz on an experimental trot-clock policy (go2web
+# policies/experimental/jun05.rs) -- so this brackets a plausible trot rather
+# than targeting a known value. The floor matters: below ~1 Hz the FFT locks
+# onto the robot's slow drift around the room instead of its bob.
+GAIT_BAND_HZ = (1.0, 6.0)
+
+# Longest policy->body lag to search for when fitting a command gain.
+MAX_LAG_S = 0.6
+
 
 def resample(
     t: np.ndarray, x: np.ndarray, rate: float = RESAMPLE_HZ
@@ -89,19 +99,40 @@ def yaw_of(quat: np.ndarray) -> np.ndarray:
     return yaw
 
 
-def _gain(achieved: np.ndarray, commanded: np.ndarray, threshold: float) -> float:
-    """Least-squares slope of achieved against commanded, through the origin.
+def _best_lag(achieved: np.ndarray, commanded: np.ndarray, rate: float) -> int:
+    """Samples of delay that best aligns the response with the command.
 
-    Not ``mean(achieved / commanded)``: in a real recording the command flips
-    sign constantly, so per-sample ratios blow up near zero and opposite-sign
-    turns cancel. That estimator reported the simulator turning *backwards*
-    (gain -0.14) on a run where a clean constant command gives +0.63.
+    The body does not turn the instant the command changes -- the policy has
+    its own history and the robot has inertia. Regressing at zero lag against
+    a command that alternates faster than that delay reads as no response at
+    all, which is how the simulator appeared to turn backwards.
     """
-    m = np.abs(commanded) > threshold
+    a = achieved - achieved.mean()
+    c = commanded - commanded.mean()
+    if not np.any(c) or not np.any(a):
+        return 0
+    span = int(MAX_LAG_S * rate)
+    scores = [float(c[: len(c) - k] @ a[k:]) for k in range(span)]
+    return int(np.argmax(scores))
+
+
+def _gain(
+    achieved: np.ndarray, commanded: np.ndarray, threshold: float, *, rate: float = RESAMPLE_HZ
+) -> tuple[float, float]:
+    """Least-squares slope of achieved against commanded, at the best lag.
+
+    Returns ``(gain, lag_seconds)``. Not ``mean(achieved / commanded)``: in a
+    real recording the command flips sign constantly, so per-sample ratios
+    blow up near zero and opposite-sign turns cancel.
+    """
+    lag = _best_lag(achieved, commanded, rate)
+    a = achieved[lag:] if lag else achieved
+    c_all = commanded[: len(commanded) - lag] if lag else commanded
+    m = np.abs(c_all) > threshold
     if not m.any():
-        return 0.0
-    c = commanded[m]
-    return float((c @ achieved[m]) / (c @ c))
+        return 0.0, 0.0
+    c = c_all[m]
+    return float((c @ a[m]) / (c @ c)), lag / rate
 
 
 @dataclass
@@ -114,7 +145,9 @@ class Summary:
     height_mean: float  # mean base height, m -- NOT comparable sim-to-real:
     # the recorded value is set by the unknown tracker offset and the anchor
     height_std: float  # body bob amplitude, m
-    gait_hz: float  # dominant frequency of the vertical bob
+    gait_hz: float  # dominant frequency of the detrended vertical bob
+    speed_lag: float  # policy->body delay fitted for the speed gain, s
+    yaw_lag: float  # same, for the turn gain
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -124,6 +157,8 @@ class Summary:
             "height_mean": self.height_mean,
             "height_std": self.height_std,
             "gait_hz": self.gait_hz,
+            "speed_lag": self.speed_lag,
+            "yaw_lag": self.yaw_lag,
         }
 
 
@@ -154,18 +189,26 @@ def summarize(
     )
     n = min(len(yaw_rate), len(c))
 
-    bob = z - z.mean()
+    # High-pass by subtracting a 1 s moving average: the raw signal is dominated
+    # by the robot drifting up and down the room, not by its gait.
+    bob = z - _moving_average(z, int(RESAMPLE_HZ))
+    bob = bob * np.hanning(len(bob))
     freqs = np.fft.rfftfreq(len(bob), 1.0 / RESAMPLE_HZ)
     power = np.abs(np.fft.rfft(bob))
-    band = (freqs > 0.5) & (freqs < 6.0)  # plausible quadruped gait rates
+    band = (freqs >= GAIT_BAND_HZ[0]) & (freqs <= GAIT_BAND_HZ[1])
+
+    speed_gain, speed_lag = _gain(speed, cmd_speed, moving_threshold)
+    yaw_gain, yaw_lag = _gain(yaw_rate[:n], c[:n, 2], 0.2)
 
     return Summary(
         speed=float(speed[moving].mean()) if moving.any() else 0.0,
-        speed_gain=_gain(speed, cmd_speed, moving_threshold),
-        yaw_rate_gain=_gain(yaw_rate[:n], c[:n, 2], 0.2),
+        speed_gain=speed_gain,
+        yaw_rate_gain=yaw_gain,
         height_mean=float(z.mean()),
         height_std=float(z.std()),
         gait_hz=float(freqs[band][np.argmax(power[band])]) if band.any() else 0.0,
+        speed_lag=speed_lag,
+        yaw_lag=yaw_lag,
     )
 
 

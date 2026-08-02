@@ -145,7 +145,9 @@ def walk(
         if schedule is None:
             assert command is not None
             return command
-        held: np.ndarray = sched_cmd[max(0, int(np.searchsorted(sched_t, t, side="right")) - 1)]
+        held: np.ndarray = sched_cmd[
+            max(0, int(np.searchsorted(sched_t, t + start, side="right")) - 1)
+        ]
         return held
 
     for _ in range(policy.hist):

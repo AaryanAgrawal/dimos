@@ -377,3 +377,60 @@ Read this carefully:
 Also: `vive.read_vive_pose` now takes its clock from the payload's `t_host`
 rather than mcap `log_time` -- monotonic, and its worst gap is 15 ms against
 92 ms. The payload's own `ts` goes backwards at 91 points and is unusable raw.
+
+---
+
+# Correction: `--start` was not reaching the commands
+
+Every sim-vs-real number above this line, from any run using `--start`, was
+wrong. A patch adding the offset to `cmd_at()` silently failed to apply while
+the same offset *did* land on the ghost lookup, so the simulator was driven by
+the first seconds of a run and scored against a ghost six seconds later. It
+looked entirely plausible -- the robot walked, the numbers were finite -- which
+is why it survived several rounds. `test_start_offset_reaches_the_command_schedule`
+now pins it.
+
+The tell, once looked at: the commands the simulator actually applied had
+`vx = 0` where the schedule at that time said `vx = 0.422`.
+
+## Results with commands correctly aligned
+
+40 s of himloco01 from `--start 6`, chaos spread over four perturbed rollouts:
+
+| statistic | sim | real | diff | chaos | SNR |
+|---|---|---|---|---|---|
+| **gait_hz** | 3.301 | 1.750 | 1.550 | 0.450 | **3.4** |
+| **yaw_lag** (s) | 0.070 | 0.490 | 0.420 | 0.030 | **14.0** |
+| **yaw_rate_gain** | 0.555 | 0.697 | 0.142 | 0.021 | **6.7** |
+| **height_std** | 0.032 | 0.024 | 0.008 | 0.003 | **2.8** |
+| speed (m/s) | 0.441 | 0.389 | 0.052 | 0.028 | 1.9 |
+| speed_gain | 0.887 | 0.839 | 0.048 | 0.042 | 1.1 |
+| speed_lag (s) | 0.290 | 0.390 | 0.100 | 0.030 | 3.3 |
+| height_mean | 0.296 | 0.319 | -- | -- | not comparable |
+
+A coherent picture, and it matches watching the viewer: **the simulated gait is
+about twice as fast as the real one** (3.3 vs 1.75 Hz), bobs 33% higher, and
+responds to a turn command seven times more quickly (0.07 s vs 0.49 s) while
+turning less per unit command. The simulated robot is skittering where the real
+one strides.
+
+Translation still transfers well -- speed and speed_gain agree to within about
+twice the noise.
+
+These four are the physics-fitting targets: **gait_hz, yaw_lag, yaw_rate_gain,
+height_std**.
+
+## Estimator fixes in this pass
+
+* **gait_hz** now high-passes by subtracting a 1 s moving average and windows
+  with a Hann taper before the FFT, and the search band starts at 1.0 Hz. It
+  was locking onto the robot's slow drift around the room and reporting
+  0.58 Hz. There is no ground-truth gait rate to check against -- HIMLoco
+  free_walk has no clocked gait; the only explicit rate in the fleet is 1.5 Hz
+  on an experimental trot-clock policy (`go2web policies/experimental/jun05.rs`)
+  -- so this is a plausibility check, not a calibration.
+* **Command gains** now search for the policy-to-body lag by cross-correlation
+  and regress at that lag, reporting it alongside the gain. The lag turns out
+  to be a discriminator in its own right, and the strongest one found so far.
+* 50 Hz is the *control* rate (`himloco.rs:185`, "Stateful 50 Hz controller"),
+  not a gait frequency -- it confirms `walk.CONTROL_DT = 0.02`.

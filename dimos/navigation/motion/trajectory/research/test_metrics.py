@@ -87,18 +87,23 @@ def test_yaw_of_reads_rotation_about_z():
 
 def test_gain_is_a_slope_not_a_mean_of_ratios():
     """Sign-flipping commands must not cancel — the bug this replaced."""
-    cmd = np.array([1.0, -1.0, 0.8, -0.8, 0.02])
-    achieved = 0.6 * cmd
-    assert _gain(achieved, cmd, 0.2) == pytest.approx(0.6)
+    cmd = np.tile([1.0, -1.0, 0.8, -0.8], 50)
+    gain, lag = _gain(0.6 * cmd, cmd, 0.2)
+    assert gain == pytest.approx(0.6)
+    assert lag == pytest.approx(0.0)
 
-    # a mean of ratios survives this case too, but not near-zero commands
-    noisy = achieved.copy()
-    noisy[-1] = 5.0  # tiny command, large achieved -> ratio explodes
-    assert _gain(noisy, cmd, 0.2) == pytest.approx(0.6)
+
+def test_gain_ignores_commands_below_the_threshold():
+    """Near-zero commands are where a ratio estimator explodes."""
+    rng = np.random.default_rng(3)
+    cmd = np.repeat(rng.choice([-1.0, 1.0, 0.01], 80), 15).astype(float)
+    achieved = 0.5 * cmd
+    achieved[np.abs(cmd) < 0.2] = 4.0  # nonsense where nothing was commanded
+    assert _gain(achieved, cmd, 0.2)[0] == pytest.approx(0.5, abs=0.03)
 
 
 def test_gain_returns_zero_when_nothing_is_commanded():
-    assert _gain(np.ones(5), np.zeros(5), 0.2) == 0.0
+    assert _gain(np.ones(5), np.zeros(5), 0.2) == (0.0, 0.0)
 
 
 def test_summarize_on_a_synthetic_walk():
@@ -134,6 +139,8 @@ def test_chaos_spread_is_peak_to_peak_per_statistic():
             height_mean=0.3,
             height_std=0.01,
             gait_hz=2.0,
+            speed_lag=0.1,
+            yaw_lag=0.2,
         )
 
     spread = chaos_spread([mk(0.40), mk(0.44), mk(0.42)])
@@ -163,3 +170,43 @@ def test_walk_requires_exactly_one_command_source():
 
     with pytest.raises(ValueError, match="exactly one"):
         walk(_Stub())  # type: ignore[arg-type]
+
+
+def test_start_offset_reaches_the_command_schedule():
+    """Regression: --start must shift the commands, not only the ghost.
+
+    A failed patch once left cmd_at() reading from t while the ghost read from
+    t + start, so every comparison drove the simulator with the first seconds
+    of a run and scored it against a ghost six seconds later. It looked
+    plausible -- the robot walked -- and silently invalidated every number.
+    """
+    from dimos.navigation.motion.trajectory.research import walk as walk_mod
+
+    class FakePolicy:
+        hist, act_dim, obs_per_frame = 1, 12, 45
+        default_pose = np.zeros(12)
+        kp, kd = np.full(12, 40.0), np.full(12, 1.0)
+
+        def normalize(self, raw):
+            return raw
+
+        def act(self, _p_obs, _cmd):
+            return np.zeros(12), self.default_pose
+
+    t = np.arange(0.0, 10.0, 0.1)
+    cmd = np.stack([np.zeros_like(t), np.zeros_like(t), t], 1)  # vyaw ramps with time
+    track = walk_mod.walk(FakePolicy(), schedule=(t, cmd), seconds=2.0, start=5.0)
+
+    # at start=5 the commanded vyaw must begin near 5.0, not near 0.0
+    assert track.cmd[0, 2] == pytest.approx(5.0, abs=0.2)
+
+
+def test_gain_recovers_a_delayed_response():
+    """A lagged response must still read its true gain."""
+    rng = np.random.default_rng(0)
+    cmd = np.repeat(rng.choice([-0.8, 0.8], 60), 20).astype(float)
+    lag_samples = 25
+    achieved = np.concatenate([np.zeros(lag_samples), 0.7 * cmd])[: len(cmd)]
+    gain, lag = _gain(achieved, cmd, 0.2, rate=100.0)
+    assert gain == pytest.approx(0.7, abs=0.05)
+    assert lag == pytest.approx(lag_samples / 100.0, abs=0.02)
