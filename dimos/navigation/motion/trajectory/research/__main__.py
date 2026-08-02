@@ -37,7 +37,32 @@ def main() -> None:
     ap.add_argument("--no-seed", action="store_true", help="start from keyframe, not lowstate")
     ap.add_argument("--view", action="store_true", help="open an interactive MuJoCo window")
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed for --view")
+    ap.add_argument(
+        "--policy",
+        help="FREE .bin — drive the policy from the recording's control_log "
+        "instead of replaying lowcmd",
+    )
+    ap.add_argument("--seconds", type=float, default=None, help="policy run length")
     args = ap.parse_args()
+
+    if args.policy:
+        from dimos.navigation.motion.trajectory.research.policy import FreePolicy
+        from dimos.navigation.motion.trajectory.research.walk import read_control_log, walk
+
+        policy = FreePolicy.load(args.policy)
+        schedule = read_control_log(args.dataset)
+        print(f"control_log: {len(schedule[0])} walk cmds over {schedule[0][-1]:.1f}s")
+        track = walk(
+            policy,
+            schedule=schedule,
+            seconds=args.seconds,
+            view=args.view,
+            speed=args.speed,
+        )
+        drift = float(np.linalg.norm(track.pos[-1] - track.pos[0]))
+        print(f"simulated {track.t[-1]:.1f}s  net displacement {drift:.3f} m")
+        print(f"base z: {track.pos[0, 2]:.3f} -> {track.pos[-1, 2]:.3f} m")
+        return
 
     commands = replay_mod.read_commands(args.dataset, limit=args.limit)
     states = replay_mod.read_states(args.dataset, limit=args.limit)
