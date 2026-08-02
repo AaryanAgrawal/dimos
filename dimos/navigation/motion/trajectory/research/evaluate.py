@@ -70,8 +70,18 @@ FOOT_GEOMS = ("FL", "FR", "RL", "RR")
 
 # Leg-space statistics, scored command-to-command against policy/lowcmd. The
 # judge's base statistics cannot see the legs at all -- the sim matched every
-# one of them while visibly high-stepping its front feet.
-LEG_STATS = ("front_lift", "rear_lift")
+# one of them while visibly high-stepping its front feet. Spans and the
+# command-space gait frequency use the joint-angle streams directly rather
+# than collapsing them to a single clearance number.
+LEG_STATS = (
+    "front_lift",
+    "rear_lift",
+    "thigh_span_front",
+    "thigh_span_rear",
+    "calf_span_front",
+    "calf_span_rear",
+    "cmd_gait_hz",
+)
 
 _FK_CACHE: tuple[mujoco.MjModel, mujoco.MjData, list[int]] | None = None
 
@@ -102,12 +112,29 @@ def commanded_clearance(targets: np.ndarray, base_z: float = 0.318) -> np.ndarra
     return out - 0.022  # foot sphere radius
 
 
-def leg_stats(targets: np.ndarray) -> dict[str, float]:
-    """p95 commanded foot lift, front and rear pairs -- the swing apex."""
+def leg_stats(t: np.ndarray, targets: np.ndarray) -> dict[str, float]:
+    """Distributional statistics of the commanded joint targets.
+
+    Lift is the p95 FK foot clearance (swing apex); spans are the p5..p95
+    excursion of the thigh and calf commands, pooled per front/rear pair;
+    ``cmd_gait_hz`` is the stepping frequency read off the FL thigh command
+    by the same autocorrelation the body-bob estimate uses. Joint layout is
+    (hip, thigh, calf) x FL, FR, RL, RR.
+    """
+
+    def span(cols: np.ndarray) -> float:
+        return float(np.percentile(cols, 95) - np.percentile(cols, 5))
+
     c = commanded_clearance(targets)
+    _grid, thigh_fl = metrics.resample(t, targets[:, 1])
     return {
         "front_lift": float(np.percentile(c[:, :2], 95)),
         "rear_lift": float(np.percentile(c[:, 2:], 95)),
+        "thigh_span_front": span(targets[:, [1, 4]]),
+        "thigh_span_rear": span(targets[:, [7, 10]]),
+        "calf_span_front": span(targets[:, [2, 5]]),
+        "calf_span_rear": span(targets[:, [8, 11]]),
+        "cmd_gait_hz": metrics.gait_frequency(thigh_fl),
     }
 
 
@@ -170,9 +197,9 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
         raise ValueError(f"unknown physics override(s): {sorted(unknown)}")
 
     original = go2_model.load
+    original_ghost = go2_model.load_with_ghost
 
-    def patched(menagerie: Path | None = None) -> tuple[mujoco.MjModel, mujoco.MjData]:
-        model, data = original(menagerie)
+    def _apply(model: mujoco.MjModel) -> None:
         if "armature" in overrides:
             model.dof_armature[LEG_DOFS] = overrides["armature"]
         if "damping" in overrides:
@@ -208,13 +235,29 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
                 model.geom_friction[gid, 0] = overrides["foot_friction"]
             if "foot_friction_torsional" in overrides:
                 model.geom_friction[gid, 1] = overrides["foot_friction_torsional"]
+
+    def patched(menagerie: Path | None = None) -> tuple[mujoco.MjModel, mujoco.MjData]:
+        model, data = original(menagerie)
+        _apply(model)
+        return model, data
+
+    # The ghost loader builds its own model, so it must be patched too --
+    # --view --ghost once silently ran stock physics under --fitted.
+    def patched_ghost(
+        menagerie: Path | None = None,
+        rgba: tuple[float, float, float, float] = (0.2, 1.0, 0.2, 0.35),
+    ) -> tuple[mujoco.MjModel, mujoco.MjData]:
+        model, data = original_ghost(menagerie, rgba)
+        _apply(model)
         return model, data
 
     go2_model.load = patched  # type: ignore[assignment]
+    go2_model.load_with_ghost = patched_ghost  # type: ignore[assignment]
     try:
         yield
     finally:
         go2_model.load = original  # type: ignore[assignment]
+        go2_model.load_with_ghost = original_ghost  # type: ignore[assignment]
 
 
 def _noise_floor(
@@ -238,7 +281,7 @@ def _noise_floor(
             object.__setattr__(policy, "default_pose", base)
         p2 = virtual_tracker(t2.pos, t2.quat, mount_yaw=mount_yaw, tracker_z=tracker_z)
         runs.append(_summarize_run(t2.t, p2, t2.quat, sched, start))
-        leg_runs.append(leg_stats(t2.target))
+        leg_runs.append(leg_stats(t2.t, t2.target))
     spread = metrics.chaos_spread(runs)
     for k in LEG_STATS:
         vals = [lr[k] for lr in leg_runs]
@@ -251,12 +294,18 @@ def measure_noise(
     policy_bin: str | Path,
     *,
     start: float = 6.0,
-    seconds: float = 30.0,
+    seconds: float | None = None,
     seeds: int = 4,
 ) -> dict[str, float]:
-    """Each statistic's noise floor, to be measured once and reused by a search."""
+    """Each statistic's noise floor, to be measured once and reused by a search.
+
+    ``seconds=None`` covers the whole recording, matching :func:`evaluate`.
+    """
     policy = FreePolicy.load(policy_bin)
-    return _noise_floor(policy, walk_mod.read_control_log(dataset), start, seconds, seeds)
+    sched = walk_mod.read_control_log(dataset)
+    if seconds is None:
+        seconds = float(sched[0][-1]) - start
+    return _noise_floor(policy, sched, start, seconds, seeds)
 
 
 @dataclass
@@ -319,7 +368,7 @@ def evaluate(
     policy_bin: str | Path,
     *,
     start: float = 6.0,
-    seconds: float = 30.0,
+    seconds: float | None = None,
     mount_yaw: float = 94.0,
     tracker_z: float = 0.207,
     anchor_height: float = 0.28,
@@ -339,6 +388,11 @@ def evaluate(
     """
     policy = FreePolicy.load(policy_bin)
     sched = walk_mod.read_control_log(dataset)
+    if seconds is None:
+        # Score the entire recording. A judge windowed to the first 20 s once
+        # certified a config that visibly degraded after t=26 -- unscored time
+        # is unconstrained time.
+        seconds = float(sched[0][-1]) - start
 
     with _physics(physics):
         track = walk_mod.walk(
@@ -354,11 +408,11 @@ def evaluate(
         if noise is None:
             noise = _noise_floor(policy, sched, start, seconds, seeds, mount_yaw, tracker_z)
 
-    sim_legs = leg_stats(track.target)
+    sim_legs = leg_stats(track.t, track.target)
     try:
         lt, lq = walk_mod.read_policy_lowcmd(dataset)
         lsel = (lt >= start) & (lt < start + seconds)
-        real_legs = leg_stats(lq[lsel])
+        real_legs = leg_stats(lt[lsel], lq[lsel])
     except ValueError:  # recording without policy/lowcmd: legs stay unscored
         real_legs = {}
 

@@ -171,6 +171,7 @@ def test_chaos_spread_is_peak_to_peak_per_statistic():
             yaw_lag=0.2,
             pitch_std=0.02,
             roll_std=0.02,
+            tilt_p99=0.06,
         )
 
     spread = chaos_spread([mk(0.40), mk(0.44), mk(0.42)])

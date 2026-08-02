@@ -108,7 +108,7 @@ def main() -> None:
                 args.dataset,
                 args.policy,
                 start=args.start,
-                seconds=args.seconds if args.seconds else 30.0,
+                seconds=args.seconds,  # None scores the whole recording
                 mount_yaw=args.mount_yaw,
                 tracker_z=args.tracker_z,
                 physics=overrides,

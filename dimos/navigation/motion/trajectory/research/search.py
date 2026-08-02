@@ -34,7 +34,11 @@ from typing import Any
 
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research.evaluate import evaluate, measure_noise
+from dimos.navigation.motion.trajectory.research.evaluate import (
+    LEG_STATS,
+    evaluate,
+    measure_noise,
+)
 
 # name -> (low, high, log). Menagerie defaults are armature 0.01, damping 2.0,
 # frictionloss 0.2; the ranges bracket them by about a decade each way.
@@ -79,12 +83,14 @@ SPACE: dict[str, tuple[float, float, bool]] = {
 # physics-only search bought gait accuracy with friction, the delay search bought
 # rotation accuracy and gave gait back.
 OBJECTIVES: dict[str, tuple[str, ...]] = {
-    "gait": ("gait_hz", "height_std", "pitch_std", "roll_std"),
+    # tilt_p99 is the stability tail -- a config that occasionally almost
+    # falls pays here even when its oscillation statistics look right.
+    "gait": ("gait_hz", "height_std", "pitch_std", "roll_std", "tilt_p99"),
     "translation": ("speed", "speed_gain", "speed_lag"),
     "rotation": ("yaw_rate_gain", "yaw_lag"),
     # Scored against policy/lowcmd: the base statistics cannot see the legs,
     # and the sim matched all of them while high-stepping its front feet.
-    "legs": ("front_lift", "rear_lift"),
+    "legs": LEG_STATS,
 }
 
 
@@ -101,7 +107,7 @@ def run(
     *,
     trials: int = 100,
     start: float = 6.0,
-    seconds: float = 20.0,
+    seconds: float | None = None,
     seeds: int = 4,
     space: dict[str, tuple[float, float, bool]] | None = None,
     storage: str | None = None,
@@ -174,7 +180,7 @@ def run_multi(
     *,
     trials: int = 200,
     start: float = 6.0,
-    seconds: float = 15.0,
+    seconds: float | None = None,
     seeds: int = 4,
     space: dict[str, tuple[float, float, bool]] | None = None,
     groups: dict[str, tuple[str, ...]] | None = None,
@@ -256,7 +262,7 @@ def main() -> None:
     ap.add_argument("policy")
     ap.add_argument("--trials", type=int, default=100)
     ap.add_argument("--start", type=float, default=6.0)
-    ap.add_argument("--seconds", type=float, default=20.0)
+    ap.add_argument("--seconds", type=float, default=None, help="default: the whole recording")
     ap.add_argument("--storage", default=None, help="e.g. sqlite:///search.db to resume")
     ap.add_argument("--json", default="", help="write the result here")
     ap.add_argument(

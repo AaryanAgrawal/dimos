@@ -191,6 +191,9 @@ class Summary:
     yaw_lag: float  # same, for the turn gain
     pitch_std: float  # gait-driven pitch oscillation, rad
     roll_std: float  # same, about the roll axis
+    tilt_p99: float  # near-worst-case body tilt magnitude, rad -- stability:
+    # a config that occasionally almost falls carries a large tail even when
+    # every oscillation statistic looks normal
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -204,6 +207,7 @@ class Summary:
             "yaw_lag": self.yaw_lag,
             "pitch_std": self.pitch_std,
             "roll_std": self.roll_std,
+            "tilt_p99": self.tilt_p99,
         }
 
 
@@ -256,6 +260,7 @@ def summarize(
         yaw_lag=yaw_lag,
         pitch_std=float((pitch_u - _moving_average(pitch_u, int(RESAMPLE_HZ))).std()),
         roll_std=float((roll_u - _moving_average(roll_u, int(RESAMPLE_HZ))).std()),
+        tilt_p99=float(np.percentile(np.sqrt(pitch_u**2 + roll_u**2), 99)),
     )
 
 
