@@ -439,6 +439,43 @@ def render(
         )
     fin = np.array([[p.position.x, p.position.y, 0.08] for p in v.final.poses])
     strip("avoid/final", fin, [255, 255, 255])
+    # Required precision, as the wire dialect encodes it (path timestamps):
+    # circle radius = the per-waypoint clearance hint -- nearest z-band cloud
+    # point minus the half-width, capped at 0.35 m where the governor grants
+    # full speed anyway. Red = at/under the precision floor (creep + track
+    # tight), yellow = governed, green = full speed. Keep the math in step
+    # with control/world.path_clearance and control/profile.py.
+    if len(pts) and len(fin):
+        from scipy.spatial import cKDTree
+
+        band = pts[(pts[:, 2] > 0.05) & (pts[:, 2] < 0.45)][:, :2]
+        if len(band):
+            d, _ = cKDTree(band).query(fin[:, :2])
+            clear = d - e.width / 2.0
+            full = 0.35  # AvoidanceConfig.speed_clearance
+            seg = np.linalg.norm(np.diff(fin[:, :2], axis=0), axis=1)
+            arcs = np.concatenate([[0.0], np.cumsum(seg)])
+            idx = np.unique(np.searchsorted(arcs, np.arange(0.0, arcs[-1] + 1e-9, 0.35)))
+            circles, pcols = [], []
+            a = np.linspace(0.0, 2 * math.pi, 33)
+            for i in idx:
+                r = float(min(max(clear[i], 0.02), full))
+                cx, cy = fin[i][0], fin[i][1]
+                circles.append(
+                    np.column_stack([cx + r * np.cos(a), cy + r * np.sin(a), np.full(33, 0.05)])
+                    + off3
+                )
+                if clear[i] <= e.precision:
+                    pcols.append([255, 60, 60])
+                elif clear[i] < full:
+                    pcols.append([255, 220, 60])
+                else:
+                    pcols.append([80, 220, 80])
+            rr.log(
+                f"{root}/avoid/precision",
+                rr.LineStrips3D(circles, colors=pcols, radii=0.002),
+                static=True,
+            )
     # The published path's body, same "step" timeline (commanded yaws).
     for t, p in enumerate(v.final.poses):
         rr.set_time("step", sequence=t)
