@@ -2,7 +2,9 @@
 
 Three packages, one loop: `planner/` plans, `simulation/` is the matched Go2
 MuJoCo env, `control/` executes plans in it and judges the execution.
-Run from the repo root; per-package `tools.md` has the full menus.
+`adapter/` deploys the loop: planner + follower as dimos modules for the
+go2-zenoh blueprints. Run from the repo root; per-package `tools.md` has the
+full menus.
 
 ## planner ([planner/autoresearch/README.md](planner/autoresearch/README.md))
 
@@ -36,6 +38,14 @@ python -m dimos.navigation.motion.control --view -s corridor
 
 # judge the controller on the curated 16 (+ generated with --gen N)
 python -m dimos.navigation.motion.control --score
+```
+
+## adapter ([adapter/tools.md](adapter/tools.md))
+
+```bash
+# the loop on a real go2 (onboard laptop, robot runs the go2web zenoh bridge):
+# raycaster -> MLS carrot -> local planner -> follower -> cmd_vel
+dimos run go2-zenoh-motion
 ```
 
 Both batteries score `gate * (100 + 10 + 1)`-shaped pillars, max 111: the

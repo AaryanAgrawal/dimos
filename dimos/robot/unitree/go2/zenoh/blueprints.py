@@ -24,6 +24,8 @@ so a failure can be bisected by dropping down a level:
 - ``go2-zenoh-nav`` — the full stack: planner, goal relay and path follower.
 - ``go2-zenoh-htc`` — ``go2-zenoh-nav`` with the follower swapped for the
   ``DanLocalPlanner`` + ``DanHolonomicTC`` pair from ``unitree-go2-mls-htc``.
+- ``go2-zenoh-motion`` — the motion stack: the evolved autoresearch planner and
+  the pursuit trajectory follower over the raycaster's local map.
 """
 
 import math
@@ -37,6 +39,8 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.dannav.holonomic_tc.module import DanHolonomicTC
 from dimos.navigation.dannav.local_planner.module import DanLocalPlanner
+from dimos.navigation.motion.adapter.follower import TrajectoryFollower
+from dimos.navigation.motion.adapter.planner import MotionPlanner
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
@@ -190,6 +194,21 @@ go2_zenoh_nav = autoconnect(
     ),
     MovementManager.blueprint(),
 ).global_config(transport="zenoh", n_workers=8, robot_model="unitree_go2")
+
+# The motion stack (dimos/navigation/motion): MLS stays the global planner but its path
+# moves to planner_path and becomes a carrot source — the evolved autoresearch planner
+# replans to a point ~5 m of arc along it over the raycaster's local map, and the pursuit
+# follower tracks the local plan with the clearance-governed speed. Planner and follower
+# read the leveled body odometry their world frame ("odom") assumes.
+go2_zenoh_motion = autoconnect(
+    go2_zenoh_raycaster,
+    OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
+    GoalRelay.blueprint(),
+    _mls_planner.remappings([(MLSPlannerNative, "path", "planner_path")]),
+    MotionPlanner.blueprint().remappings([(MotionPlanner, "odometry", "body_odometry")]),
+    TrajectoryFollower.blueprint().remappings([(TrajectoryFollower, "odometry", "body_odometry")]),
+    MovementManager.blueprint(),
+).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
 
 # The nav stack with BasicPathFollower swapped for the DanLocalPlanner + DanHolonomicTC
 # pair from unitree-go2-mls-htc. The raw planner stream moves to planner_path; the gate
