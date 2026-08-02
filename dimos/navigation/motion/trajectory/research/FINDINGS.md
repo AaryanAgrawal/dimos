@@ -628,3 +628,81 @@ to hide that. `speed_lag` also regressed, 0.7 -> 3.0.
 
 Next: either weight the loss, or go multi-objective (Optuna supports it) and
 look at the Pareto front instead of a single winner.
+
+---
+
+# Multi-objective: the Pareto front, 150 NSGA-II trials
+
+Seven statistics would leave almost every trial non-dominated, so they are
+grouped into three objectives that actually pull against each other, each the
+RMS of its members' SNR:
+
+    gait         gait_hz, height_std
+    translation  speed, speed_gain, speed_lag
+    rotation     yaw_rate_gain, yaw_lag
+
+24 of 150 trials are non-dominated. The extremes:
+
+| gait | translation | rotation | notable params |
+|---|---|---|---|
+| **1.05** | 2.09 | 3.05 | frictionloss 0.48, inertia 0.43 |
+| **1.10** | 1.64 | 3.27 | frictionloss 0.74, inertia 0.62 |
+| 2.41 | 2.05 | 2.71 | frictionloss 1.91, inertia 1.62 |
+| 5.22 | 1.87 | **1.23** | frictionloss 0.69, inertia 0.43 |
+| 5.23 | **0.59** | 2.62 | frictionloss 1.79, inertia 3.12 |
+
+**No configuration is good at all three.** `corr(gait, rotation) = -0.42` across
+the front -- they genuinely trade, which is what the single scalar loss was
+averaging away. The physics-only search sat at the gait end (gait 0.4, rotation
+untouched at 10); the delay search sat nearer the rotation end (rotation ~1,
+gait back up to 4.9). Both were reporting a real point on this curve as if it
+were *the* answer.
+
+## The one robust parameter
+
+| parameter | min | median | max | spread | menagerie |
+|---|---|---|---|---|---|
+| **armature** | 0.0014 | **0.0708** | 0.0941 | 69x | **0.01** |
+| damping | 0.230 | 0.943 | 2.441 | 11x | 2.0 |
+| frictionloss | 0.290 | 0.748 | 1.912 | 7x | 0.2 |
+| command_delay | 0.004 | 0.369 | 0.743 | 198x | -- |
+| trunk_mass_scale | 0.838 | 1.365 | 1.957 | 2.3x | 1.0 |
+| trunk_inertia_scale | 0.415 | 1.885 | 3.487 | 8x | 1.0 |
+
+Nearly everything is smeared across its whole range -- the front is a curve, not
+a point, so a parameter that only matters for one objective takes whatever value
+that corner wants. Two things do stand out:
+
+* **armature wants to be ~7x the menagerie default** (median 0.071 against
+  0.01). The single-objective search had landed on 0.0158, which the front says
+  was an artifact of that particular weighting.
+* **command_delay's median is 0.369 s**, spanning the 0.46 s measured directly
+  by cross-correlation. Consistent with a real delay, and consistent with the
+  earlier scalar search's 0.451.
+
+`trunk_mass_scale` is the tightest of all (2.3x) and centred slightly above 1.0,
+so the real trunk is plausibly a little heavier than the model -- a weak
+finding, but the only one the front nearly agrees on besides armature.
+
+## Most balanced point
+
+Minimizing the worst objective rather than the sum:
+
+    gait 2.41   translation 2.05   rotation 2.71
+
+    armature 0.0466  damping 1.4216  frictionloss 1.9122
+    command_delay 0.5152  trunk_mass_scale 0.9995  trunk_inertia_scale 1.616
+
+Every term under 2.8 noise floors, against a baseline where yaw_lag alone was
+10. That is the configuration to use if one number is needed; the front is the
+honest answer if not.
+
+## Where this leaves the sim-to-real question
+
+The remaining gap is not one wrong constant. Gait and rotation cannot both be
+matched by any point in this six-parameter space, which says the model is
+missing a mechanism rather than mis-tuned -- actuator dynamics with real
+bandwidth, or contact behaviour, rather than a scalar on an existing term. That
+is the next thing to add, and the front is how to tell whether adding it helped:
+a genuinely better model should collapse the curve toward the origin, not just
+slide along it.
