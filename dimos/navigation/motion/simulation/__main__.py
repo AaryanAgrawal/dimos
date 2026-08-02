@@ -14,7 +14,7 @@
 
 """Replay a recorded Go2 mcap into flat-ground MuJoCo and score joint tracking.
 
-python -m dimos.navigation.motion.trajectory.research <file>.mcap
+python -m dimos.navigation.motion.simulation <file>.mcap
 
 Recordings and the networks that produced them ship as the
 ``ml-trajectory-research`` LFS archive; resolve one with
@@ -27,11 +27,11 @@ import argparse
 
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research import model as go2_model, replay as replay_mod
+from dimos.navigation.motion.simulation import model as go2_model, replay as replay_mod
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="trajectory.research")
+    ap = argparse.ArgumentParser(prog="motion.simulation")
     ap.add_argument("dataset", help="recorded .mcap")
     ap.add_argument("--limit", type=int, default=5000, help="lowcmd samples to replay")
     ap.add_argument("--no-seed", action="store_true", help="start from keyframe, not lowstate")
@@ -86,7 +86,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    from dimos.navigation.motion.trajectory.research import evaluate as ev
+    from dimos.navigation.motion.simulation import evaluate as ev
 
     overrides = dict(
         (k, float(v)) for k, v in (p.split("=", 1) for p in args.physics.split(",") if p)
@@ -119,8 +119,8 @@ def main() -> None:
         return
 
     if args.policy:
-        from dimos.navigation.motion.trajectory.research.policy import FreePolicy
-        from dimos.navigation.motion.trajectory.research.walk import (
+        from dimos.navigation.motion.simulation.policy import FreePolicy
+        from dimos.navigation.motion.simulation.walk import (
             read_control_log,
             read_gait_height,
             walk,
@@ -131,7 +131,7 @@ def main() -> None:
         heights = read_gait_height(args.dataset)
         ghost = None
         if args.ghost:
-            from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation
+            from dimos.navigation.motion.simulation.vive import base_track, mount_rotation
 
             ghost = base_track(
                 args.dataset,

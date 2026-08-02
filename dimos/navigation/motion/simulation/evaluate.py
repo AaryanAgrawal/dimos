@@ -19,7 +19,7 @@ sides, and measures each statistic's own noise by repeating the rollout from
 perturbed initial poses. A statistic is only worth fitting when the sim-real
 difference clearly exceeds that noise, so :class:`Report` carries the ratio.
 
-    from dimos.navigation.motion.trajectory.research.evaluate import evaluate
+    from dimos.navigation.motion.simulation.evaluate import evaluate
     print(evaluate(DATASET, POLICY).table())
 
 ``physics`` overrides leg-joint parameters on the compiled model, which is the
@@ -39,13 +39,13 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research import (
+from dimos.navigation.motion.simulation import (
     metrics,
     model as go2_model,
     walk as walk_mod,
 )
-from dimos.navigation.motion.trajectory.research.policy import FreePolicy
-from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation, quat_to_mat
+from dimos.navigation.motion.simulation.policy import FreePolicy
+from dimos.navigation.motion.simulation.vive import base_track, mount_rotation, quat_to_mat
 
 # Leg dofs in qvel/dof indexing: 6 free-joint dofs, then the twelve joints.
 LEG_DOFS = slice(6, 18)
@@ -138,24 +138,25 @@ def leg_stats(t: np.ndarray, targets: np.ndarray) -> dict[str, float]:
     }
 
 
-# Best-known configuration: the leg-aware search's min-max point on himloco01
-# (see FINDINGS) -- all four objective groups at or near the noise floor, and
-# commanded front foot lift 0.060 vs 0.065 real (the earlier base-only fit
-# high-stepped at 0.217). The com sits 4.4 cm forward, where the lidar and
-# head actually are.
+# Best-known configuration: the joint two-recording fit (see FINDINGS) --
+# 300 CMA-ES trials scored on himloco01 AND v11 at once, seeded with the
+# himloco-only preset it had to beat (joint loss 3.44 -> 1.52), confirmed in
+# the viewer on both recordings. The single-recording fit's payload story
+# (+4.4 cm com, heavier trunk) was partly policy-style absorption; jointly
+# the trunk sits near stock and the legs carry the extra mass instead.
 FITTED_PHYSICS = {
-    "armature": 0.0069,
-    "damping": 0.1797,
-    "frictionloss": 0.03266,
-    "trunk_mass_scale": 1.2,
-    "trunk_inertia_scale": 1.316,
-    "foot_friction": 0.9013,
-    "foot_friction_torsional": 0.02983,
-    "trunk_com_x": 0.04366,
-    "leg_mass_scale": 0.7156,
+    "armature": 0.00712,
+    "damping": 0.2850,
+    "frictionloss": 0.3650,
+    "trunk_mass_scale": 0.9412,
+    "trunk_inertia_scale": 0.8601,
+    "foot_friction": 0.7860,
+    "foot_friction_torsional": 0.006134,
+    "trunk_com_x": -0.006845,
+    "leg_mass_scale": 1.616,
 }
-FITTED_COMMAND_DELAY = 0.0321
-FITTED_ACTUATOR_TAU = 0.02318
+FITTED_COMMAND_DELAY = 0.00898
+FITTED_ACTUATOR_TAU = 0.01510
 
 
 def virtual_tracker(

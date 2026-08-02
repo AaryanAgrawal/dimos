@@ -14,7 +14,7 @@
 
 """Search leg-joint physics for the values that make sim behave like hardware.
 
-    python -m dimos.navigation.motion.trajectory.research.search DATASET POLICY
+    python -m dimos.navigation.motion.simulation.search DATASET POLICY
 
 Uses Optuna's CMA-ES sampler. The objective is continuous, low-dimensional and
 noisy, which is what CMA-ES is built for; TPE is the better default when
@@ -34,7 +34,7 @@ from typing import Any
 
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research.evaluate import (
+from dimos.navigation.motion.simulation.evaluate import (
     LEG_STATS,
     evaluate,
     measure_noise,
@@ -92,6 +92,133 @@ OBJECTIVES: dict[str, tuple[str, ...]] = {
     # and the sim matched all of them while high-stepping its front feet.
     "legs": LEG_STATS,
 }
+
+
+# Statistics a recording cannot measure honestly, per recording stem. On v11
+# the body-bob gait_hz locks onto the sway/height envelope rather than the
+# steps (1.0 Hz against 2.9 Hz in the joint commands -- cmd_gait_hz is the
+# valid one there), and height_std is dominated by the commanded crouches.
+INVALID_STATS: dict[str, frozenset[str]] = {
+    "unitree_v11_gait_height01": frozenset({"gait_hz", "height_std"}),
+}
+
+
+def _invalid_for(dataset: str | Path) -> frozenset[str]:
+    return INVALID_STATS.get(Path(dataset).stem, frozenset())
+
+
+def usable_floor(
+    raw: dict[str, float], report: Any, cross: dict[str, float] | None = None
+) -> dict[str, float]:
+    """Clamp a noise floor that collapsed, so a resolved statistic cannot dominate.
+
+    The floor is a *resolution limit*, and a well-stabilized policy can drive
+    it to ~0 -- v11 does, which sends its SNRs to infinity and makes the loss
+    meaningless. Clamping to the same statistic's floor on another recording,
+    plus 5% of the real value, keeps every term finite and comparable.
+    """
+    real = {**report.real.as_dict(), **report.real_legs}
+    cross = cross or {}
+    return {
+        k: max(v, cross.get(k, 0.0), 0.05 * abs(real.get(k, 0.0)), 1e-4) for k, v in raw.items()
+    }
+
+
+def joint_loss(
+    runs: list[tuple[str | Path, str | Path]],
+    floors: list[dict[str, float]],
+    physics: dict[str, float] | None,
+    command_delay: float,
+    actuator_tau: float,
+    start: float = 6.0,
+) -> tuple[float, list[Any]]:
+    """One loss over several recordings: RMS of every valid SNR from all of them.
+
+    Fitting one recording leaves the weakly-identified parameters free to
+    absorb that run's own style -- which is exactly what the v11 held-out
+    check caught. Scoring every trial on both recordings is what separates
+    platform from policy.
+    """
+    reports, snrs = [], []
+    for (dataset, policy_bin), floor in zip(runs, floors, strict=True):
+        report = evaluate(
+            dataset,
+            policy_bin,
+            start=start,
+            physics=physics,
+            command_delay=command_delay,
+            actuator_tau=actuator_tau,
+            noise=floor,
+        )
+        reports.append(report)
+        invalid = _invalid_for(dataset)
+        snrs += [v for k, v in report.snr().items() if k not in invalid and np.isfinite(v)]
+    return float(np.sqrt(np.mean([v * v for v in snrs]))), reports
+
+
+def run_joint(
+    runs: list[tuple[str | Path, str | Path]],
+    *,
+    trials: int = 300,
+    start: float = 6.0,
+    seeds: int = 4,
+    space: dict[str, tuple[float, float, bool]] | None = None,
+    seed_params: dict[str, float] | None = None,
+    storage: str | None = None,
+    study_name: str = "go2-joint",
+) -> dict[str, Any]:
+    """Fit one physics configuration against several recordings at once.
+
+    ``seed_params`` is enqueued as trial 0, so a known-good configuration is
+    the bar the search has to clear rather than a point it has to rediscover.
+    """
+    import optuna
+
+    space = space or SPACE
+    floors: list[dict[str, float]] = []
+    raws: list[dict[str, float]] = []
+    for dataset, policy_bin in runs:
+        raw = measure_noise(dataset, policy_bin, start=start, seeds=seeds)
+        base = evaluate(dataset, policy_bin, start=start, noise=raw)
+        # Cross-clamp against the first recording's floor: the same statistic
+        # on the same simulator cannot really be orders of magnitude sharper.
+        floors.append(usable_floor(raw, base, raws[0] if raws else None))
+        raws.append(raw)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            name: trial.suggest_float(name, lo, hi, log=log)
+            for name, (lo, hi, log) in space.items()
+        }
+        delay = params.pop("command_delay", 0.0)
+        tau = params.pop("actuator_tau", 0.0)
+        loss, reports = joint_loss(runs, floors, params, delay, tau, start)
+        for run_i, report in enumerate(reports):
+            for key, value in report.snr().items():
+                trial.set_user_attr(f"{run_i}:{key}", value)
+        return loss
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.CmaEsSampler(seed=0),
+        storage=storage,
+        study_name=study_name,
+        load_if_exists=storage is not None,
+    )
+    if seed_params:
+        study.enqueue_trial(dict(seed_params))
+    study.optimize(objective, n_trials=trials, show_progress_bar=True)
+
+    best = dict(study.best_params)
+    best_delay = best.pop("command_delay", 0.0)
+    best_tau = best.pop("actuator_tau", 0.0)
+    _loss, reports = joint_loss(runs, floors, best, best_delay, best_tau, start)
+    return {
+        "best_loss": study.best_value,
+        "best_params": study.best_params,
+        "tables": [r.table() for r in reports],
+    }
 
 
 def _objective_values(snr: dict[str, float], groups: dict[str, tuple[str, ...]]) -> list[float]:
@@ -257,7 +384,7 @@ def format_front(result: dict[str, Any], limit: int = 12) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="trajectory.research.search")
+    ap = argparse.ArgumentParser(prog="motion.simulation.search")
     ap.add_argument("dataset")
     ap.add_argument("policy")
     ap.add_argument("--trials", type=int, default=100)
@@ -270,7 +397,52 @@ def main() -> None:
         action="store_true",
         help="multi-objective (NSGA-II); print the Pareto front instead of one winner",
     )
+    ap.add_argument(
+        "--also",
+        nargs=2,
+        metavar=("DATASET", "POLICY"),
+        action="append",
+        default=[],
+        help="fit against this recording too (repeatable); scores every trial "
+        "on all of them, which is what stops one run's style being absorbed",
+    )
+    ap.add_argument(
+        "--seed-fitted",
+        action="store_true",
+        help="start from the FITTED_* preset, so the search must beat it",
+    )
     args = ap.parse_args()
+
+    if args.also:
+        from dimos.navigation.motion.simulation.evaluate import (
+            FITTED_ACTUATOR_TAU,
+            FITTED_COMMAND_DELAY,
+            FITTED_PHYSICS,
+        )
+
+        seed = (
+            {
+                **FITTED_PHYSICS,
+                "command_delay": FITTED_COMMAND_DELAY,
+                "actuator_tau": FITTED_ACTUATOR_TAU,
+            }
+            if args.seed_fitted
+            else None
+        )
+        result = run_joint(
+            [(args.dataset, args.policy), *(tuple(a) for a in args.also)],  # type: ignore[list-item]
+            trials=args.trials,
+            start=args.start,
+            seed_params=seed,
+            storage=args.storage,
+        )
+        for table in result["tables"]:
+            print(f"\n{table}")
+        print(f"\njoint loss {result['best_loss']:.3f}")
+        print("params:", json.dumps(result["best_params"], indent=2))
+        if args.json:
+            Path(args.json).write_text(json.dumps(result, indent=2))
+        return
 
     if args.multi:
         result = run_multi(

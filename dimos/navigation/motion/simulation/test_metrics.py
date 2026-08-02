@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.trajectory.research.metrics import (
+from dimos.navigation.motion.simulation.metrics import (
     Summary,
     _gain,
     chaos_spread,
@@ -181,7 +181,7 @@ def test_chaos_spread_is_peak_to_peak_per_statistic():
 
 def test_walk_rejects_a_start_past_the_end_of_the_commands():
     """--start beyond the recording used to die with an IndexError on an empty run."""
-    from dimos.navigation.motion.trajectory.research.walk import walk
+    from dimos.navigation.motion.simulation.walk import walk
 
     class _Stub:
         hist, obs_per_frame, act_dim = 1, 45, 12
@@ -193,7 +193,7 @@ def test_walk_rejects_a_start_past_the_end_of_the_commands():
 
 
 def test_walk_requires_exactly_one_command_source():
-    from dimos.navigation.motion.trajectory.research.walk import walk
+    from dimos.navigation.motion.simulation.walk import walk
 
     class _Stub:
         hist, obs_per_frame, act_dim = 1, 45, 12
@@ -211,7 +211,7 @@ def test_start_offset_reaches_the_command_schedule():
     of a run and scored it against a ghost six seconds later. It looked
     plausible -- the robot walked -- and silently invalidated every number.
     """
-    from dimos.navigation.motion.trajectory.research import walk as walk_mod
+    from dimos.navigation.motion.simulation import walk as walk_mod
 
     class FakePolicy:
         hist, act_dim, obs_per_frame = 1, 12, 45
@@ -246,7 +246,7 @@ def test_gain_recovers_a_delayed_response():
 def test_command_slew_ramps_a_step_at_the_hardware_rate():
     """The policy must see the robot's ramped command, not the operator step:
     vyaw moves at most 0.10 rad/s per 20 ms tick (go2web VEL_DV_VYAW)."""
-    from dimos.navigation.motion.trajectory.research import walk as walk_mod
+    from dimos.navigation.motion.simulation import walk as walk_mod
 
     class FakePolicy:
         hist, act_dim, obs_per_frame = 1, 12, 45
@@ -279,7 +279,7 @@ def test_gait_height_schedule_reaches_obs_channel_45():
     """A 46-channel policy must see the commanded height at index 45, held at
     nominal before the first entry; a 45-channel policy must see nothing --
     the frame stays 45 wide."""
-    from dimos.navigation.motion.trajectory.research import walk as walk_mod
+    from dimos.navigation.motion.simulation import walk as walk_mod
 
     class FakePolicy:
         hist, act_dim, obs_per_frame = 1, 12, 46
@@ -316,7 +316,7 @@ def test_gait_height_schedule_reaches_obs_channel_45():
 
 
 def test_actuator_step_is_a_pass_through_when_ideal():
-    from dimos.navigation.motion.trajectory.research.walk import actuator_step
+    from dimos.navigation.motion.simulation.walk import actuator_step
 
     req = np.array([1.0, -2.0, 3.0])
     out = actuator_step(np.zeros(3), req, 0.002, 0.0)
@@ -324,7 +324,7 @@ def test_actuator_step_is_a_pass_through_when_ideal():
 
 
 def test_actuator_step_reaches_63_percent_after_one_time_constant():
-    from dimos.navigation.motion.trajectory.research.walk import actuator_step
+    from dimos.navigation.motion.simulation.walk import actuator_step
 
     dt, tau = 0.0005, 0.005
     applied, req = np.zeros(1), np.ones(1)
@@ -334,7 +334,7 @@ def test_actuator_step_reaches_63_percent_after_one_time_constant():
 
 
 def test_actuator_step_converges_and_never_overshoots():
-    from dimos.navigation.motion.trajectory.research.walk import actuator_step
+    from dimos.navigation.motion.simulation.walk import actuator_step
 
     applied, req = np.zeros(1), np.full(1, 5.0)
     for _ in range(4000):
