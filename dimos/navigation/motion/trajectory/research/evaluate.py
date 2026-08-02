@@ -69,7 +69,13 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
     if not overrides:
         yield
         return
-    unknown = set(overrides) - {"armature", "damping", "frictionloss"}
+    unknown = set(overrides) - {
+        "armature",
+        "damping",
+        "frictionloss",
+        "trunk_mass_scale",
+        "trunk_inertia_scale",
+    }
     if unknown:
         raise ValueError(f"unknown physics override(s): {sorted(unknown)}")
 
@@ -83,6 +89,14 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
             model.dof_damping[LEG_DOFS] = overrides["damping"]
         if "frictionloss" in overrides:
             model.dof_frictionloss[LEG_DOFS] = overrides["frictionloss"]
+        # A heavier or more rotationally sluggish trunk is the competing
+        # explanation for the turn lag: inertia delays *and* smooths the
+        # response, where transport delay only shifts it.
+        trunk = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
+        if "trunk_mass_scale" in overrides:
+            model.body_mass[trunk] *= overrides["trunk_mass_scale"]
+        if "trunk_inertia_scale" in overrides:
+            model.body_inertia[trunk] *= overrides["trunk_inertia_scale"]
         return model, data
 
     go2_model.load = patched  # type: ignore[assignment]
@@ -183,6 +197,7 @@ def evaluate(
     anchor_height: float = 0.28,
     seeds: int = 4,
     physics: dict[str, float] | None = None,
+    command_delay: float = 0.0,
     noise: dict[str, float] | None = None,
 ) -> Report:
     """Run the policy under the recording's commands and score it against them.
@@ -197,7 +212,9 @@ def evaluate(
     sched = walk_mod.read_control_log(dataset)
 
     with _physics(physics):
-        track = walk_mod.walk(policy, schedule=sched, seconds=seconds, start=start)
+        track = walk_mod.walk(
+            policy, schedule=sched, seconds=seconds, start=start, command_delay=command_delay
+        )
         sim = _summarize_run(track.t, track.pos, track.quat, sched, start)
         if noise is None:
             noise = _noise_floor(policy, sched, start, seconds, seeds)
@@ -218,5 +235,5 @@ def evaluate(
         noise=noise,
         seconds=seconds,
         start=start,
-        physics=dict(physics or {}),
+        physics={**(physics or {}), **({"command_delay": command_delay} if command_delay else {})},
     )

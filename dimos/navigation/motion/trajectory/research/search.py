@@ -40,6 +40,15 @@ SPACE: dict[str, tuple[float, float, bool]] = {
     "armature": (0.001, 0.2, True),
     "damping": (0.2, 10.0, True),
     "frictionloss": (0.0, 2.0, False),
+    # Not a physics property: how long the command takes to reach the policy on
+    # hardware. Fitted rather than assumed because the recording cannot separate
+    # genuine transport latency from a stamping offset -- see FINDINGS.
+    "command_delay": (0.0, 0.8, False),
+    # Competing explanation for the same lag: a heavier / more rotationally
+    # sluggish trunk. Inertia delays and smooths the response; transport delay
+    # only shifts it. Letting both into one space lets the data choose.
+    "trunk_mass_scale": (0.6, 2.0, True),
+    "trunk_inertia_scale": (0.4, 4.0, True),
 }
 
 
@@ -64,12 +73,19 @@ def run(
     baseline = evaluate(dataset, policy_bin, start=start, seconds=seconds, noise=noise)
 
     def objective(trial: optuna.Trial) -> float:
-        physics = {
+        params = {
             name: trial.suggest_float(name, lo, hi, log=log)
             for name, (lo, hi, log) in space.items()
         }
+        delay = params.pop("command_delay", 0.0)
         report = evaluate(
-            dataset, policy_bin, start=start, seconds=seconds, physics=physics, noise=noise
+            dataset,
+            policy_bin,
+            start=start,
+            seconds=seconds,
+            physics=params,
+            command_delay=delay,
+            noise=noise,
         )
         for key, value in report.snr().items():
             trial.set_user_attr(key, value)
@@ -85,12 +101,15 @@ def run(
     )
     study.optimize(objective, n_trials=trials, show_progress_bar=True)
 
+    best_params = dict(study.best_params)
+    best_delay = best_params.pop("command_delay", 0.0)
     best = evaluate(
         dataset,
         policy_bin,
         start=start,
         seconds=seconds,
-        physics=study.best_params,
+        physics=best_params,
+        command_delay=best_delay,
         noise=noise,
     )
     return {

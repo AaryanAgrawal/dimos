@@ -70,7 +70,8 @@ agree to within what chaos already does to a rollout.
 python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --trials 100
 ```
 
-Optuna + CMA-ES. `--storage sqlite:///search.db` to resume, `--json out.json` to
+Optuna + CMA-ES over leg-joint physics, an explicit command delay, and trunk
+mass/inertia. `--storage sqlite:///search.db` to resume, `--json out.json` to
 save the result.
 
 **Replay `lowcmd` instead of the policy** — drop `--policy`. The robot collapses;

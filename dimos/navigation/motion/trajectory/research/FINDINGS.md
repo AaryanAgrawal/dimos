@@ -553,3 +553,78 @@ policy on the real robot. Modelling it means an explicit delay on the command
 path, not a physics parameter. It is the single largest remaining term in the
 loss and should be handled separately before the next search, or it will just
 drag every other parameter around trying to compensate.
+
+---
+
+# The turn lag is command delay, not inertia
+
+Ivan's alternative was that the real robot simply carries more inertia and so
+takes longer to swing round. Worth testing, and the test is clean -- scale the
+trunk and watch `yaw_lag`:
+
+| configuration | sim yaw_lag | SNR | loss |
+|---|---|---|---|
+| baseline | 0.06 | 10.0 | 4.97 |
+| **command_delay 0.5 s** | **0.55** | **2.2** | **2.97** |
+| trunk_inertia x3 | 0.06 | 10.0 | 4.43 |
+| trunk_mass x1.8 | 0.01 | 11.2 | 5.24 |
+| inertia x3 + mass x1.5 | 0.09 | 9.2 | 4.77 |
+
+Real is 0.46 s. **Tripling the trunk's rotational inertia moves the lag not at
+all.** The policy is a closed loop at 50 Hz: it feels a heavier body on the
+first tick and compensates. What it cannot compensate for is a command it has
+not received yet. Inertia delays *and* smooths a response; the measured
+cross-correlation is a sharp single peak (0.88 at 0.50 s against 0.66 at zero
+lag), which is the signature of a shift, not a filter.
+
+Inertia is not useless -- x3 improves total loss 4.97 -> 4.43 -- it just does
+not explain *this*.
+
+Both hypotheses are now in the search space, so the data keeps arbitrating.
+
+# 80-trial search over physics + delay + trunk scaling
+
+    loss 4.97 -> 2.39
+
+| statistic | baseline SNR | best SNR |
+|---|---|---|
+| yaw_lag | 10.0 | **1.0** |
+| height_std | 4.9 | **1.0** |
+| yaw_rate_gain | 4.3 | **1.7** |
+| speed | 1.3 | 0.9 |
+| speed_gain | 0.9 | 1.1 |
+| gait_hz | 5.2 | 4.9 |
+| speed_lag | 0.7 | 3.0 |
+
+    armature             0.0158   (menagerie 0.01)
+    damping              1.72     (menagerie 2.0)
+    frictionloss         0.307    (menagerie 0.2)
+    command_delay        0.451
+    trunk_mass_scale     1.249
+    trunk_inertia_scale  1.039
+
+Two things stand out.
+
+**The search recovered the delay independently.** It settled on 0.451 s with no
+knowledge of the cross-correlation, which measured 0.46-0.50 s directly from the
+recording. Two unrelated methods agreeing is the strongest evidence yet that the
+delay is real rather than a stamping artifact.
+
+**And it rejected inertia on its own**: `trunk_inertia_scale` came back at
+1.039, i.e. unchanged, exactly as the targeted test predicted.
+
+## What this costs, and the honest caveat
+
+`frictionloss` dropped from the 1.23 of the physics-only search to 0.307 once
+delay was available. The earlier friction figure was partly compensating for
+the missing delay -- a good illustration of why a fitted parameter is only
+worth as much as the model around it.
+
+But that trade goes both ways: **`gait_hz` is now the worst term** (SNR 4.9,
+sim 3.23 against 1.70 real), where the physics-only search had driven it to 0.4
+by leaning on friction. The two optima disagree, which means the loss is
+trading gait accuracy against the rest and a plain scalar objective is starting
+to hide that. `speed_lag` also regressed, 0.7 -> 3.0.
+
+Next: either weight the loss, or go multi-objective (Optuna supports it) and
+look at the Pareto front instead of a single winner.

@@ -85,6 +85,7 @@ def walk(
     schedule: tuple[np.ndarray, np.ndarray] | None = None,
     seconds: float | None = None,
     start: float = 0.0,
+    command_delay: float = 0.0,
     settle: float = 0.5,
     menagerie: Path | None = None,
     view: bool = False,
@@ -99,6 +100,15 @@ def walk(
 
     ``ghost`` is a ``(t, pos, quat)`` recorded base_link track (see
     :func:`vive.base_track`) drawn as a translucent box alongside the robot.
+
+    ``command_delay`` holds each command back before the policy sees it, in
+    seconds. On hardware the operator's command crosses a network and the
+    robot's own filtering before it reaches the policy: cross-correlating
+    commanded against achieved turn rate on himloco01 gives a clean single
+    peak at 0.50 s (correlation 0.88, against 0.66 at zero lag). In sim the
+    command lands on the same tick it is read, so without this the simulator
+    answers a turn in 0.04-0.06 s against 0.46 s on hardware -- a gap no
+    leg-joint parameter can close.
     """
     if (command is None) == (schedule is None):
         raise ValueError("pass exactly one of command= or schedule=")
@@ -146,7 +156,7 @@ def walk(
             assert command is not None
             return command
         held: np.ndarray = sched_cmd[
-            max(0, int(np.searchsorted(sched_t, t + start, side="right")) - 1)
+            max(0, int(np.searchsorted(sched_t, t + start - command_delay, side="right")) - 1)
         ]
         return held
 
