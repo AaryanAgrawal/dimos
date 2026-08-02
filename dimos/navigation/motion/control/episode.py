@@ -23,7 +23,7 @@ validated: per-axis hardware slew, fitted transport delay, fitted actuator lag.
 from __future__ import annotations
 
 import collections
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import time as _time
 
@@ -75,6 +75,37 @@ class EpisodeConfig:
     goal_tol: float = 0.20  # planar distance that counts as arrival (m)
     fall_tilt: float = 1.05  # rad (~60 deg) body tilt = fell
     fall_height: float = 0.12  # trunk z under this = collapsed
+    annotate_clearance: bool = True  # hand the controller the path room hint
+
+
+@dataclass
+class DomainRandomization:
+    """Per-episode draws around the fitted mechanisms — sim-to-sim, never
+    per-tick (per-tick jitter would break the mechanism identities the fit
+    established; per-episode draws express the flat-basin uncertainty).
+
+    Default ranges bracket the two viewer-confirmed fits: delay 9 ms (joint)
+    to 32 ms (himloco-only), tau 15 to 23 ms — and odom latency spans what
+    the athens db cannot observe. ``physics`` takes explicit per-key ranges.
+    """
+
+    command_delay: tuple[float, float] = (0.0, 0.040)
+    actuator_tau: tuple[float, float] = (0.005, 0.030)
+    odom_latency: tuple[float, float] = (0.0, 0.040)
+    physics: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+    def draw(self, cfg: EpisodeConfig, rng: np.random.Generator) -> EpisodeConfig:
+        """A fresh EpisodeConfig with sampled mechanisms; cfg is untouched."""
+        physics = dict(cfg.physics)
+        for key, (lo, hi) in self.physics.items():
+            physics[key] = float(rng.uniform(lo, hi))
+        return replace(
+            cfg,
+            physics=physics,
+            command_delay=float(rng.uniform(*self.command_delay)),
+            actuator_tau=float(rng.uniform(*self.actuator_tau)),
+            odom_latency=float(rng.uniform(*self.odom_latency)),
+        )
 
 
 @dataclass
@@ -92,6 +123,7 @@ class EpisodeResult:
     plans: list[RefereePath]  # every plan the episode produced
     plan_ms: list[float]  # planner CPU time per call
     time_to_goal: float | None
+    cfg: EpisodeConfig  # what actually ran (post-DR values included)
 
     @property
     def reached(self) -> bool:
@@ -182,9 +214,13 @@ def run_episode(
     cfg: EpisodeConfig | None = None,
     view: bool = False,
     speed: float = 1.0,
+    dr: DomainRandomization | None = None,
+    rng: np.random.Generator | None = None,
 ) -> EpisodeResult:
     """Run one closed-loop episode; returns everything the judge needs."""
     cfg = cfg or EpisodeConfig()
+    if dr is not None:
+        cfg = dr.draw(cfg, rng if rng is not None else np.random.default_rng())
     model, data = world.load_world(sc, physics=cfg.physics)
     world.reset_to_start(model, data, sc, policy.default_pose)
     walls = world.wall_geom_ids(model)
@@ -236,6 +272,7 @@ def run_episode(
     plans: list[RefereePath] = []
     plan_ms: list[float] = []
     nav_path = Path(frame_id=frame_id, poses=[])
+    clearance: np.ndarray | None = None
     replan_period = math.inf if cfg.replan_hz <= 0 else 1.0 / cfg.replan_hz
     next_plan_t = cfg.settle
 
@@ -269,6 +306,8 @@ def run_episode(
                     plan_ms.append((_time.process_time() - t0) * 1e3)
                     plans.append(ref)
                     nav_path = world.to_nav_path(ref, ts=t, frame_id=frame_id)
+                    if cfg.annotate_clearance:
+                        clearance = world.path_clearance(ref, cloud, sc.emb)
                     next_plan_t = t + replan_period
                     if viewer is not None:
                         _draw_plan(viewer, ref, sc)
@@ -279,7 +318,9 @@ def run_episode(
                 # -- controller -> transport -> slew -> policy
                 cmd_now = np.zeros(3)
                 if t >= cfg.settle:
-                    tw = controller.update(_pose_stamped(t, visible_pose, frame_id), nav_path, t)
+                    tw = controller.update(
+                        _pose_stamped(t, visible_pose, frame_id), nav_path, t, clearance
+                    )
                     cmd_now = np.array([tw.linear.x, tw.linear.y, tw.angular.z])
                 delay_queue.append((t, cmd_now))
                 seen = delay_queue[0][1]
@@ -348,4 +389,5 @@ def run_episode(
         plans=plans,
         plan_ms=plan_ms,
         time_to_goal=time_to_goal,
+        cfg=cfg,
     )

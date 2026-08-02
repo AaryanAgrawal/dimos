@@ -52,7 +52,25 @@ def test_boxed_in_refuses(policy: FreePolicy) -> None:
     result = run_episode(_scenario("boxed_in"), PursuitController(), policy)
     assert result.outcome == "refused"
     row = score_episode(result)
-    assert row["progress"] == 1.0 and row["total"] > 100.0
+    assert row["arrived"] == 1.0 and row["total"] > 100.0
+
+
+def test_dr_draws_are_seeded_and_in_range() -> None:
+    from dimos.navigation.motion.control.episode import DomainRandomization, EpisodeConfig
+
+    dr = DomainRandomization(physics={"damping": (0.1, 0.4)})
+    base = EpisodeConfig()
+    a = dr.draw(base, np.random.default_rng(7))
+    b = dr.draw(base, np.random.default_rng(7))
+    assert a.command_delay == b.command_delay and a.physics == b.physics  # reproducible
+    assert dr.command_delay[0] <= a.command_delay <= dr.command_delay[1]
+    assert dr.actuator_tau[0] <= a.actuator_tau <= dr.actuator_tau[1]
+    assert 0.1 <= a.physics["damping"] <= 0.4
+    # the base config is never mutated by a draw
+    from dimos.navigation.motion.simulation.evaluate import FITTED_COMMAND_DELAY, FITTED_PHYSICS
+
+    assert base.command_delay == FITTED_COMMAND_DELAY
+    assert base.physics == FITTED_PHYSICS
 
 
 def test_commands_respect_hardware_slew(policy: FreePolicy) -> None:

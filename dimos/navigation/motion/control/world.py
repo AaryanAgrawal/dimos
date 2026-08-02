@@ -33,7 +33,7 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
+from dimos.navigation.motion.planner.autoresearch.scenarios import Embodiment, Scenario
 from dimos.navigation.motion.planner.autoresearch.types import (
     Path as RefereePath,
     PointCloud2 as RefereeCloud,
@@ -130,6 +130,29 @@ def planner_cloud(sc: Scenario) -> RefereeCloud:
         np.concatenate([b.surface(CLOUD_STEP) for b in sc.boxes]) if sc.boxes else np.empty((0, 3))
     )
     return RefereeCloud.from_numpy(pts.astype(np.float32), frame_id="world")
+
+
+# Cloud slice that can touch the body, as the planner sees it (target.py).
+Z_BAND = (0.05, 0.45)
+
+
+def path_clearance(ref: RefereePath, cloud: RefereeCloud, emb: Embodiment) -> np.ndarray:
+    """Per-waypoint room hint (m), derived from the planner's own cloud.
+
+    Nearest cloud point in the body z-band minus the half-width — a speed
+    HINT for the controller, not a safety contract: it is what a path
+    annotator on the robot would compute from the local map, and the judge
+    measures truth separately. Empty cloud = infinite room.
+    """
+    xy = np.array([[p.position.x, p.position.y] for p in ref.poses]).reshape(-1, 2)
+    pts = cloud.points_f32()
+    band = pts[(pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])][:, :2]
+    if not len(band) or not len(xy):
+        return np.full(len(xy), np.inf)
+    from scipy.spatial import cKDTree
+
+    d, _ = cKDTree(band).query(xy)
+    return np.asarray(d, dtype=float) - emb.width / 2.0
 
 
 def to_nav_path(ref: RefereePath, ts: float = 0.0, frame_id: str = "world") -> Path:

@@ -14,15 +14,18 @@
 
 """The executor judge: score what the robot DID, not what was planned.
 
-Referee-shaped on purpose — ``total = gate * (100*progress + 10*tracking +
-1*composure)``, max 111 — so planner and controller numbers read on one scale.
-Priorities are lexicographic by magnitude: composure never buys back a missed
-goal, and nothing buys back a crash or a fall (gate 0).
+Referee-shaped — ``total = gate * (100*arrived + 10*precision + 1*pace)``,
+max 111 — with the same lexicographic discipline: pace never buys back a
+precision violation, and nothing buys back a crash or a fall (gate 0).
 
-The referee scores a *plan* against the gold maneuver; this judge scores an
-*execution* against physics: the gate reads MuJoCo contacts, progress reads
-arrival against the plan's own arc at cruise speed, tracking reads the
-distance between where the body went and the line it was following.
+Precision is judged in CLEARANCE space, not deviation space: the embodiment
+declares ``precision = 0.05`` — the clearance floor the planner treats as
+real — and the pillar is the time the executed body spent below that floor
+against exact truth boxes. Deviation with room around it is free (the open
+half of a world is not a tightrope); the same deviation beside a wall is the
+violation. That makes the score context-specific with zero per-world tuning,
+and it is fair to a clearance-blind controller: tracking within the floor
+everywhere satisfies it maximally. Cross-track stays as a raw diagnostic.
 """
 
 from __future__ import annotations
@@ -36,9 +39,8 @@ from dimos.navigation.motion.control.episode import EpisodeResult
 from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
 from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
-CRUISE = 0.35  # m/s the stub can hold through curves; progress=1 at this pace
+CRUISE = 0.35  # m/s the executor should hold through curves; pace=1 at this
 GRACE_S = 2.0  # flat allowance: settle, first-step lag, terminal deceleration
-TRACK_SCALE = 0.25  # cross-track p95 (m) at which the tracking pillar hits 0
 TILT_SCALE = 0.35  # tilt p99 (rad, ~20 deg) at which stability hits 0
 
 
@@ -56,6 +58,22 @@ def cross_track(pos_xy: np.ndarray, path_xy: np.ndarray) -> np.ndarray:
     s = np.clip(np.einsum("nij,ij->ni", ap, ab) / denom, 0.0, 1.0)
     closest = a[None, :, :] + s[..., None] * ab[None, :, :]
     return np.asarray(np.min(np.linalg.norm(pos_xy[:, None, :] - closest, axis=2), axis=1))
+
+
+def executed_clearance(result: EpisodeResult) -> np.ndarray:
+    """Exact body clearance to truth per tick: footprint samples vs box SDFs."""
+    n = len(result.pos)
+    sc = result.scenario
+    if not sc.boxes or n == 0:
+        return np.full(n, np.inf)
+    off = sc.emb.offsets()  # (m, 2) body-frame samples, center_off included
+    xy = result.pos[:, :2]
+    c, s = np.cos(result.yaw), np.sin(result.yaw)
+    wx = xy[:, 0, None] + c[:, None] * off[None, :, 0] - s[:, None] * off[None, :, 1]
+    wy = xy[:, 1, None] + s[:, None] * off[None, :, 0] + c[:, None] * off[None, :, 1]
+    pts = np.column_stack([wx.ravel(), wy.ravel()])
+    d = np.min(np.stack([b.sdf2d(pts) for b in sc.boxes]), axis=0)
+    return np.asarray(d.reshape(n, -1).min(axis=1))
 
 
 def _plan_xy(result: EpisodeResult) -> np.ndarray:
@@ -83,46 +101,49 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
 
     # Gate: physics vetoes everything else.
     if out["dq"]:
-        out.update(progress=0.0, tracking=0.0, composure=0.0, total=0.0)
+        out.update(arrived=0.0, precision=0.0, pace=0.0, total=0.0)
         return out
 
-    # Progress: arriving, at pace. Refusal is arrival when truth is sealed.
+    refused_ok = refuse_world and result.outcome in ("refused", "timeout")
+    arrived = 1.0 if (result.outcome == "goal" or refused_ok) else 0.0
+
+    # Precision: time spent below the clearance floor the plan was built on.
+    clear = executed_clearance(result)
+    floor = sc.emb.precision
+    below = float(np.mean(clear < floor)) if len(clear) else 0.0
+    precision = 1.0 if refused_ok else max(0.0, 1.0 - below)
+
+    # Pace: arrival at cruise over the plan's own arc. Bottom tier, like the
+    # referee's speed pillar -- it never buys back a precision violation.
     plan_xy = _plan_xy(result)
     arc = (
         float(np.sum(np.linalg.norm(np.diff(plan_xy, axis=0), axis=1))) if len(plan_xy) > 1 else 0.0
     )
-    if refuse_world:
-        progress = 1.0 if result.outcome in ("refused", "timeout") else 0.0
+    if refused_ok:
+        pace = 1.0
     elif result.outcome == "goal" and result.time_to_goal is not None:
-        expected = arc / CRUISE + GRACE_S
-        progress = min(1.0, expected / max(result.time_to_goal, 1e-6))
+        pace = min(1.0, (arc / CRUISE + GRACE_S) / max(result.time_to_goal, 1e-6))
     else:
-        progress = 0.0
-
-    # Tracking: the executed body line vs the plan it was following.
-    xt = cross_track(result.pos[:, :2], plan_xy) if len(result.pos) else np.zeros(0)
-    xt_p95 = float(np.percentile(xt, 95)) if len(xt) else 0.0
-    if refuse_world and result.outcome in ("refused", "timeout"):
-        tracking = 1.0  # nothing to track; the correct output was to stay put
-    else:
-        tracking = max(0.0, 1.0 - xt_p95 / TRACK_SCALE)
-
-    # Composure: upright and inside the command envelope.
+        pace = 0.0
     tilt_p99 = float(np.percentile(result.tilt, 99)) if len(result.tilt) else 0.0
     stability = max(0.0, 1.0 - tilt_p99 / TILT_SCALE)
     sat = _saturation(result)
     composure = 0.5 * stability + 0.5 * (1.0 - sat)
 
+    xt = cross_track(result.pos[:, :2], plan_xy) if len(result.pos) else np.zeros(0)
     out.update(
-        progress=round(progress, 4),
-        tracking=round(tracking, 4),
+        arrived=arrived,
+        precision=round(precision, 4),
+        pace=round(pace, 4),
         composure=round(composure, 4),
-        xtrack_p95=round(xt_p95, 4),
-        xtrack_max=round(float(np.max(xt)) if len(xt) else 0.0, 4),
+        min_clear=round(float(np.min(clear)), 4) if len(clear) else math.inf,
+        below_floor=round(below, 4),
+        xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
+        xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
         tilt_p99=round(tilt_p99, 4),
         saturation=round(sat, 4),
         plan_ms=round(float(np.max(result.plan_ms)), 2) if result.plan_ms else 0.0,
-        total=round(100.0 * progress + 10.0 * tracking + composure, 2),
+        total=round(100.0 * arrived + 10.0 * precision + 0.5 * pace + 0.5 * composure, 2),
     )
     return out
 
@@ -138,17 +159,20 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "worst": {"name": worst["name"], "total": worst["total"]} if worst else None,
         "dq": sum(1 for r in rows if r["dq"]),
         "outcomes": outcomes,
-        "progress": round(float(np.mean([r["progress"] for r in rows])), 4) if rows else math.nan,
-        "tracking": round(float(np.mean([r["tracking"] for r in rows])), 4) if rows else math.nan,
-        "composure": round(float(np.mean([r["composure"] for r in rows])), 4) if rows else math.nan,
+        "arrived": round(float(np.mean([r["arrived"] for r in rows])), 4) if rows else math.nan,
+        "precision": round(float(np.mean([r["precision"] for r in rows])), 4) if rows else math.nan,
+        "pace": round(float(np.mean([r["pace"] for r in rows])), 4) if rows else math.nan,
         "worlds": len(rows),
     }
 
 
 def print_row(row: dict[str, Any], sc: Scenario) -> None:
     ttg = f"{row['time_to_goal']:5.1f}s" if row["time_to_goal"] is not None else "    --"
+    mc = row.get("min_clear", math.inf)
+    mc_s = f"{mc:5.2f}" if math.isfinite(mc) else "  inf"
     print(
         f"{row['name']:<18s} {row['outcome']:<9s} {ttg}"
+        f"  clear {mc_s}  below {row.get('below_floor', 0.0):4.2f}"
         f"  xt95 {row.get('xtrack_p95', 0.0):5.2f}  tilt99 {row.get('tilt_p99', 0.0):5.2f}"
-        f"  sat {row.get('saturation', 0.0):4.2f}  {row['total']:6.2f}  {sc.note}"
+        f"  {row['total']:6.2f}  {sc.note}"
     )

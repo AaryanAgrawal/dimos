@@ -23,8 +23,10 @@ and the first controller only has to be measurable, not good.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from importlib import import_module
 import math
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -52,6 +54,14 @@ class ControllerConfig(BaseConfig):
     # while a fan segment is being executed, hold position and rotate until
     # the yaw error drops under this (rad)
     fan_yaw_done: float = 0.25
+    # speed governor over the optional clearance annotation, mirroring the
+    # planner-side AvoidanceConfig semantics: cruise at max_speed with
+    # speed_clearance of room, creep at min_speed at the precision floor,
+    # linear between; judged over the next speed_lookahead metres of path
+    min_speed: float = 0.2
+    speed_clearance: float = 0.35
+    speed_floor_clearance: float = 0.05  # the embodiment precision floor
+    speed_lookahead: float = 2.0
 
 
 class TrajectoryController(Protocol):
@@ -59,7 +69,28 @@ class TrajectoryController(Protocol):
 
     def reset(self) -> None: ...
 
-    def update(self, pose: PoseStamped, path: Path, t: float) -> Twist: ...
+    def update(
+        self, pose: PoseStamped, path: Path, t: float, clearance: np.ndarray | None = None
+    ) -> Twist: ...
+
+
+# name -> "module:factory"; arbitrary "module:factory" strings load too, so
+# autoresearch candidates plug in without registering (planners/base pattern).
+REGISTRY = {
+    "pursuit": "dimos.navigation.motion.control.controller:make",
+}
+
+
+def load(name: str) -> Callable[..., TrajectoryController]:
+    """Resolve a registry name or a dotted "module:factory" string."""
+    target = REGISTRY.get(name, name)
+    mod, _, attr = target.partition(":")
+    factory: Any = getattr(import_module(mod), attr or "make")
+    return factory  # type: ignore[no-any-return]
+
+
+def make(config: ControllerConfig | None = None) -> PursuitController:
+    return PursuitController(config)
 
 
 class PursuitController:
@@ -80,7 +111,9 @@ class PursuitController:
     def reset(self) -> None:
         self._goal_reached = False
 
-    def update(self, pose: PoseStamped, path: Path, t: float) -> Twist:
+    def update(
+        self, pose: PoseStamped, path: Path, t: float, clearance: np.ndarray | None = None
+    ) -> Twist:
         cfg = self.config
         if len(path) == 0:
             return Twist(Vector3(0, 0, 0), Vector3(0, 0, 0))
@@ -117,14 +150,24 @@ class PursuitController:
             target_xy = xy[k]
             target_yaw = float(yaws[k])
 
+        # speed governor: cap cruise by the room ahead, when we know it
+        vmax = cfg.max_speed
+        if clearance is not None and len(clearance) == len(xy):
+            ahead = clearance[(arcs >= arcs[i]) & (arcs <= arcs[i] + cfg.speed_lookahead)]
+            room = float(np.min(ahead)) if len(ahead) else float(clearance[i])
+            frac = (room - cfg.speed_floor_clearance) / max(
+                cfg.speed_clearance - cfg.speed_floor_clearance, 1e-6
+            )
+            vmax = cfg.min_speed + (cfg.max_speed - cfg.min_speed) * min(max(frac, 0.0), 1.0)
+
         # body-frame error -> velocity
         ex, ey = target_xy[0] - px, target_xy[1] - py
         c, s_ = math.cos(-pyaw), math.sin(-pyaw)
         bx, by = c * ex - s_ * ey, s_ * ex + c * ey
         vx, vy = cfg.k_pos * bx, cfg.k_pos * by
         speed = math.hypot(vx, vy)
-        if speed > cfg.max_speed:
-            vx, vy = vx / speed * cfg.max_speed, vy / speed * cfg.max_speed
+        if speed > vmax:
+            vx, vy = vx / speed * vmax, vy / speed * vmax
         wz = float(
             np.clip(cfg.k_yaw * _angle_diff(target_yaw, pyaw), -cfg.max_yaw_rate, cfg.max_yaw_rate)
         )

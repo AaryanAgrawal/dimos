@@ -92,3 +92,36 @@ def test_config_frame_id_default() -> None:
     assert ControllerConfig().frame_id == "base_link"
     with pytest.raises(Exception):
         ControllerConfig(nonexistent=1.0)  # extra=forbid
+
+
+def test_governor_creeps_in_tight_room() -> None:
+    import numpy as np
+
+    path = _straight_path()
+    tight = np.full(len(path), 0.06)  # barely above the precision floor
+    tw = PursuitController().update(_pose(0.0, 0.0), path, 0.0, clearance=tight)
+    cfg = ControllerConfig()
+    assert math.hypot(tw.linear.x, tw.linear.y) <= cfg.min_speed + 0.02
+
+
+def test_governor_full_speed_in_open_room() -> None:
+    import numpy as np
+
+    path = _straight_path()
+    wide = np.full(len(path), 1.0)
+    tw_open = PursuitController().update(_pose(-1.0, 0.0), path, 0.0, clearance=wide)
+    tw_blind = PursuitController().update(_pose(-1.0, 0.0), path, 0.0)
+    assert math.hypot(tw_open.linear.x, tw_open.linear.y) == pytest.approx(
+        math.hypot(tw_blind.linear.x, tw_blind.linear.y)
+    )
+
+
+def test_governor_reads_room_ahead_not_behind() -> None:
+    import numpy as np
+
+    path = _straight_path()  # 4 m of path
+    clear = np.full(len(path), 1.0)
+    clear[:5] = 0.06  # tight patch already behind the lookahead window
+    tw = PursuitController().update(_pose(1.5, 0.0), path, 0.0, clearance=clear)
+    cfg = ControllerConfig()
+    assert math.hypot(tw.linear.x, tw.linear.y) > cfg.min_speed + 0.1

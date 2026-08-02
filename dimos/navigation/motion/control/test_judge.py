@@ -15,11 +15,15 @@
 import numpy as np
 import pytest
 
-from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.control import world
-from dimos.navigation.motion.control.episode import EpisodeResult
-from dimos.navigation.motion.control.judge import cross_track, score_episode, summarize
-from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
+from dimos.navigation.motion.control.episode import EpisodeConfig, EpisodeResult
+from dimos.navigation.motion.control.judge import (
+    cross_track,
+    executed_clearance,
+    score_episode,
+    summarize,
+)
+from dimos.navigation.motion.planner.autoresearch.scenarios import Box, Scenario
 from dimos.navigation.motion.planner.autoresearch.types import (
     Path as RefereePath,
     PoseStamped as RefereePose,
@@ -27,14 +31,15 @@ from dimos.navigation.motion.planner.autoresearch.types import (
 
 CLEAR = Scenario("t_clear", [], goal=(4.0, 0.0))
 REFUSE = Scenario("t_refuse", [], goal=(4.0, 0.0), expect="refuse")
+# a wall along y=0.5: the path at y=0 has ~0.19 m of body clearance
+WALLED = Scenario("t_walled", [Box(2.0, 0.75, 4.0, 0.3)], goal=(4.0, 0.0))
 
 
-def _plan(n: int = 41) -> Path:
-    ref = RefereePath(
+def _plan(n: int = 41) -> RefereePath:
+    return RefereePath(
         frame_id="world",
         poses=[RefereePose(frame_id="world", position=[i * 0.1, 0.0, 0.0]) for i in range(n)],
     )
-    return world.to_nav_path(ref)
 
 
 def _result(
@@ -58,10 +63,11 @@ def _result(
         twist_cmd=cmd,
         used_cmd=cmd.copy(),
         contact=np.zeros(n, dtype=bool),
-        plan=_plan(),
+        plan=world.to_nav_path(_plan()),
         plans=[],
         plan_ms=[2.0],
         time_to_goal=time_to_goal,
+        cfg=EpisodeConfig(),
     )
 
 
@@ -77,12 +83,23 @@ def test_cross_track_offset_and_beyond_ends() -> None:
     np.testing.assert_allclose(cross_track(pos, path), [0.3, 1.0, np.hypot(1.0, 0.4)], atol=1e-12)
 
 
+def test_executed_clearance_open_world_is_inf() -> None:
+    assert np.all(np.isinf(executed_clearance(_result())))
+
+
+def test_executed_clearance_beside_wall() -> None:
+    r = _result(sc=WALLED)
+    clear = executed_clearance(r)
+    # wall inner face at y=0.6, body edge at y=0.155 (sampled at 0.145):
+    # ~0.45 of true body clearance riding the corridor centre
+    assert 0.40 < float(np.min(clear)) < 0.50
+
+
 def test_clean_run_scores_high() -> None:
     row = score_episode(_result())
-    assert row["total"] > 105.0
+    assert row["total"] > 110.0
     assert not row["dq"]
-    assert row["progress"] == 1.0
-    assert row["tracking"] == 1.0
+    assert row["arrived"] == 1.0 and row["precision"] == 1.0
 
 
 def test_collision_gates_to_zero() -> None:
@@ -94,34 +111,46 @@ def test_fall_gates_to_zero() -> None:
     assert score_episode(_result(outcome="fall", time_to_goal=None))["total"] == 0.0
 
 
-def test_lateral_error_costs_tracking_not_progress() -> None:
-    row = score_episode(_result(lateral=0.15))
-    assert row["progress"] == 1.0
-    assert 0.0 < row["tracking"] < 0.75
+def test_below_floor_costs_precision_not_arrival() -> None:
+    # ride at y=0.42: body edge 0.155 from centre -> ~0.03 clearance to the
+    # wall face at 0.6 - wait, face at 0.6; edge at 0.575 -> 0.025 < floor
+    row = score_episode(_result(sc=WALLED, lateral=0.42))
+    assert row["arrived"] == 1.0
+    assert row["below_floor"] > 0.9
+    assert row["precision"] < 0.1
 
 
-def test_slow_run_costs_progress() -> None:
+def test_open_space_deviation_is_free() -> None:
+    # same deviation, no walls: precision untouched (context-specific for free)
+    row = score_episode(_result(lateral=0.42))
+    assert row["precision"] == 1.0
+    assert row["xtrack_p95"] > 0.4  # still visible as a diagnostic
+
+
+def test_slow_run_costs_pace() -> None:
     fast = score_episode(_result(time_to_goal=13.0))
     slow = score_episode(_result(time_to_goal=40.0))
-    assert slow["progress"] < fast["progress"]
+    assert slow["pace"] < fast["pace"]
+    assert slow["arrived"] == fast["arrived"] == 1.0
 
 
-def test_timeout_on_clear_world_scores_progress_zero() -> None:
+def test_timeout_on_clear_world_scores_low() -> None:
     row = score_episode(_result(outcome="timeout", time_to_goal=None))
-    assert row["progress"] == 0.0
-    assert row["total"] < 15.0
+    assert row["arrived"] == 0.0
+    assert row["total"] < 12.0
 
 
 def test_refusal_on_sealed_world_is_success() -> None:
     row = score_episode(_result(sc=REFUSE, outcome="refused", time_to_goal=None, n=5))
-    assert row["progress"] == 1.0 and row["tracking"] == 1.0
-    assert row["total"] > 100.0
+    assert row["arrived"] == 1.0 and row["precision"] == 1.0
+    assert row["total"] > 110.0
 
 
 def test_tilt_tail_costs_composure() -> None:
     calm = score_episode(_result(tilt=0.05))
     shaky = score_episode(_result(tilt=0.30))
     assert shaky["composure"] < calm["composure"]
+    assert shaky["total"] < calm["total"]
 
 
 def test_summarize_counts() -> None:
