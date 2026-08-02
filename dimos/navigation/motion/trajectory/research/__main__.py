@@ -47,10 +47,17 @@ def main() -> None:
         "--ghost", action="store_true", help="draw the recorded vive base_link as a box"
     )
     ap.add_argument(
+        "--mount-yaw",
+        type=float,
+        default=94.0,
+        help="robot forward heading within the tracker xy plane, degrees",
+    )
+    ap.add_argument(
         "--tracker-z",
         type=float,
-        default=-0.15,
-        help="base_link offset below the tracker, metres (guess; tune by eye)",
+        default=0.207,
+        help="base offset from the tracker in tracker frame, metres; positive is "
+        "down in world because the tracker is mounted inverted",
     )
     args = ap.parse_args()
 
@@ -62,11 +69,12 @@ def main() -> None:
         schedule = read_control_log(args.dataset)
         ghost = None
         if args.ghost:
-            from dimos.navigation.motion.trajectory.research.vive import base_track
+            from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation
 
             ghost = base_track(
                 args.dataset,
                 tracker_offset=np.array([0.0, 0.0, args.tracker_z]),
+                mount=mount_rotation(args.mount_yaw),
                 anchor_pos=np.array([0.0, 0.0, 0.27]),
             )
             print(f"vive: {len(ghost[0])} samples over {ghost[0][-1]:.1f}s")

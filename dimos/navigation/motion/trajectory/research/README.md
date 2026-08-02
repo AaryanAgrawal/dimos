@@ -27,9 +27,13 @@ Add `--speed 0.5` for slow motion, `--seconds 20` to cut it short.
 python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost
 ```
 
-The green box is recorded `base_link`, anchored so t=0 sits at the robot's start
-pose. `--tracker-z -0.15` sets how far below the tracker base_link is assumed to
-be — a guess; tune it until the box sits on the body.
+The green box is the recorded `base` pose, anchored so t=0 sits at the robot's
+start pose.
+
+`--mount-yaw 94` is the robot's forward heading within the tracker's xy plane,
+fitted from the data. `--tracker-z 0.207` is how far the tracker sits from
+`base` along the tracker's z — positive because the tracker is mounted
+inverted. That one is a guess; tune it until the box sits on the body.
 
 **Headless, with numbers**
 
@@ -64,8 +68,15 @@ that is the data, not a bug. See `FINDINGS.md`.
 
 ## Not done yet
 
-A trajectory *error number*. The ghost shows the two side by side, but scoring
-needs the body→tracker offset pinned down — `--tracker-z` is a guess, and the
-in-plane offset is not modelled at all. `v11_final.bin` also has no runner: it
+A trajectory *error number*, and the tracker's vertical/in-plane offset. The
+mount **rotation** is fitted (94°, see `vive.py`); the **translation** is not,
+and cannot be from these recordings — the Vive origin is the room calibration,
+not the floor.
+
+Do not fit the mount against the simulator. The policy rollout diverges from
+the real robot within a second or two, so a sim-vs-ghost score is dominated by
+that: swept over yaw it is nearly flat and its argmin is ~180° wrong. Fit the
+mount from the recording alone (command direction vs observed motion), then
+search physics parameters with the mount held fixed. `v11_final.bin` also has no runner: it
 is obs/frame **46** (gait height as channel 45), so `walk.py` needs that extra
 input threaded through before it will load.

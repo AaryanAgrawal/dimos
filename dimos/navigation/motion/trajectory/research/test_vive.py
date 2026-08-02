@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Rotation helpers and the t=0 anchoring used to place the ghost."""
+"""Rotation helpers, the mount rotation, and the t=0 anchoring for the ghost.
+
+The anchoring tests pass ``mount=np.eye(3)`` so they exercise the transform
+itself rather than the fitted mount, which is data and belongs in its own test.
+"""
 
 from __future__ import annotations
 
@@ -90,7 +94,7 @@ def test_base_track_anchors_first_sample_at_origin(tmp_path):
 
     pos = [[5.0, 5.0, 1.0], [5.5, 5.0, 1.0], [6.0, 5.0, 1.0]]
     quat = [[1.0, 0, 0, 0]] * 3
-    t, p, q = base_track(_write(tmp_path, pos, quat), tracker_offset=np.zeros(3))
+    t, p, q = base_track(_write(tmp_path, pos, quat), tracker_offset=np.zeros(3), mount=np.eye(3))
 
     np.testing.assert_allclose(t, [0.0, 0.01, 0.02], atol=1e-9)
     # the Vive room origin is irrelevant: t=0 lands at 0
@@ -105,7 +109,7 @@ def test_tracker_offset_is_a_lever_arm_not_a_shift(tmp_path):
 
     yaw90 = [0.7071068, 0.0, 0.0, 0.7071068]
     path = _write(tmp_path, [[0.0, 0, 2.0], [0.0, 0, 2.0]], [[1.0, 0, 0, 0], yaw90])
-    _t, p, _q = base_track(path, tracker_offset=np.array([0.3, 0.0, -0.15]))
+    _t, p, _q = base_track(path, tracker_offset=np.array([0.3, 0.0, -0.15]), mount=np.eye(3))
 
     # stationary tracker, so any motion here is the lever arm swinging
     np.testing.assert_allclose(p[0], [0, 0, 0], atol=1e-9)
@@ -116,6 +120,36 @@ def test_anchor_pos_offsets_the_whole_track(tmp_path):
     from dimos.navigation.motion.trajectory.research.vive import base_track
 
     path = _write(tmp_path, [[0.0, 0, 0], [1.0, 0, 0]], [[1.0, 0, 0, 0]] * 2)
-    _t, p, _q = base_track(path, tracker_offset=np.zeros(3), anchor_pos=np.array([0, 0, 0.27]))
+    _t, p, _q = base_track(
+        path, tracker_offset=np.zeros(3), mount=np.eye(3), anchor_pos=np.array([0, 0, 0.27])
+    )
     np.testing.assert_allclose(p[0], [0, 0, 0.27], atol=1e-9)
     np.testing.assert_allclose(p[1], [1.0, 0, 0.27], atol=1e-9)
+
+
+def test_mount_rotation_is_a_proper_rotation():
+    from dimos.navigation.motion.trajectory.research.vive import mount_rotation
+
+    for yaw in (0.0, 45.0, 94.0, 270.0):
+        m = mount_rotation(yaw)
+        np.testing.assert_allclose(m @ m.T, np.eye(3), atol=1e-12)
+        assert np.linalg.det(m) == pytest.approx(1.0)
+
+
+def test_mount_maps_robot_forward_onto_the_tracker_axis():
+    """At the fitted 94 deg, robot +x lands ~along tracker +y — the "mirror"."""
+    from dimos.navigation.motion.trajectory.research.vive import mount_rotation
+
+    fwd_in_tracker = mount_rotation(94.0) @ np.array([1.0, 0.0, 0.0])
+    assert fwd_in_tracker[1] > 0.99
+    assert abs(fwd_in_tracker[0]) < 0.08
+
+
+def test_mount_flip_puts_robot_up_against_tracker_down():
+    from dimos.navigation.motion.trajectory.research.vive import mount_rotation
+
+    up_in_tracker = mount_rotation(94.0, flip=True) @ np.array([0.0, 0.0, 1.0])
+    np.testing.assert_allclose(up_in_tracker, [0, 0, -1], atol=1e-12)
+    np.testing.assert_allclose(
+        mount_rotation(94.0, flip=False) @ np.array([0.0, 0.0, 1.0]), [0, 0, 1], atol=1e-12
+    )

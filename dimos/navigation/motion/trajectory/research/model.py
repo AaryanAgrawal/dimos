@@ -110,8 +110,10 @@ def joint_dof_adr(model: mujoco.MjModel) -> np.ndarray:
     )
 
 
-# Go2 body half-extents, for the ghost box (roughly 0.38 x 0.19 x 0.11 m).
-GHOST_HALF_SIZE = (0.19, 0.0935, 0.057)
+# Trunk collision box from the official URDF (unitree_ros go2_description):
+# full size 0.3762 x 0.0935 x 0.114 at origin 0 0 0, i.e. the `base` frame sits
+# at the geometric centre of the trunk. menagerie inherits this unchanged.
+TRUNK_HALF_SIZE = (0.1881, 0.04675, 0.057)
 
 
 def load_with_ghost(
@@ -126,7 +128,7 @@ def load_with_ghost(
     body = spec.worldbody.add_body(name="ghost", mocap=True)
     geom = body.add_geom()
     geom.type = mujoco.mjtGeom.mjGEOM_BOX
-    geom.size = GHOST_HALF_SIZE
+    geom.size = TRUNK_HALF_SIZE
     geom.rgba = rgba
     geom.contype = 0
     geom.conaffinity = 0

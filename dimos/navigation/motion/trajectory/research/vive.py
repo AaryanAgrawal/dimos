@@ -23,10 +23,37 @@ Two conventions were read off the data rather than assumed (see
 * the frame is **z-up** — over a 55 s walk the z range is 0.09 m against
   1.0 and 1.6 m in x and y
 
-What is *not* known is where the tracker sits relative to base_link. It is
-mounted roughly 15 cm above the body, so :data:`DEFAULT_TRACKER_OFFSET` is
-``(0, 0, -0.15)`` in tracker frame — a starting guess to be corrected by eye
-against the ghost, not a measurement.
+The target frame is settled. The official URDF (unitree_ros
+``go2_description``) has a single root link named **`base`** — there is no
+`base_link` and no separate `trunk` — whose collision box is
+``0.3762 x 0.0935 x 0.114`` at origin ``0 0 0``. So the frame sits at the
+*geometric centre of the trunk*, level with the hip joints
+(``FL_hip_joint`` is at ``z = 0``). menagerie's MJCF inherits that body
+one-to-one, so MuJoCo's ``qpos[0:3]`` is exactly the URDF ``base`` origin --
+nothing to map between them.
+
+What is *not* known is where the tracker sits on the robot. The trunk is
+0.114 m tall, so its top surface is 0.057 m above the frame:
+
+    tracker 15 cm above the trunk *top*     ->  0.057 + 0.15 = 0.207 m
+    tracker 15 cm above the trunk *centre*  ->  0.15 m
+
+The **sign is positive** because the tracker is mounted inverted: its z axis
+points down, ``R[2,2] = -0.997`` on himloco01 and ``-0.996`` on v11 (the robot
+is upright the whole time, so this is the mounting, not the motion). The offset
+is expressed in tracker coordinates and rotated by the tracker's orientation,
+so "below in world" is "+z in tracker frame".
+
+:data:`DEFAULT_TRACKER_OFFSET` takes the first reading, 0.207 m. Correct it by
+eye against the ghost; it is not a measurement, and the in-plane (x, y)
+mounting position is not modelled at all.
+
+The vertical offset cannot be recovered from these recordings. The Vive frame's
+origin is the room calibration, not the floor (mean tracker z is 0.241 m on one
+run and 0.180 m on the other, for the same robot), so it cannot be compared
+against the simulated base height either. Measure it, or fit it against a run
+with deliberate pitch/roll -- the lever arm is only weakly observable here,
+with mean body tilt of 3.7 and 4.4 degrees.
 """
 
 from __future__ import annotations
@@ -36,8 +63,38 @@ from pathlib import Path
 
 import numpy as np
 
-# base_link expressed in the tracker's frame. Guess: 15 cm straight down.
-DEFAULT_TRACKER_OFFSET = np.array([0.0, 0.0, -0.15])
+# `base` expressed in the tracker's frame. Positive z because the tracker is
+# mounted inverted; see the module docstring.
+DEFAULT_TRACKER_OFFSET = np.array([0.0, 0.0, 0.207])
+
+# Yaw of the robot's forward axis within the tracker's xy plane, degrees.
+# Fitted on himloco01, sim-free, two ways that agree: the circular mean of the
+# travel direction under a pure +vx command gives +93.6 deg (concentration
+# 0.88, n=2347), and maximizing cos(body velocity, commanded direction) over
+# yaw gives +94.0 deg at 0.840 with a clean unimodal curve.
+#
+# Do NOT fit this against the simulator. The policy rollout diverges from the
+# real robot within a second or two, so a sim-vs-ghost displacement score is
+# dominated by that divergence: swept over yaw it is nearly flat (0.79-1.09 m
+# on 2 s windows, against ~1 m of travel) and its argmin lands at 285 deg,
+# roughly 180 deg wrong. The mount is a property of the recording and has to
+# be fitted from the recording alone.
+DEFAULT_MOUNT_YAW_DEG = 94.0
+
+
+def mount_rotation(yaw_deg: float = DEFAULT_MOUNT_YAW_DEG, flip: bool = True) -> np.ndarray:
+    """Rotation taking base-frame vectors into the tracker frame.
+
+    Columns are the robot's axes expressed in tracker coordinates. ``flip``
+    encodes the tracker being mounted upside down (its z points at the floor),
+    which is what the recordings show: ``R[2, 2]`` is -0.997 and -0.996.
+    """
+    th = np.radians(yaw_deg)
+    up = -1.0 if flip else 1.0
+    bx = np.array([np.cos(th), np.sin(th), 0.0])
+    bz = np.array([0.0, 0.0, up])
+    by = np.cross(bz, bx)
+    return np.column_stack([bx, by, bz])
 
 
 def quat_to_mat(q: np.ndarray) -> np.ndarray:
@@ -102,6 +159,7 @@ def base_track(
     dataset: str | Path,
     *,
     tracker_offset: np.ndarray | None = None,
+    mount: np.ndarray | None = None,
     anchor_pos: np.ndarray | None = None,
     anchor_quat: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -114,16 +172,18 @@ def base_track(
     rotates.
     """
     off = DEFAULT_TRACKER_OFFSET if tracker_offset is None else np.asarray(tracker_offset, float)
+    mnt = mount_rotation() if mount is None else np.asarray(mount, float)
     t, p, q = read_vive_pose(dataset)
     rot = quat_to_mat(q)
 
-    # tracker -> base_link, in the Vive frame
+    # tracker -> base, in the Vive frame
     base_p = p + np.einsum("nij,j->ni", rot, off)
+    base_r = np.einsum("nij,jk->nik", rot, mnt)
 
     # re-express relative to the first sample
-    r0t = rot[0].T
+    r0t = base_r[0].T
     rel_p = np.einsum("ij,nj->ni", r0t, base_p - base_p[0])
-    rel_r = np.einsum("ij,njk->nik", r0t, rot)
+    rel_r = np.einsum("ij,njk->nik", r0t, base_r)
 
     if anchor_quat is not None:
         a = quat_to_mat(np.asarray(anchor_quat, float))
