@@ -19,7 +19,9 @@ python -m mypy dimos/navigation/motion/trajectory/research
 python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view
 ```
 
-Add `--speed 0.5` for slow motion, `--seconds 20` to cut it short.
+Add `--speed 0.5` for slow motion, `--seconds 20` to cut it short, and
+`--start 6` to skip the stand-up at the beginning of a run — the simulator
+always begins standing, so t=0 is not a fair comparison.
 
 **With the recorded pose as a ghost box**
 

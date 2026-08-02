@@ -44,6 +44,13 @@ def main() -> None:
     )
     ap.add_argument("--seconds", type=float, default=None, help="policy run length")
     ap.add_argument(
+        "--start",
+        type=float,
+        default=0.0,
+        help="skip this many seconds of the recording; the sim always begins "
+        "standing, so use this to step over a stand-up",
+    )
+    ap.add_argument(
         "--ghost", action="store_true", help="draw the recorded vive base_link as a box"
     )
     ap.add_argument(
@@ -75,6 +82,7 @@ def main() -> None:
                 args.dataset,
                 tracker_offset=np.array([0.0, 0.0, args.tracker_z]),
                 mount=mount_rotation(args.mount_yaw),
+                anchor_at=args.start,
                 anchor_pos=np.array([0.0, 0.0, 0.27]),
             )
             print(f"vive: {len(ghost[0])} samples over {ghost[0][-1]:.1f}s")
@@ -83,6 +91,7 @@ def main() -> None:
             policy,
             schedule=schedule,
             seconds=args.seconds,
+            start=args.start,
             view=args.view,
             speed=args.speed,
             ghost=ghost,

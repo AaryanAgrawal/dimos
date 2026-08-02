@@ -84,6 +84,7 @@ def walk(
     command: np.ndarray | None = None,
     schedule: tuple[np.ndarray, np.ndarray] | None = None,
     seconds: float | None = None,
+    start: float = 0.0,
     settle: float = 0.5,
     menagerie: Path | None = None,
     view: bool = False,
@@ -103,7 +104,7 @@ def walk(
         raise ValueError("pass exactly one of command= or schedule=")
     if schedule is not None:
         sched_t, sched_cmd = schedule
-        duration = float(sched_t[-1]) if seconds is None else seconds
+        duration = float(sched_t[-1]) - start if seconds is None else seconds
     else:
         duration = 8.0 if seconds is None else seconds
 
@@ -169,7 +170,7 @@ def walk(
                     last_action, target = policy.act(p_obs, cmd)
                 if ghost is not None:
                     g_t, g_p, g_q = ghost
-                    i = max(0, int(np.searchsorted(g_t, t, side="right")) - 1)
+                    i = max(0, int(np.searchsorted(g_t, t + start, side="right")) - 1)
                     data.mocap_pos[0] = g_p[i]
                     data.mocap_quat[0] = g_q[i]
 

@@ -260,3 +260,40 @@ sim, either:
 (1) is small and keeps everything in one process. Worth noting the same loader
 would also read `freewalk_mcf.bin`, which would remove the MNN dependency and
 the two-venv split that `mcf_walk.py` currently forces.
+
+
+---
+
+# Correction: `lowstate.q` is not joint angles either
+
+An earlier pass here said ~75% of `lowstate.q` rows were usable, based on a
+`|q| < 4 rad` filter. That filter was far too generous. Checked against the
+actual mechanical limits from the MJCF:
+
+    FL/FR/RL/RR_calf   [-2.72, -0.84]   -- always negative, by construction
+    hip                [-1.05, +1.05]
+    thigh              [-1.57, +3.49]  (front) / [-0.52, +4.54] (rear)
+
+Recorded calf angles are inside their range in **0.0%** of rows on himloco01
+and **0.1%** on v11. Mean calf is +0.007 rad -- a sign that is mechanically
+impossible -- and the values span +/-14 rad.
+
+So there is no joint-space signal in these recordings at all: not commanded
+(`lowcmd.q` identically zero), not measured (`lowstate.q` not angles),
+not velocity or torque (identically zero). Comparison stays at body-pose level.
+
+## What the simulator starts from, and why the first seconds do not compare
+
+`walk()` resets to the menagerie `home` keyframe (base at z = 0.27, standing)
+and then overwrites the twelve leg joints with the policy's own
+`default_pose = [0.1, 0.8, -1.5, ...]`. It always begins standing, and nothing
+in the recording can change that -- restoring the robot's true initial pose
+would need joint angles, which do not exist here.
+
+On himloco01 the tracker sits at 0.166 m for the first ~5 s and then holds
+0.229-0.245 m for the remaining 50 s: the robot is standing up. Comparing from
+t=0 therefore lines an already-standing simulator against a robot still getting
+to its feet. Use `--start 6` to anchor past it.
+
+(The v11 run sits ~6 cm lower throughout, mean tracker z 0.180 vs 0.241 for the
+same mount -- consistent with its deliberate gait-height sweep down to 0.10.)

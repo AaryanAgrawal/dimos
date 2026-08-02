@@ -160,16 +160,21 @@ def base_track(
     *,
     tracker_offset: np.ndarray | None = None,
     mount: np.ndarray | None = None,
+    anchor_at: float = 0.0,
     anchor_pos: np.ndarray | None = None,
     anchor_quat: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Recorded base_link pose, re-anchored so t=0 sits at the sim's start pose.
 
-    Anchoring at t=0 is what makes this comparable without knowing the Vive
-    room's extrinsics: the unknown constant rotation and origin cancel, leaving
-    the motion *relative to where the robot started*. The tracker offset does
-    not cancel — it is a lever arm, so it still shows up as soon as the body
+    Anchoring is what makes this comparable without knowing the Vive room's
+    extrinsics: the unknown constant rotation and origin cancel, leaving the
+    motion *relative to the anchor sample*. The tracker offset does not
+    cancel — it is a lever arm, so it still shows up as soon as the body
     rotates.
+
+    ``anchor_at`` picks the anchor time. Use it to skip a stand-up at the
+    start of a run: the simulator always begins standing, so comparing from
+    t=0 lines a standing robot up against one still getting to its feet.
     """
     off = DEFAULT_TRACKER_OFFSET if tracker_offset is None else np.asarray(tracker_offset, float)
     mnt = mount_rotation() if mount is None else np.asarray(mount, float)
@@ -180,15 +185,16 @@ def base_track(
     base_p = p + np.einsum("nij,j->ni", rot, off)
     base_r = np.einsum("nij,jk->nik", rot, mnt)
 
-    # re-express relative to the first sample
-    r0t = base_r[0].T
-    rel_p = np.einsum("ij,nj->ni", r0t, base_p - base_p[0])
+    # re-express relative to the anchor sample
+    a = min(int(np.searchsorted(t, anchor_at)), len(t) - 1) if anchor_at else 0
+    r0t = base_r[a].T
+    rel_p = np.einsum("ij,nj->ni", r0t, base_p - base_p[a])
     rel_r = np.einsum("ij,njk->nik", r0t, base_r)
 
     if anchor_quat is not None:
-        a = quat_to_mat(np.asarray(anchor_quat, float))
-        rel_p = np.einsum("ij,nj->ni", a, rel_p)
-        rel_r = np.einsum("ij,njk->nik", a, rel_r)
+        anchor_rot = quat_to_mat(np.asarray(anchor_quat, float))
+        rel_p = np.einsum("ij,nj->ni", anchor_rot, rel_p)
+        rel_r = np.einsum("ij,njk->nik", anchor_rot, rel_r)
     if anchor_pos is not None:
         rel_p = rel_p + np.asarray(anchor_pos, float)
 
