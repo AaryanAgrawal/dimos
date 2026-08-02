@@ -42,7 +42,26 @@ one flat basin — and exposed that the 4-seed noise floor varies run-to-run
 (BLAS-order chaos), which caps single-recording resolution. Further precision
 must come from the held-out v11 recording, not more trials here.
 
-The honest caveat: fitted and validated on **one recording**. See Next steps.
+**Held-out validation (v11) — the mechanisms transfer, the texture is
+partial.** The v11 net (46-obs, commandable body height as channel 45) ran
+under the same judge on `unitree_v11_gait_height01` with the himloco01-fitted
+config, untouched. On the clean-walking window the fitted physics beats stock
+exactly where the fitted *mechanisms* live: speed 0.033 err vs 0.112 stock,
+speed_gain 0.073 vs 0.221, yaw_rate_gain 0.002 vs 0.057, thigh_span_rear
+0.006 vs 0.140 rad, tilt tail closer. Stock stays slightly better on the
+mm/mrad oscillation texture (pitch_std 0.012 vs 0.017, roll_std, detrended
+height_std) and the lag estimates — consistent with the flat-basin caveat:
+those last-mile values absorbed himloco-specific style. The height channel is
+verified end-to-end: commanded 0.31→0.10 m, the sim base drops 0.14 m where
+the real tracker drops 0.11 m, and both follow the raise to 0.37 m.
+
+v11-specific judge caveats: the policy is so strongly stabilizing that the
+4-seed noise floor collapses (SNR/loss degenerate — compare absolute errors);
+body-bob `gait_hz` reads the sway/height envelope, not the steps (real 1.0 Hz
+vs 2.9 Hz in the joint commands — use `cmd_gait_hz`); `height_std` in the
+height-play window is dominated by the commanded crouches. Real tilt_p99 is
+0.32 rad (18°) — the robot genuinely nearly fell during the 0.10 m crouch,
+and both configs underestimate that tail (fitted 0.21, stock 0.18).
 
 ---
 
@@ -55,6 +74,14 @@ The honest caveat: fitted and validated on **one recording**. See Next steps.
 | `control_log` | 48 Hz | the operator's command: `{"action":"walk","vx","vy","vyaw"}` |
 | `vive_pose` | 253 Hz | ground-truth body pose (JSON: `p`, `q`, `t_host`) |
 | `policy_state` | once | which policy — check it matches the `.bin` |
+
+`control_log` also carries `{"action":"gait_height","gh"}` entries when the
+operator moves the height slider against a net that listens (v11, obs 46 —
+the raw height in metres rides as obs channel 45, the blob's own
+ob_mean/ob_scale normalize it). The hardware clamps it to 0.1–0.4 m but does
+*not* slew it, holds 0.31 m until first touch, and 45-channel policies never
+see it — `walk.read_gait_height` + the `heights=` schedule mirror all of
+that, so himloco scoring is unchanged.
 
 **Joint-space data: commands yes, state no.** `policy/lowcmd` (~44 Hz) is the
 executor's own log of the joint targets it sent — the real policy's output,
@@ -156,23 +183,27 @@ python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-researc
 
 # multi-objective search, Pareto front
 python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --multi --trials 300
+
+# the v11 gait-height run, same flow (crouches to 0.10 m around t=32)
+python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_v11_gait_height01.mcap --policy data/ml-trajectory-research/v11_final.bin --view --ghost --fitted --start 6
 ```
 
 ---
 
 # Next steps
 
-## A. Validate on the held-out recording
+## A. Validate on the held-out recording — DONE, partial transfer
 
-Everything above is fitted and scored on `unitree_himloco01`. The v11 run is
-untouched and is now a *meaningful* held-out check — the per-recording epoch
-is handled, and slew/actuator/delay are supposed to be properties of the
-platform, not the run. It needs the 46-channel observation threading first
-(gait height as channel 45), which `walk.py` does not do.
-
-If the fitted physics transfers, the sim is ready to train against. If it
-does not, the failure pattern says which parameter was soaking up run-specific
-error. This is the single highest-value next step.
+Result is in the status section: the mechanism side of the fit (command
+response, leg geometry, stability tail) transfers to v11 and beats stock;
+the mm-level oscillation texture does not — stock edges it there, which
+localizes the run-specific absorption to exactly the parameters §D already
+flagged as weakly identified. The failure pattern to chase next: both
+configs underestimate v11's tilt tail during deep crouches, so whatever
+limits the sim's near-fall dynamics (torque limits? contact during
+crouched stance?) is the next mechanism to find. A joint fit across both
+recordings — or a search scored only on v11's crouch window — would
+separate platform from policy for the texture parameters.
 
 ## B. Measure the tracker translation
 
