@@ -204,3 +204,62 @@ def tracking_error(rollout: Rollout, states: list[State], model: mujoco.MjModel)
         "max_abs": float(np.abs(err).max()),
         "n": len(rollout.ts),
     }
+
+
+def view(
+    commands: list[Command],
+    *,
+    init_state: State | None = None,
+    menagerie: Path | None = None,
+    keyframe: str | None = "home",
+    speed: float = 1.0,
+) -> None:
+    """Same loop as :func:`replay`, but in an interactive MuJoCo window.
+
+    Paced to wall-clock so the motion reads at ``speed`` x real time.
+    """
+    import time
+
+    import mujoco.viewer
+
+    model, data = go2_model.load(menagerie)
+    perm = go2_model.unitree_to_mujoco(model)
+    qadr = go2_model.joint_qpos_adr(model)
+    vadr = go2_model.joint_dof_adr(model)
+
+    if keyframe is not None:
+        # mjOBJ_KEY exists at runtime; the bundled mujoco stubs omit it.
+        kid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, keyframe)  # type: ignore[attr-defined]
+        if kid >= 0:
+            mujoco.mj_resetDataKeyframe(model, data, kid)
+    if init_state is not None:
+        data.qpos[qadr] = init_state.q[perm]
+        data.qvel[vadr] = init_state.dq[perm]
+    mujoco.mj_forward(model, data)
+
+    lo = model.actuator_ctrlrange[:, 0]
+    hi = model.actuator_ctrlrange[:, 1]
+    dt = model.opt.timestep / max(speed, 1e-6)
+
+    with mujoco.viewer.launch_passive(model, data) as viewer:
+        wall = time.perf_counter()
+        for cmd in commands:
+            if not viewer.is_running():
+                break
+            q = data.qpos[qadr]
+            dq = data.qvel[vadr]
+            tau = (
+                cmd.kp[perm] * (cmd.q[perm] - q)
+                + cmd.kd[perm] * (cmd.dq[perm] - dq)
+                + cmd.tau[perm]
+            )
+            data.ctrl[:] = np.clip(tau, lo, hi)
+            mujoco.mj_step(model, data)
+            viewer.sync()
+
+            wall += dt
+            lag = wall - time.perf_counter()
+            if lag > 0:
+                time.sleep(lag)
+            else:
+                wall = time.perf_counter()

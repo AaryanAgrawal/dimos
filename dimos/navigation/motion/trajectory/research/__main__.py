@@ -35,6 +35,8 @@ def main() -> None:
     ap.add_argument("dataset", help="recorded .mcap")
     ap.add_argument("--limit", type=int, default=5000, help="lowcmd samples to replay")
     ap.add_argument("--no-seed", action="store_true", help="start from keyframe, not lowstate")
+    ap.add_argument("--view", action="store_true", help="open an interactive MuJoCo window")
+    ap.add_argument("--speed", type=float, default=1.0, help="playback speed for --view")
     args = ap.parse_args()
 
     commands = replay_mod.read_commands(args.dataset, limit=args.limit)
@@ -45,9 +47,12 @@ def main() -> None:
     print(f"lowcmd  {len(commands)} samples, {commands[-1].ts - commands[0].ts:.2f}s")
     print(f"lowstate {len(states)} samples")
 
-    rollout = replay_mod.replay(
-        commands, init_state=None if args.no_seed else (states[0] if states else None)
-    )
+    seed = None if args.no_seed else (states[0] if states else None)
+    if args.view:
+        replay_mod.view(commands, init_state=seed, speed=args.speed)
+        return
+
+    rollout = replay_mod.replay(commands, init_state=seed)
     model, _ = go2_model.load()
 
     print(f"\nbase drift: {np.linalg.norm(rollout.base_pos[-1] - rollout.base_pos[0]):.3f} m")
