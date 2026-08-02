@@ -28,13 +28,9 @@ python -m dimos.navigation.motion.control --view -s slalom --policy ml-trajector
 uv run maturin develop --uv --release -m dimos/navigation/motion/control/rust/Cargo.toml
 python -m dimos.navigation.motion.control --score --controller pursuit-rs
 
-# domain randomization (per-episode mechanism draws)
+# domain randomization (per-episode mechanism draws) and the blind A/B
 python -m dimos.navigation.motion.control --score --dr --seed 3
-
-# input tracks: blind (no hint) / hinted (default) / visual (z-band points --
-# only reaches controllers whose update() declares a local_map parameter)
 python -m dimos.navigation.motion.control --score --blind
-python -m dimos.navigation.motion.control --score --local-map
 
 # tests and types
 python -m pytest dimos/navigation/motion/control -q

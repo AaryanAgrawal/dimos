@@ -99,31 +99,3 @@ def test_corridor_replan_battery_serial(policy: FreePolicy) -> None:
     assert rows[0]["outcome"] == "goal"
     assert rows[0]["plan_tight"] > 0.1  # corridor plans keep real margins
     assert group_summaries(rows) == {"curated": rows[0]["total"]}
-
-
-def test_local_map_reaches_only_controllers_that_ask(policy: FreePolicy) -> None:
-    from dimos.msgs.geometry_msgs.Twist import Twist
-    from dimos.msgs.geometry_msgs.Vector3 import Vector3
-    from dimos.navigation.motion.control.controller import ControllerConfig
-
-    seen: list[int] = []
-
-    class Visual:
-        config = ControllerConfig()
-
-        def reset(self) -> None:
-            pass
-
-        def update(self, pose, path, t, clearance=None, local_map=None):  # type: ignore[no-untyped-def]
-            if local_map is not None:
-                seen.append(len(local_map))
-            return Twist(Vector3(0.2, 0, 0), Vector3(0, 0, 0))
-
-    sc = _scenario("corridor")
-    cfg = EpisodeConfig(pass_local_map=True, timeout=2.0)
-    run_episode(sc, Visual(), policy, cfg)
-    assert seen and seen[0] > 100  # the z-band of the corridor walls
-
-    # a blind law under the same flag: signature has no local_map, still runs
-    result = run_episode(sc, PursuitController(), policy, cfg)
-    assert result.outcome in ("timeout", "goal")

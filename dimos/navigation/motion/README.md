@@ -39,11 +39,6 @@ Oneliners for everything: [tools.md](tools.md).
 update(pose: PoseStamped, path: Path, t, clearance: ndarray | None) -> Twist
 ```
 
-Visual-track controllers may additionally declare `local_map: ndarray | None`
-(z-band obstacle points, Nx2 world frame); the runner passes it only under
-`--local-map` and only to laws that ask — blind and hinted candidates run
-unchanged. Three input tracks, one judge: blind / hinted / visual.
-
 The path timestamps are NOT a schedule — only their deltas carry information
 (slow segment = tight segment = track carefully), a follower must never chase
 the clock, and running slower than the encoding is always legal. Third-party
