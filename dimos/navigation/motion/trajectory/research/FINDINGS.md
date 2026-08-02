@@ -706,3 +706,62 @@ bandwidth, or contact behaviour, rather than a scalar on an existing term. That
 is the next thing to add, and the front is how to tell whether adding it helped:
 a genuinely better model should collapse the curve toward the origin, not just
 slide along it.
+
+---
+
+# Actuator dynamics: the front collapses
+
+Same search, same 150 trials, same three objectives -- the only change is that
+`actuator_tau` is available.
+
+| | without actuator | with actuator |
+|---|---|---|
+| **min distance to origin** | 3.82 | **2.87** |
+| best sum of objectives | 6.01 | **4.49** |
+| best worst-objective | 2.71 | **2.20** |
+| best gait | 1.05 | **0.67** |
+| best translation | 0.44 | **0.22** |
+| best rotation | 0.81 | 0.94 |
+| front size | 24 | 20 |
+
+The curve moved **toward the origin**, it did not slide along it: every
+aggregate improved at once, and the best achievable value of two of the three
+objectives improved outright. Rotation is marginally worse (0.81 -> 0.94), well
+inside trial-to-trial variation. This is the distinction the front was built to
+make -- a genuinely better model versus a new way to trade one error for
+another -- and it comes out on the right side.
+
+## The strongest evidence is that zero is never chosen
+
+`actuator_tau` is searched over 0-50 ms, so an ideal actuator is *available* at
+no cost. Across the twenty Pareto-optimal trials:
+
+    min 0.0094 s   median 0.0219 s   max 0.0453 s
+
+**Not one front point sits at zero.** A spurious knob would leave some optimal
+configurations at the identity value; a knob modelling something real does not.
+Ten to forty-five milliseconds is also the right order for a BLDC current loop
+through a gearbox, which is a check the number could have failed and did not.
+
+## Most balanced configuration now
+
+    gait 0.67   translation 2.20   rotation 2.06
+
+    armature 0.0201   damping 0.5648   frictionloss 1.6276
+    command_delay 0.3172   actuator_tau 0.0448
+    trunk_mass_scale 1.4063   trunk_inertia_scale 3.399
+
+Against the previous best balanced point of 2.41 / 2.05 / 2.71. Gait is now
+inside one noise floor -- the simulated body bobs at the real rate and by the
+real amount -- and nothing exceeds 2.2, where the untouched baseline had
+yaw_lag alone at 10.
+
+## What is still missing
+
+Rotation stays the worst term and did not improve. Command delay and actuator
+lag both address *when* torque arrives; nothing yet addresses how the foot
+behaves once it lands. Contact is the obvious next mechanism -- friction cone,
+`solref`/`solimp` stiffness, the `condim=1` frictionless-point contacts the
+menagerie model uses for the feet. `condim=1` in particular means the feet
+cannot generate any tangential force at all in the model, which for a turning
+quadruped is a strong simplification and a plausible cause of a rotation gap.
