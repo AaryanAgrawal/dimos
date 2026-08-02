@@ -139,3 +139,27 @@ def test_chaos_spread_is_peak_to_peak_per_statistic():
     spread = chaos_spread([mk(0.40), mk(0.44), mk(0.42)])
     assert spread["speed"] == pytest.approx(0.04)
     assert spread["gait_hz"] == 0.0
+
+
+def test_walk_rejects_a_start_past_the_end_of_the_commands():
+    """--start beyond the recording used to die with an IndexError on an empty run."""
+    from dimos.navigation.motion.trajectory.research.walk import walk
+
+    class _Stub:
+        hist, obs_per_frame, act_dim = 1, 45, 12
+        default_pose = np.zeros(12)
+
+    schedule = (np.array([0.0, 1.0, 2.0]), np.zeros((3, 3)))
+    with pytest.raises(ValueError, match="past the end of the commands"):
+        walk(_Stub(), schedule=schedule, start=5.0)  # type: ignore[arg-type]
+
+
+def test_walk_requires_exactly_one_command_source():
+    from dimos.navigation.motion.trajectory.research.walk import walk
+
+    class _Stub:
+        hist, obs_per_frame, act_dim = 1, 45, 12
+        default_pose = np.zeros(12)
+
+    with pytest.raises(ValueError, match="exactly one"):
+        walk(_Stub())  # type: ignore[arg-type]

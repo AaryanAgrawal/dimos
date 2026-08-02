@@ -104,9 +104,17 @@ def walk(
         raise ValueError("pass exactly one of command= or schedule=")
     if schedule is not None:
         sched_t, sched_cmd = schedule
-        duration = float(sched_t[-1]) - start if seconds is None else seconds
+        span = float(sched_t[-1])
+        if start >= span:
+            raise ValueError(
+                f"start={start:g}s is at or past the end of the commands "
+                f"({span:.1f}s of them). Pick a smaller --start."
+            )
+        duration = span - start if seconds is None else seconds
     else:
         duration = 8.0 if seconds is None else seconds
+    if duration <= 0:
+        raise ValueError(f"nothing to simulate: duration is {duration:g}s")
 
     if ghost is None:
         model, data = go2_model.load(menagerie)
