@@ -91,17 +91,9 @@ that is the data, not a bug. See `FINDINGS.md`.
 | `replay.py` | the `lowcmd` replay path |
 | `FINDINGS.md` | what the recordings do and don't contain |
 
-## Not done yet
+## Where this is going
 
-A trajectory *error number*, and the tracker's vertical/in-plane offset. The
-mount **rotation** is fitted (94°, see `vive.py`); the **translation** is not,
-and cannot be from these recordings — the Vive origin is the room calibration,
-not the floor.
-
-Do not fit the mount against the simulator. The policy rollout diverges from
-the real robot within a second or two, so a sim-vs-ghost score is dominated by
-that: swept over yaw it is nearly flat and its argmin is ~180° wrong. Fit the
-mount from the recording alone (command direction vs observed motion), then
-search physics parameters with the mount held fixed. `v11_final.bin` also has no runner: it
-is obs/frame **46** (gait height as channel 45), so `walk.py` needs that extra
-input threaded through before it will load.
+`FINDINGS.md` is the state of the sim-to-real work: what is calibrated, what
+the two recordings can and cannot answer, the two modelling gaps found so far
+(command delay, actuator lag), and the proposed next steps — foot contact is
+the standing hypothesis for the remaining rotation error.
