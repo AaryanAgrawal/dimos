@@ -434,3 +434,63 @@ height_std**.
   to be a discriminator in its own right, and the strongest one found so far.
 * 50 Hz is the *control* rate (`himloco.rs:185`, "Stateful 50 Hz controller"),
   not a gait frequency -- it confirms `walk.CONTROL_DT = 0.02`.
+
+---
+
+# Retraction: "the simulated gait is twice as fast" was one bad window
+
+`gait_hz` is not stable enough to have said that. Same configuration, same
+recording, varying only the window length:
+
+| window | sim gait_hz | real gait_hz |
+|---|---|---|
+| 15 s | 1.54 | 1.13 |
+| 25 s | 1.52 | 1.68 |
+| **40 s** | **3.30** | 1.75 |
+| 45 s | 1.51 | 1.18 |
+
+The 3.30 is an outlier -- almost certainly a harmonic winning the FFT on that
+one window -- and it is the number the previous section built its headline on.
+Read across windows, sim sits near 1.5 Hz and the real robot wanders between
+1.1 and 1.75. They are not obviously different, and **gait_hz must not be used
+as a fitting target until it is estimated properly** (autocorrelation of
+vertical velocity, or a median across sub-windows, rather than a single FFT
+peak).
+
+What survives as stable and discriminating: **height_std, yaw_rate_gain,
+yaw_lag**, with speed and speed_gain agreeing between sim and hardware.
+
+# First physics sweep
+
+Leg-joint parameters, against the real targets (gait_hz 1.75, height_std 0.024,
+speed 0.389), 25 s window:
+
+| armature | gait_hz | height_std | speed |
+|---|---|---|---|
+| **0.01** (menagerie default) | 1.52 | 0.033 | 0.478 |
+| 0.03 | 1.28 | 0.035 | 0.483 |
+| 0.06 | 1.00 | 0.037 | 0.503 |
+| 0.10 | 1.08 | 0.047 | 0.484 |
+| 0.20 | 1.08 | 0.062 | **0.106** |
+
+| damping | gait_hz | height_std | speed |
+|---|---|---|---|
+| **2.0** (default) | 1.52 | 0.033 | 0.478 |
+| 4.0 | 1.20 | 0.079 | 0.212 |
+| 8.0 | 1.04 | 0.077 | 0.125 |
+
+Two things to take from this:
+
+* **No single parameter closes the gap.** Raising armature pulls `gait_hz` down
+  but pushes `height_std` *away* from the real 0.024, and past 0.1 it collapses
+  forward speed. Damping degrades speed hard for little gain. The objective is
+  genuinely multi-dimensional, which is the honest case for a search rather
+  than hand-tuning.
+* **The menagerie defaults are already the best row here** on gait_hz and speed.
+  Whatever makes the simulated robot look wrong in the viewer is not a simple
+  under-damping of the leg joints.
+
+Worth searching next: `armature`, `damping`, `frictionloss`, geom `friction`
+(currently 0.6), contact `solref`/`solimp`, and trunk mass/inertia. But not
+before the judge is trustworthy -- a search against a statistic that swings
+2x on window length will happily fit the noise.
