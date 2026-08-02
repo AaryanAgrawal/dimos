@@ -48,6 +48,20 @@ class Track:
     cmd: np.ndarray = field(repr=False)  # (n, 3) vx, vy, vyaw applied
 
 
+def actuator_step(applied: np.ndarray, requested: np.ndarray, dt: float, tau: float) -> np.ndarray:
+    """One first-order step of the motor toward the requested torque.
+
+    ``tau`` is the current-loop time constant in seconds; zero means the ideal
+    MuJoCo motor, which delivers the request on the same step. The response to
+    a step reaches 1 - 1/e of it after ``tau``.
+    """
+    if tau <= 0.0:
+        return requested
+    alpha = dt / (tau + dt)
+    stepped: np.ndarray = applied + alpha * (requested - applied)
+    return stepped
+
+
 def projected_gravity(quat_wxyz: np.ndarray) -> np.ndarray:
     w, x, y, z = quat_wxyz
     return np.array([-2 * (x * z - w * y), -2 * (y * z + w * x), -(1 - 2 * (x * x + y * y))])
@@ -86,6 +100,7 @@ def walk(
     seconds: float | None = None,
     start: float = 0.0,
     command_delay: float = 0.0,
+    actuator_tau: float = 0.0,
     settle: float = 0.5,
     menagerie: Path | None = None,
     view: bool = False,
@@ -109,6 +124,11 @@ def walk(
     command lands on the same tick it is read, so without this the simulator
     answers a turn in 0.04-0.06 s against 0.46 s on hardware -- a gap no
     leg-joint parameter can close.
+
+    ``actuator_tau`` is the motor's first-order time constant in seconds. A
+    MuJoCo ``motor`` actuator produces exactly the requested torque on the same
+    step; a real BLDC through a gearbox has finite current-loop bandwidth and
+    reaches it over a few milliseconds. Zero reproduces the ideal actuator.
     """
     if (command is None) == (schedule is None):
         raise ValueError("pass exactly one of command= or schedule=")
@@ -142,6 +162,7 @@ def walk(
     hist: collections.deque[np.ndarray] = collections.deque(maxlen=policy.hist)
     last_action = np.zeros(policy.act_dim)
     target = policy.default_pose.copy()
+    applied = np.zeros(12)  # torque actually delivered, lagging the request
 
     def observe(cmd: np.ndarray) -> np.ndarray:
         q = data.qpos[7:19]
@@ -200,7 +221,9 @@ def walk(
                 used.append(cmd)
 
             tau = policy.kp * (target - data.qpos[7:19]) - policy.kd * data.qvel[6:18]
-            data.ctrl[:] = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)
+            tau = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)
+            applied = actuator_step(applied, tau, sim_dt, actuator_tau)
+            data.ctrl[:] = applied
             mujoco.mj_step(model, data)
 
             if viewer is not None:

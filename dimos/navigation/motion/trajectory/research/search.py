@@ -51,6 +51,11 @@ SPACE: dict[str, tuple[float, float, bool]] = {
     # only shifts it. Letting both into one space lets the data choose.
     "trunk_mass_scale": (0.6, 2.0, False),
     "trunk_inertia_scale": (0.4, 4.0, True),
+    # Motor time constant. A MuJoCo motor delivers the requested torque on the
+    # same step; a real BLDC through a gearbox takes a few milliseconds. The
+    # Pareto front says no scalar on an existing term can match gait and
+    # rotation at once, which points at a missing mechanism like this one.
+    "actuator_tau": (0.0, 0.05, False),
 }
 
 # Statistics grouped into a few objectives. Seven separate objectives would make
@@ -98,6 +103,7 @@ def run(
             for name, (lo, hi, log) in space.items()
         }
         delay = params.pop("command_delay", 0.0)
+        tau = params.pop("actuator_tau", 0.0)
         report = evaluate(
             dataset,
             policy_bin,
@@ -105,6 +111,7 @@ def run(
             seconds=seconds,
             physics=params,
             command_delay=delay,
+            actuator_tau=tau,
             noise=noise,
         )
         for key, value in report.snr().items():
@@ -123,6 +130,7 @@ def run(
 
     best_params = dict(study.best_params)
     best_delay = best_params.pop("command_delay", 0.0)
+    best_tau = best_params.pop("actuator_tau", 0.0)
     best = evaluate(
         dataset,
         policy_bin,
@@ -130,6 +138,7 @@ def run(
         seconds=seconds,
         physics=best_params,
         command_delay=best_delay,
+        actuator_tau=best_tau,
         noise=noise,
     )
     return {
@@ -170,6 +179,7 @@ def run_multi(
             for name, (lo, hi, log) in space.items()
         }
         delay = params.pop("command_delay", 0.0)
+        tau = params.pop("actuator_tau", 0.0)
         report = evaluate(
             dataset,
             policy_bin,
@@ -177,6 +187,7 @@ def run_multi(
             seconds=seconds,
             physics=params,
             command_delay=delay,
+            actuator_tau=tau,
             noise=noise,
         )
         snr = report.snr()

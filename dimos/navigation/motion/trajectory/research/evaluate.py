@@ -198,6 +198,7 @@ def evaluate(
     seeds: int = 4,
     physics: dict[str, float] | None = None,
     command_delay: float = 0.0,
+    actuator_tau: float = 0.0,
     noise: dict[str, float] | None = None,
 ) -> Report:
     """Run the policy under the recording's commands and score it against them.
@@ -213,7 +214,12 @@ def evaluate(
 
     with _physics(physics):
         track = walk_mod.walk(
-            policy, schedule=sched, seconds=seconds, start=start, command_delay=command_delay
+            policy,
+            schedule=sched,
+            seconds=seconds,
+            start=start,
+            command_delay=command_delay,
+            actuator_tau=actuator_tau,
         )
         sim = _summarize_run(track.t, track.pos, track.quat, sched, start)
         if noise is None:
@@ -235,5 +241,9 @@ def evaluate(
         noise=noise,
         seconds=seconds,
         start=start,
-        physics={**(physics or {}), **({"command_delay": command_delay} if command_delay else {})},
+        physics={
+            **(physics or {}),
+            **({"command_delay": command_delay} if command_delay else {}),
+            **({"actuator_tau": actuator_tau} if actuator_tau else {}),
+        },
     )

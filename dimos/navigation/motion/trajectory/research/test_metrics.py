@@ -210,3 +210,31 @@ def test_gain_recovers_a_delayed_response():
     gain, lag = _gain(achieved, cmd, 0.2, rate=100.0)
     assert gain == pytest.approx(0.7, abs=0.05)
     assert lag == pytest.approx(lag_samples / 100.0, abs=0.02)
+
+
+def test_actuator_step_is_a_pass_through_when_ideal():
+    from dimos.navigation.motion.trajectory.research.walk import actuator_step
+
+    req = np.array([1.0, -2.0, 3.0])
+    out = actuator_step(np.zeros(3), req, 0.002, 0.0)
+    np.testing.assert_allclose(out, req)
+
+
+def test_actuator_step_reaches_63_percent_after_one_time_constant():
+    from dimos.navigation.motion.trajectory.research.walk import actuator_step
+
+    dt, tau = 0.0005, 0.005
+    applied, req = np.zeros(1), np.ones(1)
+    for _ in range(int(tau / dt)):
+        applied = actuator_step(applied, req, dt, tau)
+    assert applied[0] == pytest.approx(1 - 1 / np.e, abs=0.03)
+
+
+def test_actuator_step_converges_and_never_overshoots():
+    from dimos.navigation.motion.trajectory.research.walk import actuator_step
+
+    applied, req = np.zeros(1), np.full(1, 5.0)
+    for _ in range(4000):
+        applied = actuator_step(applied, req, 0.002, 0.01)
+        assert 0.0 <= applied[0] <= 5.0
+    assert applied[0] == pytest.approx(5.0, abs=1e-6)
