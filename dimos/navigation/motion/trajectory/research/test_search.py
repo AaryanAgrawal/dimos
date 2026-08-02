@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from dimos.navigation.motion.trajectory.research.evaluate import NOT_COMPARABLE
+from dimos.navigation.motion.trajectory.research.evaluate import LEG_STATS, NOT_COMPARABLE
 from dimos.navigation.motion.trajectory.research.metrics import Summary
 from dimos.navigation.motion.trajectory.research.search import (
     OBJECTIVES,
@@ -36,6 +36,8 @@ def test_space_brackets_the_menagerie_defaults():
         ("frictionloss", 0.2),
         ("foot_friction", 0.8),
         ("foot_friction_torsional", 0.02),
+        ("trunk_com_x", 0.0),
+        ("leg_mass_scale", 1.0),
     ):
         lo, hi, _log = SPACE[name]
         assert lo < default < hi, name
@@ -51,7 +53,7 @@ def test_log_scale_only_where_the_range_spans_decades():
 def test_objectives_cover_every_comparable_statistic():
     """A statistic outside every group is silently unoptimized."""
     grouped = {k for keys in OBJECTIVES.values() for k in keys}
-    comparable = set(Summary.__dataclass_fields__) - set(NOT_COMPARABLE)
+    comparable = (set(Summary.__dataclass_fields__) - set(NOT_COMPARABLE)) | set(LEG_STATS)
     assert grouped == comparable
 
 
@@ -64,11 +66,12 @@ def test_objective_groups_do_not_overlap():
 
 def test_objective_values_are_rms_within_each_group():
     snr = {"gait_hz": 3.0, "height_std": 4.0, "speed": 0.0, "speed_gain": 0.0, "speed_lag": 0.0}
-    snr |= {"yaw_rate_gain": 1.0, "yaw_lag": 1.0}
-    gait, translation, rotation = _objective_values(snr, OBJECTIVES)
+    snr |= {"yaw_rate_gain": 1.0, "yaw_lag": 1.0, "front_lift": 2.0, "rear_lift": 2.0}
+    gait, translation, rotation, legs = _objective_values(snr, OBJECTIVES)
     assert gait == pytest.approx(3.5355, abs=1e-3)  # rms(3, 4)
     assert translation == pytest.approx(0.0)
     assert rotation == pytest.approx(1.0)
+    assert legs == pytest.approx(2.0)
 
 
 def test_objective_values_ignore_missing_statistics():

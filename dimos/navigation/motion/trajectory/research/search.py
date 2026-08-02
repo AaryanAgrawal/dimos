@@ -40,7 +40,9 @@ from dimos.navigation.motion.trajectory.research.evaluate import evaluate, measu
 # frictionloss 0.2; the ranges bracket them by about a decade each way.
 SPACE: dict[str, tuple[float, float, bool]] = {
     "armature": (0.001, 0.2, True),
-    "damping": (0.2, 10.0, True),
+    # Floor at 0.05: the previous front crowded the old 0.2 floor, and a bound
+    # a search leans on is a bound hiding the optimum.
+    "damping": (0.05, 10.0, True),
     "frictionloss": (0.0, 2.0, False),
     # Not a physics property: how long the command takes to reach the policy on
     # hardware. Genuine transport latency only -- the streams now share an
@@ -63,6 +65,12 @@ SPACE: dict[str, tuple[float, float, bool]] = {
     # feet pivot against in a turn, and neither value is measured.
     "foot_friction": (0.3, 1.5, False),
     "foot_friction_torsional": (0.002, 0.2, True),
+    # Payload *placement*: the lidar and mounts sit forward/top of the trunk,
+    # which a pure mass scale at the stock com cannot express. Metres.
+    "trunk_com_x": (-0.06, 0.06, False),
+    # Covers and cabling the MJCF omits; swing inertia shapes how high a foot
+    # flies for a given action.
+    "leg_mass_scale": (0.7, 2.0, False),
 }
 
 # Statistics grouped into a few objectives. Seven separate objectives would make
@@ -74,6 +82,9 @@ OBJECTIVES: dict[str, tuple[str, ...]] = {
     "gait": ("gait_hz", "height_std", "pitch_std", "roll_std"),
     "translation": ("speed", "speed_gain", "speed_lag"),
     "rotation": ("yaw_rate_gain", "yaw_lag"),
+    # Scored against policy/lowcmd: the base statistics cannot see the legs,
+    # and the sim matched all of them while high-stepping its front feet.
+    "legs": ("front_lift", "rear_lift"),
 }
 
 

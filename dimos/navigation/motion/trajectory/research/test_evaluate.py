@@ -149,6 +149,41 @@ def test_physics_override_sets_foot_friction():
             assert float(model.geom_friction[gid, 2]) == pytest.approx(0.01)  # rolling kept
 
 
+def test_leg_stats_rise_when_the_front_thigh_lifts():
+    """FK sanity: raising front thigh targets must raise front_lift only."""
+    from dimos.navigation.motion.trajectory.research.evaluate import leg_stats
+
+    stand = np.tile([0.0, 0.9, -1.8] * 4, (50, 1))
+    lifted = stand.copy()
+    lifted[:, [1, 4]] -= 0.5  # front thighs swing forward/up (FL, FR)
+    a, b = leg_stats(stand), leg_stats(lifted)
+    assert b["front_lift"] > a["front_lift"] + 0.02
+    assert b["rear_lift"] == pytest.approx(a["rear_lift"], abs=1e-6)
+
+
+def test_report_scores_leg_statistics_when_present():
+    noise = dict.fromkeys(_summary().as_dict(), 0.1)
+    noise["front_lift"] = 0.01
+    noise["rear_lift"] = 0.01
+    r = Report(
+        sim=_summary(),
+        real=_summary(),
+        noise=noise,
+        seconds=10.0,
+        start=6.0,
+        sim_legs={"front_lift": 0.10, "rear_lift": 0.04},
+        real_legs={"front_lift": 0.06, "rear_lift": 0.04},
+    )
+    assert r.snr()["front_lift"] == pytest.approx(4.0)
+    assert r.snr()["rear_lift"] == pytest.approx(0.0)
+    assert "front_lift" in r.table()
+
+
+def test_report_skips_legs_when_the_recording_has_none():
+    r = _report(_summary(), _summary(), dict.fromkeys(_summary().as_dict(), 0.1))
+    assert "front_lift" not in r.snr()
+
+
 def test_physics_override_rejects_unknown_keys():
     with pytest.raises(ValueError, match="unknown physics override"), _physics({"mass": 1.0}):
         pass

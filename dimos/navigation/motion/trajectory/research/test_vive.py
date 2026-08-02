@@ -181,6 +181,47 @@ def test_sensor_z_keeps_the_raw_tracker_height(tmp_path):
     np.testing.assert_allclose(p[:, 0], [0.0, 0.5], atol=1e-9)  # xy still anchored
 
 
+def _pack_lowcmd(q_sdk):
+    """CDR bytes mirroring walk._parse_lowcmd_q's layout, 12 motors."""
+    import struct
+
+    b = bytearray(26)
+    for q in q_sdk:
+        b += b"\x01"
+        b += b"\x00" * (-len(b) % 4)
+        b += struct.pack("<5f", q, 0.0, 0.0, 40.0, 1.0)
+        b += b"\x00" * 12
+    return bytes(b)
+
+
+def test_read_policy_lowcmd_remaps_and_shares_the_epoch(tmp_path):
+    """SDK motor order in, training order out; t=0 at the first walk command."""
+    import json
+
+    from mcap.writer import Writer
+
+    from dimos.navigation.motion.trajectory.research.walk import read_policy_lowcmd
+
+    q_sdk = [10.0, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42]  # FR FL RR RL
+    path = tmp_path / "cmd.mcap"
+    with path.open("wb") as f:
+        w = Writer(f)
+        w.start()
+        sid = w.register_schema("s", "jsonschema", b"{}")
+        low = w.register_channel("policy/lowcmd", "cdr", sid)
+        ctl = w.register_channel("control_log", "json", sid)
+        for i in range(3):
+            w.add_message(low, log_time=int(i * 1e7), data=_pack_lowcmd(q_sdk), publish_time=0)
+        walk_cmd = json.dumps({"action": "walk", "vx": 0.1, "vy": 0.0, "vyaw": 0.0}).encode()
+        w.add_message(ctl, log_time=int(2e7), data=walk_cmd, publish_time=0)
+        w.finish()
+
+    t, q = read_policy_lowcmd(path)
+    np.testing.assert_allclose(t, [-0.02, -0.01, 0.0], atol=1e-9)
+    # training order FL,FR,RL,RR
+    np.testing.assert_allclose(q[0], [20, 21, 22, 10, 11, 12, 40, 41, 42, 30, 31, 32])
+
+
 def test_mount_rotation_is_a_proper_rotation():
     from dimos.navigation.motion.trajectory.research.vive import mount_rotation
 

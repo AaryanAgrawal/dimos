@@ -57,6 +57,7 @@ class Track:
     cmd: np.ndarray = field(repr=False)  # (n, 3) vx, vy, vyaw applied
     joint_q: np.ndarray = field(repr=False)  # (n, 12) leg angles, FL FR RL RR
     foot_z: np.ndarray = field(repr=False)  # (n, 4) foot centre heights, FL FR RL RR
+    target: np.ndarray = field(repr=False)  # (n, 12) commanded joint targets
 
     def clearance(self) -> np.ndarray:
         """Foot-ground clearance (n, 4); the foot sphere radius is 0.022."""
@@ -106,6 +107,63 @@ def read_control_log(dataset: str | Path) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"{dataset}: no walk commands in control_log")
     t = np.array(ts)
     return t - t[0], np.array(cmds)
+
+
+def _parse_lowcmd_q(b: bytes) -> list[float]:
+    """The 12 leg-motor target angles out of one CDR-encoded LowCmd payload.
+
+    Layout: 4-byte encapsulation, head u8[2] + levelFlag + frameReserve,
+    sn u32[2], version u32[2], bandWidth u16, then MotorCmd[20] of
+    {mode u8 (aligned), q dq tau kp kd f32, reserve u32[3]}.
+    """
+    import struct
+
+    pos, out = 26, []
+    for _ in range(12):
+        pos += 1  # mode
+        pos = (pos + 3) & ~3  # align f32
+        out.append(struct.unpack_from("<f", b, pos)[0])
+        pos += 32  # 5 f32 + reserve
+    return out
+
+
+def read_policy_lowcmd(dataset: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """The executor's commanded joint targets: ``(t, q)``, training order.
+
+    ``policy/lowcmd`` is the executor's own log of what it sent the motors --
+    the real policy's output at ~44 Hz, the only joint-space ground truth these
+    recordings carry (``rt/lowcmd`` is zeroed on the Air). Times share the
+    first-walk-command epoch like every other reader here; q is remapped from
+    SDK order to the FL,FR,RL,RR training order the rest of the code uses.
+    """
+    from mcap.reader import make_reader
+
+    from dimos.navigation.motion.trajectory.research.model import (
+        MUJOCO_ACTUATOR_NAMES,
+        UNITREE_MOTOR_NAMES,
+    )
+
+    perm = [UNITREE_MOTOR_NAMES.index(n) for n in MUJOCO_ACTUATOR_NAMES]
+    ts: list[float] = []
+    qs: list[list[float]] = []
+    first_walk: float | None = None
+    with Path(dataset).open("rb") as f:
+        for _schema, channel, msg in make_reader(f).iter_messages(
+            topics=["policy/lowcmd", "control_log"]
+        ):
+            if channel.topic == "control_log":
+                d = json.loads(msg.data)
+                if d.get("action") == "walk":
+                    t_cmd = msg.log_time / 1e9
+                    first_walk = t_cmd if first_walk is None else min(first_walk, t_cmd)
+                continue
+            ts.append(msg.log_time / 1e9)
+            qs.append(_parse_lowcmd_q(msg.data))
+    if not ts:
+        raise ValueError(f"{dataset}: no policy/lowcmd messages")
+    t = np.array(ts)
+    zero = t[0] if first_walk is None else first_walk
+    return t - zero, np.array(qs)[:, perm]
 
 
 def walk(
@@ -215,6 +273,7 @@ def walk(
     used: list[np.ndarray] = []
     joint_q: list[np.ndarray] = []
     foot_z: list[np.ndarray] = []
+    targets: list[np.ndarray] = []
     feet = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, n) for n in ("FL", "FR", "RL", "RR")]
 
     viewer_cm = None
@@ -254,6 +313,7 @@ def walk(
                 used.append(cmd.copy())  # vel_cmd mutates in place; snapshot it
                 joint_q.append(data.qpos[7:19].copy())
                 foot_z.append(data.geom_xpos[feet, 2].copy())
+                targets.append(target.copy())
 
             tau = policy.kp * (target - data.qpos[7:19]) - policy.kd * data.qvel[6:18]
             tau = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)
@@ -282,4 +342,5 @@ def walk(
         cmd=np.array(used),
         joint_q=np.array(joint_q),
         foot_z=np.array(foot_z),
+        target=np.array(targets),
     )
