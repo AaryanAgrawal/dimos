@@ -28,6 +28,20 @@ head actually sit**, torsional friction lands at 0.030 against the shipped
 earlier base-only fit reached "everything sub-noise" while commanding 3x the
 real front foot lift. **A judge only constrains what it can see.**
 
+Ivan has confirmed the fitted config **looks right in the viewer** (after
+fixing a bug where `--ghost` mode silently ran stock physics — the "almost
+falling" he reported was the unfitted model).
+
+The judge now scores the **entire recording** (a 20 s window once certified a
+config that was never scored past t=26), carries **tilt_p99** as a stability
+tail (real: p99 8.6°, max 16.7°), and scores **seven leg statistics** from the
+commanded joint streams (lift, thigh/calf spans per pair, command-space gait
+frequency). A follow-up 300-trial full-run search found a point that trades a
+little translation for gait/rotation/legs without dominating — both sit in
+one flat basin — and exposed that the 4-seed noise floor varies run-to-run
+(BLAS-order chaos), which caps single-recording resolution. Further precision
+must come from the held-out v11 recording, not more trials here.
+
 The honest caveat: fitted and validated on **one recording**. See Next steps.
 
 ---
