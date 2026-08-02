@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import collections
 from dataclasses import dataclass, field, replace
+import inspect
 import math
 import time as _time
 
@@ -77,6 +78,10 @@ class EpisodeConfig:
     fall_tilt: float = 1.05  # rad (~60 deg) body tilt = fell
     fall_height: float = 0.12  # trunk z under this = collapsed
     annotate_clearance: bool = True  # hand the controller the path room hint
+    # the VISUAL track: also hand the controller the z-band obstacle points
+    # (Nx2, world frame) -- only reaches controllers whose update() declares a
+    # local_map parameter, so blind/hinted candidates run unchanged
+    pass_local_map: bool = False
 
 
 @dataclass
@@ -232,6 +237,11 @@ def run_episode(
     planner.reset()
     controller.reset()
     cloud = world.planner_cloud(sc)
+    local_map: np.ndarray | None = None
+    if cfg.pass_local_map and "local_map" in inspect.signature(controller.update).parameters:
+        pts = cloud.points_f32()
+        local_map = pts[(pts[:, 2] > world.Z_BAND[0]) & (pts[:, 2] < world.Z_BAND[1])][:, :2]
+        local_map = np.ascontiguousarray(local_map.astype(np.float64))
 
     sim_dt = model.opt.timestep
     decim = max(1, round(CONTROL_DT / sim_dt))
@@ -331,9 +341,15 @@ def run_episode(
                 # -- controller -> transport -> slew -> policy
                 cmd_now = np.zeros(3)
                 if t >= cfg.settle:
-                    tw = controller.update(
-                        _pose_stamped(t, visible_pose, frame_id), nav_path, t, clearance
-                    )
+                    ps = _pose_stamped(t, visible_pose, frame_id)
+                    if local_map is not None:
+                        # guarded by the signature inspection above; the protocol keeps the
+                        # 4-arg law so blind candidates stay valid implementers
+                        tw = controller.update(  # type: ignore[call-arg]
+                            ps, nav_path, t, clearance, local_map=local_map
+                        )
+                    else:
+                        tw = controller.update(ps, nav_path, t, clearance)
                     cmd_now = np.array([tw.linear.x, tw.linear.y, tw.angular.z])
                 delay_queue.append((t, cmd_now))
                 seen = delay_queue[0][1]

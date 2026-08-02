@@ -57,6 +57,11 @@ def main() -> None:
         "--controller", default="pursuit", help="controller registry name or module:factory"
     )
     ap.add_argument("--blind", action="store_true", help="drop the clearance annotation")
+    ap.add_argument(
+        "--local-map",
+        action="store_true",
+        help="visual track: pass z-band points to controllers that accept them",
+    )
     ap.add_argument("--dr", action="store_true", help="randomize mechanisms per episode")
     ap.add_argument("--seed", type=int, default=0, help="rng seed for --dr")
     ap.add_argument("--draws", type=int, default=1, help="DR draws per world (implies --dr)")
@@ -82,7 +87,10 @@ def main() -> None:
         ap.error("--jobs > 1 cannot render; --view runs serially")
 
     cfg = EpisodeConfig(
-        replan_hz=args.replan_hz, planner=args.planner, annotate_clearance=not args.blind
+        replan_hz=args.replan_hz,
+        planner=args.planner,
+        annotate_clearance=not args.blind,
+        pass_local_map=args.local_map,
     )
     dr = DomainRandomization() if (args.dr or args.draws > 1) else None
 
