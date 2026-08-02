@@ -236,13 +236,45 @@ impl PointBuckets {
             off[k + 1] += off[k];
         }
         let mut fill = off.clone();
-        let mut fx = vec![0.0f64; pts.len()];
-        let mut fy = vec![0.0f64; pts.len()];
+        let mut buf = vec![(0.0f64, 0.0f64); pts.len()];
         for &(x, y) in pts {
             let c = cell_of(x, y);
-            fx[fill[c] as usize] = x;
-            fy[fill[c] as usize] = y;
+            buf[fill[c] as usize] = (x, y);
             fill[c] += 1;
+        }
+        // Collapse coincident points, bucket by bucket.
+        //
+        // The cloud is a z-band SLICE of box surfaces sampled on a 3D grid, so
+        // every vertical face contributes the same (x, y) once per z layer:
+        // the band is 0.4 m tall at CLOUD_STEP 0.05, and measured across the
+        // battery the projected band carries 6.4-8.4 copies of each distinct
+        // point. `nearest` reduces a multiset of squared distances with `min`,
+        // and a repeat contributes a value the set already holds, so dropping
+        // repeats cannot move the result by one bit -- it only stops the ring
+        // sweep from re-measuring the same wall seven times. It also shrinks
+        // the index by the same factor, which is what puts a whole world's
+        // points inside the cache the search is already using.
+        //
+        // Coincident points share a bucket by construction, so a pass per
+        // bucket sees all of them and no global structure is needed. The sort
+        // is `total_cmp` on (x, y): any total order groups equal pairs, and
+        // this one needs no assumption about the coordinates.
+        let mut off2 = vec![0u32; n + 1];
+        let mut fx = Vec::with_capacity(pts.len());
+        let mut fy = Vec::with_capacity(pts.len());
+        for c in 0..n {
+            let (a, z) = (off[c] as usize, off[c + 1] as usize);
+            let bucket = &mut buf[a..z];
+            bucket.sort_unstable_by(|p, q| p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)));
+            let mut last = (f64::NAN, f64::NAN);
+            for &(x, y) in bucket.iter() {
+                if x != last.0 || y != last.1 {
+                    fx.push(x);
+                    fy.push(y);
+                    last = (x, y);
+                }
+            }
+            off2[c + 1] = fx.len() as u32;
         }
         PointBuckets {
             b,
@@ -250,7 +282,7 @@ impl PointBuckets {
             y0,
             nx,
             ny,
-            off,
+            off: off2,
             px: fx,
             py: fy,
         }
@@ -351,11 +383,40 @@ pub struct World {
     pub refy: f64,
     pub gx_off: i64,
     pub gy_off: i64,
+    /// Reference origin of the *spec's* lattice -- the one the task statement
+    /// lays out, over `{pose, goal, obstacles}` padded by `PAD`. It is NOT the
+    /// origin this planner searches on (see `refx` and the note in
+    /// `build_world`: taking the pose into the origin makes every lattice cell
+    /// move with the robot, which is what the growth quantisation exists to
+    /// prevent). It is only ever read by `snap_pub`, to place the two
+    /// endpoints the published path is *required* to name.
+    pub pubx: f64,
+    pub puby: f64,
+}
+
+/// Position of `p` on the lattice `o + k * CELL`, `k` integer.
+///
+/// The spec lays its lattice out from the working area's low corner and takes
+/// `round((p - o) / CELL)`; this is that value, put back into metres.
+#[inline]
+fn snap_pub(o: f64, p: f64) -> f64 {
+    o + ((p - o) / CELL).round_even_i64() as f64 * CELL
 }
 
 impl World {
     #[inline]
     /// Value at fine cell (i, j), whose flat index the caller already has.
+    /// `at` for a caller that holds only the flat index. The clearance scan
+    /// reaches its samples by adding two precomputed halves, so this is the
+    /// one place the two cell indices have to be recovered -- and it is on the
+    /// miss path, which runs once per fine cell for the whole plan, not once
+    /// per sample.
+    fn at_k(&mut self, k: usize) -> f64 {
+        let (i, j) = (k / self.nfy, k % self.nfy);
+        self.at(i, j, k)
+    }
+
+    #[inline]
     fn at(&mut self, i: usize, j: usize, k: usize) -> f64 {
         let v = self.sdf[k];
         if v >= 0.0 {
@@ -439,6 +500,14 @@ pub fn build_world(
         y1 = y1.max(y);
     }
     let (refx, refy) = (x0 - PAD, y0 - PAD);
+    // The spec's own reference origin, which differs from `refx` in exactly one
+    // way: it takes the pose into the corner instead of only growing to cover
+    // it. Whenever the pose is not the low corner the two coincide bit for bit
+    // and nothing downstream moves; when it is, they disagree by whatever
+    // `pose - min(goal, cloud)` is modulo `CELL`, and that residual is the
+    // entire distance between where this planner names its endpoints and where
+    // the task says they are.
+    let (pubx, puby) = (x0.min(pose.0) - PAD, y0.min(pose.1) - PAD);
     let (mut x1, mut y1) = (x1 + PAD, y1 + PAD);
     // Cover the pose, in whole grid periods, counted as an INTEGER.
     //
@@ -495,6 +564,8 @@ pub fn build_world(
         refy,
         gx_off: mx * CELLS_PER_PERIOD,
         gy_off: my * CELLS_PER_PERIOD,
+        pubx,
+        puby,
     }
 }
 
@@ -524,17 +595,24 @@ struct Move {
 /// in the search, and everything the node used to carry is recoverable: the
 /// index is `(bin * nx + i) * ny + j`, so ordering by it IS ordering by
 /// `(bin, i, j)`, and `g` is whatever `dist` holds at that index.
-#[derive(PartialEq)]
+///
+/// `f` is the cost's BIT PATTERN, not the cost. Every key either heap holds is
+/// a finite, non-negative cost -- `heur` is a non-negative distance, every edge
+/// weight is positive, and a state whose `h` is infinite is dropped rather than
+/// pushed -- and over exactly that range the IEEE-754 encoding of a double is
+/// monotone in its value, so integer order on the bits IS `total_cmp` order on
+/// the values. Same heap, same pops, same ties broken the same way; what goes
+/// away is the sign-fixup chain `f64::total_cmp` lowers to, which a sift runs
+/// about fifteen times per push and per pop.
+#[derive(PartialEq, Eq)]
 struct Node {
-    f: f64,
+    f: u64,
     k: u32,
 }
 
-impl Eq for Node {}
-
 impl Ord for Node {
     fn cmp(&self, o: &Self) -> Ordering {
-        o.f.total_cmp(&self.f).then(o.k.cmp(&self.k))
+        o.f.cmp(&self.f).then(o.k.cmp(&self.k))
     }
 }
 
@@ -554,13 +632,13 @@ struct Clear<'a> {
     rot: Vec<(f64, f64)>,
     noff: usize,
     /// Precomputed fine-field index halves, `[(bin, lattice line), sample]`,
-    /// filled the first time a line is touched (`dx` / `dy` mark that).
-    /// `fx` / `fy` keep the raw cell indices, which the lazy field needs to
-    /// turn a miss back into a coordinate.
+    /// filled the first time a line is touched (`dx` / `dy` mark that). The
+    /// raw cell indices are not kept alongside: `World::at_k` divides them out
+    /// of the flat index on the miss path, which is rare, and carrying them
+    /// cost two more stores per sample on every line fill and two more loads
+    /// per sample in the scan.
     ix: Vec<u32>,
     iy: Vec<u32>,
-    fx: Vec<u32>,
-    fy: Vec<u32>,
     dx: Vec<bool>,
     dy: Vec<bool>,
     margin: f64,
@@ -584,11 +662,13 @@ impl Clear<'_> {
             self.w.mx * FINES_PER_PERIOD,
             self.w.nfx as i64 - 1,
         );
-        for s in 0..self.noff {
-            let px = x + self.rot[base + s].0;
-            let fi = (((px - frx) / FINE).round_even_i64() + off).clamp(0, hi) as usize;
-            self.ix[o + s] = self.w.xpart(fi) as u32;
-            self.fx[o + s] = fi as u32;
+        let nfy = self.w.nfy;
+        for (d, r) in self.ix[o..o + self.noff]
+            .iter_mut()
+            .zip(&self.rot[base..base + self.noff])
+        {
+            let fi = (((x + r.0 - frx) / FINE).round_even_i64() + off).clamp(0, hi) as usize;
+            *d = (fi * nfy) as u32;
         }
         self.dx[rx] = true;
     }
@@ -602,11 +682,12 @@ impl Clear<'_> {
             self.w.my * FINES_PER_PERIOD,
             self.w.nfy as i64 - 1,
         );
-        for s in 0..self.noff {
-            let py = y + self.rot[base + s].1;
-            let fj = (((py - fry) / FINE).round_even_i64() + off).clamp(0, hi) as usize;
-            self.iy[o + s] = World::ypart(fj) as u32;
-            self.fy[o + s] = fj as u32;
+        for (d, r) in self.iy[o..o + self.noff]
+            .iter_mut()
+            .zip(&self.rot[base..base + self.noff])
+        {
+            let fj = (((y + r.1 - fry) / FINE).round_even_i64() + off).clamp(0, hi) as usize;
+            *d = World::ypart(fj) as u32;
         }
         self.dy[ry] = true;
     }
@@ -625,18 +706,27 @@ impl Clear<'_> {
             self.fill_y(b, j, ry);
         }
         let (ox, oy) = (rx * self.noff, ry * self.noff);
+        let n = self.noff;
+        // Hand the two index halves to the loop as SLICES rather than indexing
+        // the fields. Same reads in the same order, but the compiler can see
+        // that the walk stays inside them, and the four bounds checks a sample
+        // used to carry collapse to the one on the field itself -- whose index
+        // is data. Splitting the borrow is what makes it expressible: the scan
+        // reads `ix` / `iy` while writing through `w` on a miss.
+        let Clear {
+            w, ix, iy, margin, ..
+        } = self;
+        let (ixs, iys, margin) = (&ix[ox..ox + n], &iy[oy..oy + n], *margin);
         let mut m = f64::INFINITY;
-        for s in 0..self.noff {
-            let kk = self.ix[ox + s] as usize + self.iy[oy + s] as usize;
-            let mut d = self.w.sdf[kk];
+        for (&a, &c) in ixs.iter().zip(iys.iter()) {
+            let kk = a as usize + c as usize;
+            let mut d = w.sdf[kk];
             if d < 0.0 {
-                d = self
-                    .w
-                    .at(self.fx[ox + s] as usize, self.fy[oy + s] as usize, kk);
+                d = w.at_k(kk);
             }
             if d < m {
                 m = d;
-                if m <= self.margin {
+                if m <= margin {
                     self.t[k] = -1.0;
                     return -1.0;
                 }
@@ -741,8 +831,6 @@ pub fn se2_search(
         noff,
         ix: vec![0u32; YAW_BINS * nx * noff],
         iy: vec![0u32; YAW_BINS * ny * noff],
-        fx: vec![0u32; YAW_BINS * nx * noff],
-        fy: vec![0u32; YAW_BINS * ny * noff],
         dx: vec![false; YAW_BINS * nx],
         dy: vec![false; YAW_BINS * ny],
         margin,
@@ -1010,12 +1098,25 @@ pub fn se2_search(
     // last edge into it, which is the admissible direction.
     d2[kg] = 0.0;
     mul[kg] = 1.0;
+    // The heap key is the cost's IEEE bit pattern (see `Node`), and that
+    // encoding is monotone in the value only over the non-negative,
+    // non-NaN doubles. The failure is SILENT rather than loud: `-0.0`
+    // encodes as the LARGEST u64, so a negative key would invert the pop
+    // order and quietly return a different path instead of crashing. Every
+    // push site is provably non-negative today and nothing enforced it, so
+    // the precondition is asserted at each one. `is_sign_positive` is not
+    // redundant with `>= 0.0`: `-0.0 >= 0.0` is true, and `-0.0` is exactly
+    // the value that breaks the encoding hardest. Debug-only, so the
+    // release `.so` the battery times carries no instruction for it.
+    let f0 = 0.0f64; // bound so the assert reads a value, not two equal literals (clippy::eq_op)
+    debug_assert!(f0 >= 0.0 && f0.is_sign_positive());
     heap2.push(Node {
-        f: 0.0,
+        f: f0.to_bits(),
         k: kg as u32,
     });
     let mut tfin = f64::INFINITY;
     while let Some(Node { f, k }) = heap2.pop() {
+        let f = f64::from_bits(f);
         let k = k as usize;
         if done2[k] != 0 {
             continue;
@@ -1064,8 +1165,9 @@ pub fn se2_search(
                 continue;
             }
             d2[kk] = nd;
+            debug_assert!(nd >= 0.0 && nd.is_sign_positive());
             heap2.push(Node {
-                f: nd,
+                f: nd.to_bits(),
                 k: kk as u32,
             });
         }
@@ -1095,7 +1197,11 @@ pub fn se2_search(
 
     let n_states = YAW_BINS * nx * ny;
     let mut dist = vec![f64::INFINITY; n_states];
-    let mut prev = vec![u32::MAX; n_states];
+    // `from + 1`, with 0 for "no predecessor". The sentinel is what decides
+    // whether this is a megabyte-scale memset per plan or nothing at all:
+    // an all-zeroes vector is served by `alloc_zeroed` straight from fresh
+    // pages, and only the states the search actually reaches are ever touched.
+    let mut prev = vec![0u32; n_states];
     // All-zeroes, so this is served by `alloc_zeroed` -- no per-plan memset.
     let mut closed = vec![false; n_states];
     let mut heap: BinaryHeap<Node> = BinaryHeap::new();
@@ -1112,8 +1218,9 @@ pub fn se2_search(
     // sweeping the whole enclosure.
     let mut goal_state: Option<(usize, usize, usize)> = None;
     if heur(si, sj) < f64::INFINITY {
+        debug_assert!(heur(si, sj) >= 0.0 && heur(si, sj).is_sign_positive());
         heap.push(Node {
-            f: heur(si, sj),
+            f: heur(si, sj).to_bits(),
             k: s0 as u32,
         });
     }
@@ -1163,9 +1270,10 @@ pub fn se2_search(
                     let yc = yaw_cost * tv;
                     if d + yc < dist[k] {
                         dist[k] = d + yc;
-                        prev[k] = from;
+                        prev[k] = from + 1;
+                        debug_assert!(d + yc + hij >= 0.0 && (d + yc + hij).is_sign_positive());
                         heap.push(Node {
-                            f: d + yc + hij,
+                            f: (d + yc + hij).to_bits(),
                             k: k as u32,
                         });
                     }
@@ -1226,9 +1334,10 @@ pub fn se2_search(
                     continue;
                 }
                 dist[k] = d + c;
-                prev[k] = from;
+                prev[k] = from + 1;
+                debug_assert!(d + c + hn >= 0.0 && (d + c + hn).is_sign_positive());
                 heap.push(Node {
-                    f: d + c + hn,
+                    f: (d + c + hn).to_bits(),
                     k: k as u32,
                 });
             }
@@ -1236,8 +1345,8 @@ pub fn se2_search(
     }
     let (mut b, mut i, mut j) = goal_state?;
     let mut states = vec![(b, i, j)];
-    while prev[(b * nx + i) * ny + j] != u32::MAX && (b, i, j) != (sb, si, sj) {
-        let p = prev[(b * nx + i) * ny + j] as usize;
+    while prev[(b * nx + i) * ny + j] != 0 && (b, i, j) != (sb, si, sj) {
+        let p = prev[(b * nx + i) * ny + j] as usize - 1;
         b = p / (nx * ny);
         i = (p / ny) % nx;
         j = p % ny;
@@ -1284,6 +1393,113 @@ pub fn se2_search(
     // from there the two answers coincide exactly rather than merely running
     // parallel. Same cost, same validity rule, same number of `seg_free`
     // calls -- only the direction of the sweep changes.
+    //
+    // ...and it does not commit the chord all the way to the anchor it finds.
+    //
+    // Sweeping from the goal fixes WHICH answer is published; it does not make
+    // the two sweeps agree, and the disagreement is systematic rather than a
+    // wash. Both take the LONGEST valid chord, so both land the next anchor on
+    // the first raw vertex from which that chord is still clear -- the vertex
+    // where the constriction the chord threads BEGINS. Swept from the start
+    // that vertex is the constriction's far side and the chord stops short of
+    // the corner; swept from the goal it is the near side and the chord runs
+    // straight past the corner the reference maneuver still turns at.
+    //
+    // Measured on gen023 -- diffdrive, min_scored 0.152, the battery's worst
+    // world at gold 0.894: the goal-anchored chain publishes 4 vertices where
+    // the reference has 6, replacing the corner at (2.20, 0.15) with a chord
+    // that passes 0.31 m inside it. Scoring that same raw path with the
+    // reference's own start-anchored sweep returns gold 0.9997, so the ROUTE
+    // was never wrong here, only how far the chord committed.
+    //
+    // So retreat each anchor back along the raw path by a fixed fraction of the
+    // chord it was about to take. Four properties matter:
+    //
+    //  - It is measured in ARC LENGTH, not in raw vertices, and that is not a
+    //    detail. A vertex-count fraction is not a function of the suffix at
+    //    all, however much it looks like one: a replan re-searches from a
+    //    mid-path pose, so its raw path covers the same ground with a
+    //    different number of lattice states, and its opening pure-rotation
+    //    edges -- which carry no distance but do carry vertices -- are gone.
+    //    The retreat then lands somewhere else and the chain stops reproducing
+    //    itself. Measured, on the vertex-count version: eight worlds moved
+    //    consistency while their gold stayed BIT-IDENTICAL, and two of them
+    //    carried a fitness point each (goal_by_wall -1.068 with consist
+    //    0.00256 -> 0.05597, gen030 -1.061 with 0.00614 -> 0.05921). Same
+    //    first plan, different replan: the invariant failing on its own. Arc
+    //    length along the tail is preserved by construction and a pure
+    //    rotation contributes zero to it, so both leaks close. The repair is
+    //    close but not exact: the landing is still snapped to the CURRENT raw
+    //    path's vertex set, so a replan that covers the same ground with
+    //    different lattice states still lands within one raw edge (~`CELL`) of
+    //    the same point rather than exactly on it.
+    //  - It is proportional, not absolute. A flat two-vertex retreat was
+    //    measured first and is a wash battery-wide: +0.0036 gold on the
+    //    generated 40 and -0.0078 on the curated 16, whose worlds are small
+    //    enough that two vertices is most of a chord. Scaling by the chord's
+    //    own length leaves short chords alone -- rounding DOWN, so nothing
+    //    retreats until the fraction covers a whole raw edge -- and pulls back
+    //    only the long ones, which are the ones that over-shoot.
+    //  - The retreated chord is RE-CLEARED. `r -> k` is not a piece of
+    //    `j -> k`; it is a different segment between different endpoints, at a
+    //    different lattice yaw, and nothing has looked at it. It gets the same
+    //    `seg_free` against the same `chord_floor` -- a floor that can only be
+    //    stricter, since `[r, k]` is a sub-range of `[j, k]` and the floor is
+    //    read off the minimum over it. On failure the retreat gives ground one
+    //    vertex at a time back to `j`, which is known clear, so the worst case
+    //    is exactly the old behaviour.
+    //  - Every anchor stays a raw vertex the search itself cleared, and the
+    //    published path can only move back TOWARDS that lattice path.
+    //
+    // THE FRACTION IS NOT THE ONE THIS MECHANISM SHIPPED WITH ELSEWHERE, and
+    // what it buys is not what that one claimed to buy.
+    //
+    // The 0.1 it was first written with was chosen by reading the scored
+    // battery, and its GOLD half does not survive leaving it: measured out of
+    // sample it is worth about +0.001, and the seed-991 holdout -- a harness
+    // measurement, not a replica one -- reads -0.0028 against +0.0030 in
+    // sample. So the fraction was re-derived here on seeds the scored battery
+    // never sees. Six values were built and scored through `referee.sim.judge`
+    // offline on 200 generated worlds in three blocks (400-479, 500-539,
+    // 600-679); the scored 40 and the seed-991 holdout were not consulted, and
+    // the control build -- this same code at fraction 0.0, which is a no-op by
+    // construction -- reproduces the parent's battery gold and consistency to
+    // the fourth decimal, so the replica is measuring this planner and not an
+    // approximation of it. Pooled over the 200, against that control:
+    //
+    //     fraction   d gold            d consistency      d referee
+    //       0.05     -0.0002 (A,B)     -0.0018 (A,B)      -0.04
+    //       0.10     +0.0015 +-0.0007  +0.0115 +-0.0052   +0.26 +-0.10
+    //       0.15     +0.0002 +-0.0011  +0.0211 +-0.0072   +0.24 +-0.14
+    //       0.20     +0.0014 +-0.0013  +0.0247 +-0.0089   +0.38 +-0.17
+    //       0.30     -0.0036 (A,B)     +0.0216 (A,B)      -0.14
+    //
+    // Two things to read off it. First, 0.20 is an interior maximum of a
+    // smooth curve on both the shipping score and the optimizer's, not an
+    // edge of the grid, and its consistency gain reproduces in all three
+    // blocks independently (+0.0295 / +0.0281 / +0.0182). Second, and more
+    // useful: the gain is CONSISTENCY, not gold. Out of sample the retreat's
+    // gold effect is indistinguishable from zero at every fraction, which is
+    // the honest version of what this mechanism does.
+    //
+    // Why a bigger retreat should be steadier is the same argument that made
+    // the sweep run from the goal in the first place. `j` is a visibility
+    // knife-edge -- the first raw vertex from which the chord is clear -- so
+    // the smallest change in the raw path moves it, and a replan's raw path is
+    // never quite the old one. Landing the anchor a fixed fraction of the
+    // chord's arc past that edge puts it where the chord is clear with room to
+    // spare, and there the anchor is a smooth function of arc length rather
+    // than the argmin of a predicate. Push it too far and the anchor's
+    // position starts tracking the chord's own endpoints instead, which is
+    // what 0.30 is doing when both pillars turn back down.
+    const RETREAT_NUM: f64 = 0.2;
+    // Arc length along the raw polyline. Pure yaw edges have zero length and so
+    // consume none of the retreat -- deliberately: they are exactly the states a
+    // replan does not reproduce.
+    let mut arc = vec![0.0f64; raw.len()];
+    for m in 1..raw.len() {
+        arc[m] = arc[m - 1] + (raw[m][0] - raw[m - 1][0]).hypot(raw[m][1] - raw[m - 1][1]);
+    }
     let mut keep = vec![raw.len() - 1];
     while *keep.last().unwrap() > 0 {
         let k = *keep.last().unwrap();
@@ -1295,7 +1511,36 @@ pub fn se2_search(
             }
             j += 1;
         }
-        keep.push(j);
+        // Last vertex still WITHIN the fraction of the chord's own arc -- not
+        // the first one beyond it. Rounding the other way would retreat a
+        // vertex on every chord of two edges or more, which is the flat retreat
+        // this stopped being: measured, that costs -0.0078 curated gold. Capped
+        // at `k - 1` so the chain still strictly decreases and still terminates
+        // at 0. `r == j` needs no test: `j` either passed the loop above or is
+        // `k - 1`, a single raw edge the search already cleared.
+        // The scan stops at a pure yaw edge rather than stepping over it. Zero
+        // length satisfies `arc[r + 1] <= target` with EQUALITY, so without the
+        // strict-increase guard the retreat crosses a rotation cluster for
+        // free, and an all-rotation chord -- where `target == arc[j]` -- would
+        // retreat all the way to `k - 1`, the maximum, exactly where the vertex
+        // version retreated nothing. That publishes an in-place rotation, which
+        // is the swept-footprint waypoint the start-repair block below exists
+        // to suppress (-0.175 m and a veto on gen030). The guard makes the
+        // failure mode unreachable instead of relying on a downstream repair
+        // that can only consume one of them.
+        let target = arc[j] + (arc[k] - arc[j]) * RETREAT_NUM;
+        let mut r = j;
+        while r + 1 < k && arc[r + 1] > arc[r] && arc[r + 1] <= target {
+            r += 1;
+        }
+        while r > j {
+            let floor = chord_floor(&raw_clear, r, k);
+            if seg_free(w, &offs, &raw[r], &raw[k], floor) {
+                break;
+            }
+            r -= 1;
+        }
+        keep.push(r);
     }
     keep.reverse();
     // Start repair, for the one case the goal-anchored chain handles worse
@@ -1329,7 +1574,79 @@ pub fn se2_search(
             keep[1] = f;
         }
     }
-    Some(keep.iter().map(|&k| raw[k]).collect())
+    let mut out: Vec<[f64; 3]> = keep.iter().map(|&k| raw[k]).collect();
+
+    // ---- Name the endpoints on the spec's lattice, not on this one ---------
+    //
+    // Deviation is measured by a coupling that is pinned at both ends: the
+    // first published pose is always paired with the reference's first and the
+    // last with the reference's last. Whatever the two disagree about *there*
+    // is therefore a floor under the deviation of the whole path, and no amount
+    // of routing accuracy in between can get under it.
+    //
+    // On a route nothing constrains, that floor is the entire score. `empty`
+    // publishes a perfectly straight path across an obstacle-free world and
+    // still loses 0.039; `goal_by_wall` never approaches its one box and loses
+    // 0.059. Both numbers are exactly `endpoint gap / reference length /
+    // deviation scale`, to four decimals -- 0.08 m at the goal and 0.12 m at
+    // the start. Nothing is bowing: the published paths are straight and their
+    // lateral offset already matches the reference's. They are named from a
+    // lattice whose corner sits somewhere else.
+    //
+    // Both lattices have pitch `CELL` and both name a route by its cells. They
+    // differ only in where the low corner sits, because this planner keeps the
+    // pose out of the corner on purpose (`build_world`) and the spec does not.
+    // Re-snapping the two endpoints against `pubx`/`puby` closes that gap
+    // without moving the corner the search runs on: the route, its clearances,
+    // its costs and its replan stability are all untouched, and wherever the
+    // pose was not the low corner the two lattices coincide bit for bit and
+    // this is a no-op. It is bounded by construction -- a snap moves a vertex
+    // by under one cell -- and the vertex it moves is one this planner had
+    // already placed by rounding, to within half a cell of the same point.
+    //
+    // The endpoints are *extended onto*, never moved onto, the spec lattice --
+    // the searched chain is left bit-identical and the two named points are
+    // added outside it. That distinction is the whole design, and it is a
+    // replan property rather than a deviation one.
+    //
+    // `pubx`/`puby` follow the pose whenever the pose is the low corner, so on
+    // a replan the two ends pick up *different* residuals: walking a third of
+    // the way down an obstacle-free path moves the named start to y = -0.12
+    // and the named goal to y = 0.0 where both had been -0.06. Overwriting the
+    // chain's own endpoints with those hands that 0.12 m of disagreement to the
+    // whole chord as a tilt, and the previous answer's remainder -- which is
+    // flat -- sees the average of it. Measured: it is the difference between
+    // 0.0026 and 0.0376 of drift on `empty`. Appending instead confines the
+    // disagreement to the stubs themselves; every interior waypoint the
+    // remainder projects onto is exactly where it was, so the drift stays at
+    // the stub length over the near-field count and the tilt never exists.
+    //
+    // Guarded exactly like a shortcut, because that is what it is: the stub has
+    // to leave its chord at least as clear as the raw detour that chord stands
+    // for, or it is not published.
+    let n = out.len();
+    if n >= 2 {
+        let (pubx, puby) = (w.pubx, w.puby);
+        let (qx, qy) = (snap_pub(pubx, goal.0), snap_pub(puby, goal.1));
+        let last = out[n - 1];
+        if (qx - last[0]).abs() > 1e-9 || (qy - last[1]).abs() > 1e-9 {
+            let cand = [qx, qy, last[2]];
+            let floor = chord_floor(&raw_clear, keep[n - 2], keep[n - 1]);
+            if seg_free(w, &offs, &last, &cand, floor) {
+                out.push(cand);
+            }
+        }
+        let (qx, qy) = (snap_pub(pubx, start.0), snap_pub(puby, start.1));
+        let first = out[0];
+        if (qx - first[0]).abs() > 1e-9 || (qy - first[1]).abs() > 1e-9 {
+            let cand = [qx, qy, first[2]];
+            let floor = chord_floor(&raw_clear, 0, keep[1]);
+            if seg_free(w, &offs, &cand, &first, floor) {
+                out.insert(0, cand);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Largest yaw change any single published waypoint may command.
@@ -1751,8 +2068,6 @@ mod tests {
             noff,
             ix: vec![0u32; YAW_BINS * nx * noff],
             iy: vec![0u32; YAW_BINS * ny * noff],
-            fx: vec![0u32; YAW_BINS * nx * noff],
-            fy: vec![0u32; YAW_BINS * ny * noff],
             dx: vec![false; YAW_BINS * nx],
             dy: vec![false; YAW_BINS * ny],
             margin: emb.precision,
@@ -1865,8 +2180,6 @@ mod tests {
             noff,
             ix: vec![0u32; YAW_BINS * nx * noff],
             iy: vec![0u32; YAW_BINS * ny * noff],
-            fx: vec![0u32; YAW_BINS * nx * noff],
-            fy: vec![0u32; YAW_BINS * ny * noff],
             dx: vec![false; YAW_BINS * nx],
             dy: vec![false; YAW_BINS * ny],
             margin,
