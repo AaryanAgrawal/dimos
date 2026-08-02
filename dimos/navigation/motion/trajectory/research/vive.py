@@ -146,7 +146,10 @@ def read_vive_pose(dataset: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndar
             if channel.topic != "vive/pose":
                 continue
             d = json.loads(msg.data)
-            ts.append(msg.log_time / 1e9)
+            # t_host is the cleanest clock here: monotonic, and its worst gap is
+            # 15 ms against 92 ms for log_time. The payload's own "ts" goes
+            # backwards at 91 points in himloco01, so it is unusable raw.
+            ts.append(d.get("t_host", msg.log_time / 1e9))
             pos.append(d["p"])
             quat.append(d["q"])
     if not ts:

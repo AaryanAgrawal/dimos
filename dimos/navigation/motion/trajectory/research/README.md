@@ -64,7 +64,8 @@ that is the data, not a bug. See `FINDINGS.md`.
 | `policy.py` | "FREE" v1 blob reader + HIM forward (numpy; matches MNN to 1.1e-4) |
 | `walk.py` | policy → MuJoCo, driven by a constant or a recording's `control_log` |
 | `model.py` | menagerie go2 scene (with or without ghost body), motor permutation |
-| `vive.py` | recorded tracker pose → base_link track, anchored at t=0 |
+| `vive.py` | recorded tracker pose → base track, anchored at a chosen time |
+| `metrics.py` | filtering + chaos-tolerant statistics for comparing runs |
 | `replay.py` | the `lowcmd` replay path |
 | `FINDINGS.md` | what the recordings do and don't contain |
 

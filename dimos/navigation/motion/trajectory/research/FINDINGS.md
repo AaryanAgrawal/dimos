@@ -297,3 +297,83 @@ to its feet. Use `--start 6` to anchor past it.
 
 (The v11 run sits ~6 cm lower throughout, mean tracker z 0.180 vs 0.241 for the
 same mount -- consistent with its deliberate gait-height sweep down to 0.10.)
+
+---
+
+# Trajectory error is the wrong objective; use distributions
+
+## The gait is chaotic
+
+Perturbing only the initial joint angles and replaying the same commands:
+
+| perturbation | @1 s | @3 s | @12 s |
+|---|---|---|---|
+| sigma = 0.05 rad (~3 deg) | 2.3 cm | 6.6 cm | **136 cm** |
+| sigma = 0.30 rad | 9.5 cm | 23.0 cm | **58 cm** |
+
+Not monotonic -- the *smaller* perturbation ends up further away. Long-horizon
+position is uncorrelated with the initial error, so knowing the robot's true
+starting joint angles (which these recordings do not contain anyway) would buy
+only the first few hundred milliseconds.
+
+## Which means trajectory matching has almost no signal
+
+Sim-vs-real windowed displacement error, against a chaos floor measured as two
+simulators 3 degrees apart:
+
+| window | sim vs real | chaos floor | ratio |
+|---|---|---|---|
+| 0.5 s | 24.0 cm | 15.3 cm | 1.57 |
+| 2 s | 77.8 cm | 51.7 cm | 1.50 |
+| 10 s | 145 cm | 165 cm | **0.88** |
+
+At a 10 s horizon the sim-real gap is *smaller* than the noise floor. Fitting
+physics parameters to trajectory error cannot work.
+
+## Distributional statistics do survive
+
+`metrics.py`. Over 40 s of himloco01 from `--start 6`, with the chaos spread
+taken across four perturbed rollouts:
+
+| statistic | sim | real | diff | chaos | SNR |
+|---|---|---|---|---|---|
+| speed (m/s) | 0.410 | 0.389 | 0.021 | 0.022 | 1.0 |
+| speed_gain | 0.780 | 0.759 | 0.022 | 0.048 | 0.5 |
+| height_std | 0.036 | 0.024 | 0.012 | 0.004 | **2.7** |
+| gait_hz | 0.575 | 0.675 | 0.100 | 0.150 | 0.7 |
+| yaw_rate_gain | -0.084 | 0.528 | 0.612 | 0.029 | 21.1 (unreliable) |
+| height_mean | 0.292 | 0.319 | 0.027 | 0.003 | 8.7 (not comparable) |
+
+Read this carefully:
+
+* **speed and speed_gain agree** between sim and hardware to within the chaos
+  noise. That is a genuine result -- the policy's translational response
+  transfers.
+* **height_std is the one usable discriminator so far**: the simulated body bobs
+  50% more than the real one (0.036 vs 0.024 m), three times the noise.
+* **height_mean is not comparable.** The recorded value is fixed by the unknown
+  tracker offset and the anchor height, both chosen by hand.
+* **yaw_rate_gain is not trustworthy yet.** A clean constant command gives the
+  simulator +0.63, correct sign in both directions, but against the recorded
+  schedule it reads -0.08. The recorded turn commands alternate faster than the
+  0.4 s filter and the policy's own lag, so an instantaneous regression is the
+  wrong estimator. Needs lag compensation or cross-correlation.
+* **gait_hz** at 0.58-0.68 Hz is too low for a trotting Go2 (expect ~2 Hz); the
+  FFT is locking onto drift rather than the gait. The band or the detrending
+  needs work.
+
+## Two estimator bugs found and fixed here
+
+1. **Sample-window filtering.** Differentiating a 253 Hz recording and a 50 Hz
+   rollout with the same 25-*sample* window applies 0.1 s of smoothing to one
+   and 0.5 s to the other. With Vive dt jitter as large as the interval itself
+   (mean 3.96 ms, std 3.88 ms) this reported the robot walking at **3.87 m/s**.
+   Everything now resamples to a uniform grid and smooths by a window in
+   seconds.
+2. **Mean of ratios.** `mean(achieved / commanded)` explodes near zero command
+   and cancels across sign flips. Replaced by a least-squares slope through the
+   origin.
+
+Also: `vive.read_vive_pose` now takes its clock from the payload's `t_host`
+rather than mcap `log_time` -- monotonic, and its worst gap is 15 ms against
+92 ms. The payload's own `ts` goes backwards at 91 points and is unusable raw.
