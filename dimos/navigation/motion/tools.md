@@ -1,0 +1,42 @@
+# Tools
+
+Three packages, one loop: `planner/` plans, `simulation/` is the matched Go2
+MuJoCo env, `control/` executes plans in it and judges the execution.
+Run from the repo root; per-package `tools.md` has the full menus.
+
+## planner ([planner/autoresearch/README.md](planner/autoresearch/README.md))
+
+```bash
+# score the evolved rust planner: curated 16, or the full 56-world battery
+python -m dimos.navigation.motion.planner.autoresearch --score
+python -m dimos.navigation.motion.planner.autoresearch --score --gen 40 --jobs 8
+
+# watch a plan in rerun (2D referee view: truth, cloud, sweep, gold)
+python -m dimos.navigation.motion.planner.autoresearch --spawn --score -s corridor_reverse
+
+# rebuild the crate after editing rust/
+uv run maturin develop --uv --release -m dimos/navigation/motion/planner/autoresearch/rust/Cargo.toml
+```
+
+## simulation ([simulation/tools.md](simulation/tools.md))
+
+```bash
+# fitted sim next to the recorded robot (green ghost box)
+python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost --fitted --start 6
+
+# score sim vs recording (noise-floor units)
+python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --eval --fitted
+```
+
+## control ([control/tools.md](control/tools.md))
+
+```bash
+# watch the go2 execute a plan (blue floor boxes = expected body poses)
+python -m dimos.navigation.motion.control --view -s corridor
+
+# judge the controller on the curated 16 (+ generated with --gen N)
+python -m dimos.navigation.motion.control --score
+```
+
+Both batteries score `gate * (100 + 10 + 1)`-shaped pillars, max 111: the
+planner against the SE(2) gold oracle, the controller against physics.
