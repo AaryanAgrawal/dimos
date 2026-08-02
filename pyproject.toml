@@ -512,6 +512,9 @@ line-length = 100
 exclude = [
     ".git",
     ".pytest_cache",
+    # export payloads: lab-convention code copied into exported labs verbatim,
+    # deliberately not held to repo lint config (see autoresearch/export/)
+    "dimos/navigation/motion/autoresearch/export/templates",
     ".ruff_cache",
     ".venv",
     ".vscode",
@@ -567,7 +570,7 @@ strict = true
 warn_unused_ignores = false
 untyped_calls_exclude = ["zenoh"]
 explicit_package_bases = true
-exclude = "^dimos/models/Detic(/|$)|.*/test_.|.*/tool_.|.*/conftest.py*"
+exclude = "^dimos/models/Detic(/|$)|.*/test_.|.*/tool_.|.*/conftest.py*|.*/autoresearch/export/templates(/|$)"
 
 [[tool.mypy.overrides]]
 module = [

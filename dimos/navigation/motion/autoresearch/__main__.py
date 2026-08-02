@@ -39,7 +39,9 @@ for _v in (
 if __name__ == "__main__":
     # The guard matters: multiprocessing's spawn re-imports the launching
     # module in every worker (as __mp_main__); without it, --jobs would
-    # recursively re-run the whole CLI in each child.
-    from dimos.navigation.motion.autoresearch.sim import main
+    # recursively re-run the whole CLI in each child. The import is relative
+    # so a copy of this package runs under any name (e.g. `python -m referee`
+    # in an exported lab).
+    from .sim import main
 
     main()
