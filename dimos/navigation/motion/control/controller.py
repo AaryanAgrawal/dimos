@@ -78,7 +78,12 @@ class TrajectoryController(Protocol):
 # autoresearch candidates plug in without registering (planners/base pattern).
 REGISTRY = {
     "pursuit": "dimos.navigation.motion.control.controller:make",
+    "pursuit-rs": "dimos.navigation.motion.control.controller:make_rust",
 }
+
+BUILD_CMD = (
+    "uv run maturin develop --uv --release -m dimos/navigation/motion/control/rust/Cargo.toml"
+)
 
 
 def load(name: str) -> Callable[..., TrajectoryController]:
@@ -91,6 +96,14 @@ def load(name: str) -> Callable[..., TrajectoryController]:
 
 def make(config: ControllerConfig | None = None) -> PursuitController:
     return PursuitController(config)
+
+
+def make_rust(config: ControllerConfig | None = None) -> RustPursuitController:
+    try:
+        import dimos_motion2_tc  # noqa: F401
+    except ImportError as e:
+        raise ImportError(f"dimos_motion2_tc is not built; run: {BUILD_CMD}") from e
+    return RustPursuitController(config)
 
 
 class PursuitController:
@@ -172,5 +185,54 @@ class PursuitController:
             vx, vy = vx / speed * vmax, vy / speed * vmax
         wz = float(
             np.clip(cfg.k_yaw * _angle_diff(target_yaw, pyaw), -cfg.max_yaw_rate, cfg.max_yaw_rate)
+        )
+        return Twist(Vector3(vx, vy, 0.0), Vector3(0.0, 0.0, wz))
+
+
+class RustPursuitController:
+    """The dimos_motion2_tc extension behind the controller protocol."""
+
+    config: ControllerConfig
+
+    def __init__(self, config: ControllerConfig | None = None) -> None:
+        import dimos_motion2_tc
+
+        self._mod = dimos_motion2_tc
+        self.config = config or ControllerConfig()
+        cfg = self.config
+        # positional, in ControllerConfig declaration order (frame_id is a tf
+        # selector, not a law parameter, so it does not travel)
+        self._params = (
+            cfg.lookahead,
+            cfg.max_speed,
+            cfg.max_yaw_rate,
+            cfg.k_pos,
+            cfg.k_yaw,
+            cfg.fan_yaw_per_m,
+            cfg.fan_yaw_done,
+            cfg.min_speed,
+            cfg.speed_clearance,
+            cfg.speed_floor_clearance,
+            cfg.speed_lookahead,
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        pass
+
+    def update(
+        self, pose: PoseStamped, path: Path, t: float, clearance: np.ndarray | None = None
+    ) -> Twist:
+        xy_yaw = np.ascontiguousarray(
+            np.array(
+                [[p.position.x, p.position.y, p.yaw] for p in path.poses], dtype=np.float64
+            ).reshape(-1, 3)
+        )
+        clr = None if clearance is None else np.ascontiguousarray(clearance, dtype=np.float64)
+        vx, vy, wz = self._mod.update(
+            (float(pose.position.x), float(pose.position.y), float(pose.yaw)),
+            xy_yaw,
+            clr,
+            self._params,
         )
         return Twist(Vector3(vx, vy, 0.0), Vector3(0.0, 0.0, wz))

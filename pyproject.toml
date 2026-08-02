@@ -584,6 +584,7 @@ module = [
     "dimos_lcm.*",
     "dimos_mls_planner",
     "dimos_motion2_target",
+    "dimos_motion2_tc",
     "dimos_voxel_ray_tracing",
     "etils",
     "faster_whisper",

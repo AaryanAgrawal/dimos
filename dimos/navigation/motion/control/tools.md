@@ -24,6 +24,10 @@ python -m dimos.navigation.motion.control --score --planner target-py
 python -m dimos.navigation.motion.control --score --controller my.candidate:make
 python -m dimos.navigation.motion.control --view -s slalom --policy ml-trajectory-research/freewalk_mcf.bin
 
+# the rust controller (onboard build for the RK3588) -- build once, then run it
+uv run maturin develop --uv --release -m dimos/navigation/motion/control/rust/Cargo.toml
+python -m dimos.navigation.motion.control --score --controller pursuit-rs
+
 # domain randomization (per-episode mechanism draws) and the blind A/B
 python -m dimos.navigation.motion.control --score --dr --seed 3
 python -m dimos.navigation.motion.control --score --blind
@@ -31,7 +35,11 @@ python -m dimos.navigation.motion.control --score --blind
 # tests and types
 python -m pytest dimos/navigation/motion/control -q
 python -m mypy dimos/navigation/motion/control
+cargo test --release --manifest-path dimos/navigation/motion/control/rust/Cargo.toml
 ```
+
+`pursuit-rs` is a port of `pursuit`, not a variant: `test_rust_parity.py` holds
+the two to 1e-9 per twist component over 240 seeded cases (observed spread: 0).
 
 Score per world = `gate * (100*arrived + 10*precision + 1*(pace+composure)/2)`,
 max 111 (referee scale). Gate 0 on wall contact or fall; refusal counts as
