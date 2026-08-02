@@ -33,7 +33,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research import model as go2_model
+from dimos.navigation.motion.simulation import model as go2_model
 
 
 @dataclass

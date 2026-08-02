@@ -19,8 +19,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.trajectory.research import model as go2_model
-from dimos.navigation.motion.trajectory.research.evaluate import (
+from dimos.navigation.motion.simulation import model as go2_model
+from dimos.navigation.motion.simulation.evaluate import (
     FOOT_GEOMS,
     LEG_DOFS,
     NOT_COMPARABLE,
@@ -28,7 +28,7 @@ from dimos.navigation.motion.trajectory.research.evaluate import (
     _physics,
     virtual_tracker,
 )
-from dimos.navigation.motion.trajectory.research.metrics import Summary
+from dimos.navigation.motion.simulation.metrics import Summary
 
 
 def _summary(**kw):
@@ -152,7 +152,7 @@ def test_physics_override_sets_foot_friction():
 
 def test_leg_stats_rise_when_the_front_thigh_lifts():
     """FK sanity: raising front thigh targets must raise front_lift only."""
-    from dimos.navigation.motion.trajectory.research.evaluate import leg_stats
+    from dimos.navigation.motion.simulation.evaluate import leg_stats
 
     t = np.arange(50) * 0.02
     stand = np.tile([0.0, 0.9, -1.8] * 4, (50, 1))

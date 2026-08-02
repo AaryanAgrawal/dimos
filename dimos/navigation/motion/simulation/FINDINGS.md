@@ -191,19 +191,19 @@ friction (0.003 vs the shipped 0.02).
 
 ```bash
 # score one configuration (~1.6 s)
-python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --eval
+python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --eval
 
 # watch it, with the recorded pose as a ghost box
-python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost
+python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree_himloco01.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --view --ghost
 
 # multi-objective search, Pareto front
-python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --multi --trials 300
+python -m dimos.navigation.motion.simulation.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --multi --trials 300
 
 # the v11 gait-height run, same flow (crouches to 0.10 m around t=32)
-python -m dimos.navigation.motion.trajectory.research data/ml-trajectory-research/unitree_v11_gait_height01.mcap --policy data/ml-trajectory-research/v11_final.bin --view --ghost --fitted --start 6
+python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree_v11_gait_height01.mcap --policy data/ml-trajectory-research/v11_final.bin --view --ghost --fitted --start 6
 
 # joint fit across both recordings, starting from the current preset
-python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --also data/ml-trajectory-research/unitree_v11_gait_height01.mcap data/ml-trajectory-research/v11_final.bin --seed-fitted --trials 300
+python -m dimos.navigation.motion.simulation.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --also data/ml-trajectory-research/unitree_v11_gait_height01.mcap data/ml-trajectory-research/v11_final.bin --seed-fitted --trials 300
 ```
 
 ---

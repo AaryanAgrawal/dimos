@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import pytest
 
-from dimos.navigation.motion.trajectory.research.evaluate import LEG_STATS, NOT_COMPARABLE
-from dimos.navigation.motion.trajectory.research.metrics import Summary
-from dimos.navigation.motion.trajectory.research.search import (
+from dimos.navigation.motion.simulation.evaluate import LEG_STATS, NOT_COMPARABLE
+from dimos.navigation.motion.simulation.metrics import Summary
+from dimos.navigation.motion.simulation.search import (
     OBJECTIVES,
     SPACE,
     _invalid_for,
@@ -138,7 +138,7 @@ def test_usable_floor_cross_clamps_against_another_recording():
 
 
 def test_joint_loss_is_rms_over_every_recording(monkeypatch):
-    from dimos.navigation.motion.trajectory.research import search as search_mod
+    from dimos.navigation.motion.simulation import search as search_mod
 
     snrs = [{"speed": 3.0, "gait_hz": 4.0}, {"speed": 0.0, "gait_hz": 0.0}]
     calls = []
@@ -156,7 +156,7 @@ def test_joint_loss_is_rms_over_every_recording(monkeypatch):
 def test_joint_loss_drops_the_statistics_a_recording_cannot_measure(monkeypatch):
     """v11's body-bob gait_hz tracks its sway envelope, not its steps -- scoring
     it would fit the physics to an artifact."""
-    from dimos.navigation.motion.trajectory.research import search as search_mod
+    from dimos.navigation.motion.simulation import search as search_mod
 
     monkeypatch.setattr(
         search_mod,
@@ -168,7 +168,7 @@ def test_joint_loss_drops_the_statistics_a_recording_cannot_measure(monkeypatch)
 
 
 def test_joint_loss_ignores_infinite_snr(monkeypatch):
-    from dimos.navigation.motion.trajectory.research import search as search_mod
+    from dimos.navigation.motion.simulation import search as search_mod
 
     monkeypatch.setattr(
         search_mod,

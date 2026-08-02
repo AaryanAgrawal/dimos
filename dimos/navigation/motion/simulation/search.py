@@ -14,7 +14,7 @@
 
 """Search leg-joint physics for the values that make sim behave like hardware.
 
-    python -m dimos.navigation.motion.trajectory.research.search DATASET POLICY
+    python -m dimos.navigation.motion.simulation.search DATASET POLICY
 
 Uses Optuna's CMA-ES sampler. The objective is continuous, low-dimensional and
 noisy, which is what CMA-ES is built for; TPE is the better default when
@@ -34,7 +34,7 @@ from typing import Any
 
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research.evaluate import (
+from dimos.navigation.motion.simulation.evaluate import (
     LEG_STATS,
     evaluate,
     measure_noise,
@@ -384,7 +384,7 @@ def format_front(result: dict[str, Any], limit: int = 12) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="trajectory.research.search")
+    ap = argparse.ArgumentParser(prog="motion.simulation.search")
     ap.add_argument("dataset")
     ap.add_argument("policy")
     ap.add_argument("--trials", type=int, default=100)
@@ -414,7 +414,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.also:
-        from dimos.navigation.motion.trajectory.research.evaluate import (
+        from dimos.navigation.motion.simulation.evaluate import (
             FITTED_ACTUATOR_TAU,
             FITTED_COMMAND_DELAY,
             FITTED_PHYSICS,

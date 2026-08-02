@@ -19,7 +19,7 @@ sides, and measures each statistic's own noise by repeating the rollout from
 perturbed initial poses. A statistic is only worth fitting when the sim-real
 difference clearly exceeds that noise, so :class:`Report` carries the ratio.
 
-    from dimos.navigation.motion.trajectory.research.evaluate import evaluate
+    from dimos.navigation.motion.simulation.evaluate import evaluate
     print(evaluate(DATASET, POLICY).table())
 
 ``physics`` overrides leg-joint parameters on the compiled model, which is the
@@ -39,13 +39,13 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research import (
+from dimos.navigation.motion.simulation import (
     metrics,
     model as go2_model,
     walk as walk_mod,
 )
-from dimos.navigation.motion.trajectory.research.policy import FreePolicy
-from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation, quat_to_mat
+from dimos.navigation.motion.simulation.policy import FreePolicy
+from dimos.navigation.motion.simulation.vive import base_track, mount_rotation, quat_to_mat
 
 # Leg dofs in qvel/dof indexing: 6 free-joint dofs, then the twelve joints.
 LEG_DOFS = slice(6, 18)

@@ -21,7 +21,7 @@ import struct
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.trajectory.research.policy import (
+from dimos.navigation.motion.simulation.policy import (
     BAND_0_1,
     BAND_1_5,
     BAND_ROTATE,

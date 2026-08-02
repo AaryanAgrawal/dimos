@@ -28,8 +28,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from dimos.navigation.motion.trajectory.research import model as go2_model
-from dimos.navigation.motion.trajectory.research.policy import FreePolicy
+from dimos.navigation.motion.simulation import model as go2_model
+from dimos.navigation.motion.simulation.policy import FreePolicy
 
 CONTROL_DT = 0.02  # 50 Hz policy rate; not stored in the blob (cfg "dt")
 
@@ -171,7 +171,7 @@ def read_policy_lowcmd(dataset: str | Path) -> tuple[np.ndarray, np.ndarray]:
     """
     from mcap.reader import make_reader
 
-    from dimos.navigation.motion.trajectory.research.model import (
+    from dimos.navigation.motion.simulation.model import (
         MUJOCO_ACTUATOR_NAMES,
         UNITREE_MOTOR_NAMES,
     )
