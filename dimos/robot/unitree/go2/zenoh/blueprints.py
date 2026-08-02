@@ -195,6 +195,24 @@ go2_zenoh_nav = autoconnect(
     MovementManager.blueprint(),
 ).global_config(transport="zenoh", n_workers=8, robot_model="unitree_go2")
 
+# The motion stack's own MLS tuning: the local planner + follower are the precision
+# layer (embodiment 0.05 floor, clearance-governed speed), so the global graph can be
+# permissive where _mls_planner has to be the safety margin for BasicPathFollower.
+# Hard clearance drops to the precision floor so tight gaps keep their node edges, and
+# the soft wall band narrows/cheapens so corridors are priced, not severed.
+_mls_planner_motion = MLSPlannerNative.blueprint(
+    world_frame="odom",
+    voxel_size=voxel_size,
+    robot_height=0.3,
+    surface_closing_radius=0.3,
+    wall_clearance_m=0.05,
+    wall_buffer_m=0.35,
+    wall_buffer_weight=30.0,
+    step_threshold_m=0.16,
+    step_penalty_weight=4.0,
+    viz_publish_hz=planner_viz_hz,
+).remappings([(MLSPlannerNative, "global_map", "global_map_unused")])
+
 # The motion stack (dimos/navigation/motion): MLS stays the global planner but its path
 # moves to planner_path and becomes a carrot source — the evolved autoresearch planner
 # replans to a point ~5 m of arc along it over the raycaster's local map, and the pursuit
@@ -204,7 +222,7 @@ go2_zenoh_motion = autoconnect(
     go2_zenoh_raycaster,
     OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
     GoalRelay.blueprint(),
-    _mls_planner.remappings([(MLSPlannerNative, "path", "planner_path")]),
+    _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
     MotionPlanner.blueprint().remappings([(MotionPlanner, "odometry", "body_odometry")]),
     TrajectoryFollower.blueprint().remappings([(TrajectoryFollower, "odometry", "body_odometry")]),
     MovementManager.blueprint(),
