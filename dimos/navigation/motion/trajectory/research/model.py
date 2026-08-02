@@ -108,3 +108,27 @@ def joint_dof_adr(model: mujoco.MjModel) -> np.ndarray:
         ],
         dtype=int,
     )
+
+
+# Go2 body half-extents, for the ghost box (roughly 0.38 x 0.19 x 0.11 m).
+GHOST_HALF_SIZE = (0.19, 0.0935, 0.057)
+
+
+def load_with_ghost(
+    menagerie: Path | None = None,
+    rgba: tuple[float, float, float, float] = (0.2, 1.0, 0.2, 0.35),
+) -> tuple[mujoco.MjModel, mujoco.MjData]:
+    """Scene plus a translucent non-colliding mocap box for the recorded pose.
+
+    Drive it through ``data.mocap_pos[0]`` / ``data.mocap_quat[0]``.
+    """
+    spec = mujoco.MjSpec.from_file(str(scene_path(menagerie)))
+    body = spec.worldbody.add_body(name="ghost", mocap=True)
+    geom = body.add_geom()
+    geom.type = mujoco.mjtGeom.mjGEOM_BOX
+    geom.size = GHOST_HALF_SIZE
+    geom.rgba = rgba
+    geom.contype = 0
+    geom.conaffinity = 0
+    model = spec.compile()
+    return model, mujoco.MjData(model)

@@ -88,12 +88,16 @@ def walk(
     menagerie: Path | None = None,
     view: bool = False,
     speed: float = 1.0,
+    ghost: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> Track:
     """Step the policy in MuJoCo.
 
     ``command`` holds vx/vy/vyaw fixed; ``schedule`` is a ``(t, cmd)`` pair as
     returned by :func:`read_control_log`, held zero-order between samples.
     Exactly one must be given.
+
+    ``ghost`` is a ``(t, pos, quat)`` recorded base_link track (see
+    :func:`vive.base_track`) drawn as a translucent box alongside the robot.
     """
     if (command is None) == (schedule is None):
         raise ValueError("pass exactly one of command= or schedule=")
@@ -103,7 +107,10 @@ def walk(
     else:
         duration = 8.0 if seconds is None else seconds
 
-    model, data = go2_model.load(menagerie)
+    if ghost is None:
+        model, data = go2_model.load(menagerie)
+    else:
+        model, data = go2_model.load_with_ghost(menagerie)
     sim_dt = model.opt.timestep
     decim = max(1, round(CONTROL_DT / sim_dt))
 
@@ -160,6 +167,12 @@ def walk(
                     # deque is oldest..newest; the nets want newest first.
                     p_obs = np.concatenate(list(hist)[::-1])
                     last_action, target = policy.act(p_obs, cmd)
+                if ghost is not None:
+                    g_t, g_p, g_q = ghost
+                    i = max(0, int(np.searchsorted(g_t, t, side="right")) - 1)
+                    data.mocap_pos[0] = g_p[i]
+                    data.mocap_quat[0] = g_q[i]
+
                 ts.append(t)
                 pos.append(data.qpos[0:3].copy())
                 quat.append(data.qpos[3:7].copy())

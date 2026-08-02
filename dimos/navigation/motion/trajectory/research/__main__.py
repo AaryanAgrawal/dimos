@@ -43,6 +43,15 @@ def main() -> None:
         "instead of replaying lowcmd",
     )
     ap.add_argument("--seconds", type=float, default=None, help="policy run length")
+    ap.add_argument(
+        "--ghost", action="store_true", help="draw the recorded vive base_link as a box"
+    )
+    ap.add_argument(
+        "--tracker-z",
+        type=float,
+        default=-0.15,
+        help="base_link offset below the tracker, metres (guess; tune by eye)",
+    )
     args = ap.parse_args()
 
     if args.policy:
@@ -51,6 +60,16 @@ def main() -> None:
 
         policy = FreePolicy.load(args.policy)
         schedule = read_control_log(args.dataset)
+        ghost = None
+        if args.ghost:
+            from dimos.navigation.motion.trajectory.research.vive import base_track
+
+            ghost = base_track(
+                args.dataset,
+                tracker_offset=np.array([0.0, 0.0, args.tracker_z]),
+                anchor_pos=np.array([0.0, 0.0, 0.27]),
+            )
+            print(f"vive: {len(ghost[0])} samples over {ghost[0][-1]:.1f}s")
         print(f"control_log: {len(schedule[0])} walk cmds over {schedule[0][-1]:.1f}s")
         track = walk(
             policy,
@@ -58,6 +77,7 @@ def main() -> None:
             seconds=args.seconds,
             view=args.view,
             speed=args.speed,
+            ghost=ghost,
         )
         drift = float(np.linalg.norm(track.pos[-1] - track.pos[0]))
         print(f"simulated {track.t[-1]:.1f}s  net displacement {drift:.3f} m")
