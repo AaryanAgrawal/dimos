@@ -37,6 +37,15 @@ CONTROL_DT = 0.02  # 50 Hz policy rate; not stored in the blob (cfg "dt")
 # Slightly tighter than the MJCF ctrlrange, so they bind first.
 TORQUE_LIMITS = np.array([23.0, 23.0, 35.0] * 4)
 
+# Per-axis slew the robot applies to operator commands before the policy sees
+# them: max change in (vx, vy, vyaw) per 20 ms control tick (go2web policy.rs
+# ramp_velocity, VEL_DV_*). The recorded control_log carries the operator
+# *target*; the policy on hardware only ever saw the ramped command. This is
+# what makes the real yaw answer ~0.1 s later than the real speed does -- a
+# yaw reversal has further to ramp than a speed nudge -- which no uniform
+# command delay can reproduce.
+COMMAND_SLEW = np.array([0.05, 0.04, 0.10])
+
 
 @dataclass
 class Track:
@@ -101,6 +110,7 @@ def walk(
     start: float = 0.0,
     command_delay: float = 0.0,
     actuator_tau: float = 0.0,
+    slew: bool = True,
     settle: float = 0.5,
     menagerie: Path | None = None,
     view: bool = False,
@@ -118,17 +128,21 @@ def walk(
 
     ``command_delay`` holds each command back before the policy sees it, in
     seconds. On hardware the operator's command crosses a network and the
-    robot's own filtering before it reaches the policy: cross-correlating
-    commanded against achieved turn rate on himloco01 gives a clean single
-    peak at 0.50 s (correlation 0.88, against 0.66 at zero lag). In sim the
-    command lands on the same tick it is read, so without this the simulator
-    answers a turn in 0.04-0.06 s against 0.46 s on hardware -- a gap no
-    leg-joint parameter can close.
+    robot's own filtering before it reaches the policy; with both streams on
+    a shared epoch (see ``vive.read_vive_pose``) the real turn answers its
+    command in ~0.17 s, where the sim answers on the same tick, 0.04-0.06 s
+    -- a gap no leg-joint parameter can close. (An earlier 0.46-0.50 s figure
+    was mostly a stream-misalignment artifact, since fixed at the source.)
 
     ``actuator_tau`` is the motor's first-order time constant in seconds. A
     MuJoCo ``motor`` actuator produces exactly the requested torque on the same
     step; a real BLDC through a gearbox has finite current-loop bandwidth and
     reaches it over a few milliseconds. Zero reproduces the ideal actuator.
+
+    ``slew`` applies the robot's own per-axis command rate limit
+    (:data:`COMMAND_SLEW`) between the schedule and the policy, exactly as the
+    hardware does. Not a fitted parameter -- the constants come from the
+    executor that produced the recordings. Off only for A/B comparison.
     """
     if (command is None) == (schedule is None):
         raise ValueError("pass exactly one of command= or schedule=")
@@ -181,8 +195,12 @@ def walk(
         ]
         return held
 
+    # The live command the policy sees; starts converged on the schedule, the
+    # same steady state the real slew is in mid-run.
+    vel_cmd = cmd_at(0.0).astype(float).copy()
+
     for _ in range(policy.hist):
-        hist.append(observe(cmd_at(0.0)))
+        hist.append(observe(vel_cmd))
 
     ts: list[float] = []
     pos: list[np.ndarray] = []
@@ -203,7 +221,12 @@ def walk(
         for step in range(int(duration / sim_dt)):
             t = step * sim_dt
             if step % decim == 0:
-                cmd = cmd_at(t)
+                cmd_target = cmd_at(t)
+                if slew:
+                    vel_cmd += np.clip(cmd_target - vel_cmd, -COMMAND_SLEW, COMMAND_SLEW)
+                else:
+                    vel_cmd = cmd_target.astype(float).copy()
+                cmd = vel_cmd
                 if t >= settle:
                     hist.append(observe(cmd))
                     # deque is oldest..newest; the nets want newest first.
@@ -218,7 +241,7 @@ def walk(
                 ts.append(t)
                 pos.append(data.qpos[0:3].copy())
                 quat.append(data.qpos[3:7].copy())
-                used.append(cmd)
+                used.append(cmd.copy())  # vel_cmd mutates in place; snapshot it
 
             tau = policy.kp * (target - data.qpos[7:19]) - policy.kd * data.qvel[6:18]
             tau = np.clip(tau, -TORQUE_LIMITS, TORQUE_LIMITS)

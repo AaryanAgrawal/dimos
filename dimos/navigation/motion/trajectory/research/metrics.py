@@ -99,6 +99,20 @@ def yaw_of(quat: np.ndarray) -> np.ndarray:
     return yaw
 
 
+def pitch_roll_of(quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pitch and roll from (n, 4) wxyz quaternions, ZYX convention.
+
+    Only their *std* is comparable sim-to-real: a constant error in the Vive
+    room calibration or the fitted mount shifts the mean but not the spread.
+    Unlike anything derived from position, these are immune to the guessed
+    tracker translation -- rotation carries no lever arm.
+    """
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    pitch = -np.arcsin(np.clip(2 * (x * z - w * y), -1.0, 1.0))
+    roll = np.arctan2(2 * (y * z + w * x), 1 - 2 * (x * x + y * y))
+    return pitch, roll
+
+
 def gait_frequency(z: np.ndarray, *, rate: float = RESAMPLE_HZ) -> float:
     """Bob frequency, from the autocorrelation of the high-passed height.
 
@@ -169,12 +183,14 @@ class Summary:
     speed: float  # mean planar speed while commanded to move, m/s
     speed_gain: float  # achieved / commanded speed
     yaw_rate_gain: float  # achieved / commanded turn rate
-    height_mean: float  # mean base height, m -- NOT comparable sim-to-real:
-    # the recorded value is set by the unknown tracker offset and the anchor
-    height_std: float  # body bob amplitude, m
+    height_mean: float  # mean height, m -- NOT comparable sim-to-real:
+    # the recorded value sits in the Vive room frame, whose floor is unknown
+    height_std: float  # bob amplitude: std of the detrended height, m
     gait_hz: float  # dominant frequency of the detrended vertical bob
     speed_lag: float  # policy->body delay fitted for the speed gain, s
     yaw_lag: float  # same, for the turn gain
+    pitch_std: float  # gait-driven pitch oscillation, rad
+    roll_std: float  # same, about the roll axis
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -186,6 +202,8 @@ class Summary:
             "gait_hz": self.gait_hz,
             "speed_lag": self.speed_lag,
             "yaw_lag": self.yaw_lag,
+            "pitch_std": self.pitch_std,
+            "roll_std": self.roll_std,
         }
 
 
@@ -219,15 +237,25 @@ def summarize(
     speed_gain, speed_lag = _gain(speed, cmd_speed, moving_threshold)
     yaw_gain, yaw_lag = _gain(yaw_rate[:n], c[:n, 2], 0.2)
 
+    # Detrended before the std, like gait_frequency: a slow height sag, a
+    # tilted Vive room frame leaking planar travel into z, or a gait-height
+    # command drift would otherwise all read as "bob".
+    pitch, roll = pitch_roll_of(quat)
+    _, pitch_u = resample(t, pitch)
+    _, roll_u = resample(t, roll)
+    bob = z - _moving_average(z, int(RESAMPLE_HZ))
+
     return Summary(
         speed=float(speed[moving].mean()) if moving.any() else 0.0,
         speed_gain=speed_gain,
         yaw_rate_gain=yaw_gain,
         height_mean=float(z.mean()),
-        height_std=float(z.std()),
+        height_std=float(bob.std()),
         gait_hz=gait_frequency(z),
         speed_lag=speed_lag,
         yaw_lag=yaw_lag,
+        pitch_std=float((pitch_u - _moving_average(pitch_u, int(RESAMPLE_HZ))).std()),
+        roll_std=float((roll_u - _moving_average(roll_u, int(RESAMPLE_HZ))).std()),
     )
 
 

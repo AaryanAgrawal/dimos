@@ -130,6 +130,34 @@ def test_summarize_reads_turn_rate_with_the_right_sign():
     assert summarize(t, pos, quat, cmd).yaw_rate_gain == pytest.approx(rate, abs=0.05)
 
 
+def test_height_std_ignores_a_slow_drift():
+    """A sag, a tilted room frame, or a gait-height ramp must not read as bob."""
+    t = np.linspace(0, 20, 2000)
+    bob = 0.02 * np.sin(2 * np.pi * 2.0 * t)
+    quat = np.tile([1.0, 0.0, 0.0, 0.0], (len(t), 1))
+    cmd = np.tile([0.5, 0.0, 0.0], (len(t), 1))
+
+    flat = summarize(t, np.stack([0.4 * t, np.zeros_like(t), 0.30 + bob], 1), quat, cmd)
+    drifting = summarize(
+        t, np.stack([0.4 * t, np.zeros_like(t), 0.30 + bob + 0.005 * t], 1), quat, cmd
+    )
+    assert drifting.height_std == pytest.approx(flat.height_std, abs=0.002)
+
+
+def test_pitch_roll_std_reads_the_oscillation_not_the_mount_bias():
+    """A constant tilt (mount or room error) must not count; the wobble must."""
+    t = np.linspace(0, 20, 2000)
+    amp, bias = 0.05, 0.3
+    pitch = bias + amp * np.sin(2 * np.pi * 2.0 * t)
+    quat = np.stack(
+        [np.cos(pitch / 2), np.zeros_like(t), np.sin(pitch / 2), np.zeros_like(t)], axis=1
+    )
+    pos = np.stack([np.zeros_like(t), np.zeros_like(t), np.full_like(t, 0.3)], 1)
+    s = summarize(t, pos, quat, np.tile([0.5, 0.0, 0.0], (len(t), 1)))
+    assert s.pitch_std == pytest.approx(amp / np.sqrt(2), abs=0.005)
+    assert s.roll_std == pytest.approx(0.0, abs=1e-6)
+
+
 def test_chaos_spread_is_peak_to_peak_per_statistic():
     def mk(speed):
         return Summary(
@@ -141,6 +169,8 @@ def test_chaos_spread_is_peak_to_peak_per_statistic():
             gait_hz=2.0,
             speed_lag=0.1,
             yaw_lag=0.2,
+            pitch_std=0.02,
+            roll_std=0.02,
         )
 
     spread = chaos_spread([mk(0.40), mk(0.44), mk(0.42)])
@@ -210,6 +240,38 @@ def test_gain_recovers_a_delayed_response():
     gain, lag = _gain(achieved, cmd, 0.2, rate=100.0)
     assert gain == pytest.approx(0.7, abs=0.05)
     assert lag == pytest.approx(lag_samples / 100.0, abs=0.02)
+
+
+def test_command_slew_ramps_a_step_at_the_hardware_rate():
+    """The policy must see the robot's ramped command, not the operator step:
+    vyaw moves at most 0.10 rad/s per 20 ms tick (go2web VEL_DV_VYAW)."""
+    from dimos.navigation.motion.trajectory.research import walk as walk_mod
+
+    class FakePolicy:
+        hist, act_dim, obs_per_frame = 1, 12, 45
+        default_pose = np.zeros(12)
+        kp, kd = np.full(12, 40.0), np.full(12, 1.0)
+
+        def normalize(self, raw):
+            return raw
+
+        def act(self, _p_obs, _cmd):
+            return np.zeros(12), self.default_pose
+
+    t = np.arange(0.0, 4.0, 0.1)
+    cmd = np.stack([np.zeros_like(t), np.zeros_like(t), np.where(t < 2.0, -1.0, 1.0)], 1)
+    track = walk_mod.walk(FakePolicy(), schedule=(t, cmd), seconds=4.0)
+
+    applied = track.cmd[:, 2]
+    assert applied[0] == pytest.approx(-1.0)
+    assert np.abs(np.diff(applied)).max() == pytest.approx(0.10, abs=1e-9)
+    # -1 -> +1 takes 20 ticks = 0.4 s of ramping
+    i = int(np.searchsorted(track.t, 2.0))
+    assert applied[i + 9] == pytest.approx(0.0, abs=0.11)
+    assert applied[i + 25] == pytest.approx(1.0)
+
+    unslewed = walk_mod.walk(FakePolicy(), schedule=(t, cmd), seconds=4.0, slew=False)
+    assert np.abs(np.diff(unslewed.cmd[:, 2])).max() == pytest.approx(2.0)
 
 
 def test_actuator_step_is_a_pass_through_when_ideal():

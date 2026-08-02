@@ -43,9 +43,11 @@ SPACE: dict[str, tuple[float, float, bool]] = {
     "damping": (0.2, 10.0, True),
     "frictionloss": (0.0, 2.0, False),
     # Not a physics property: how long the command takes to reach the policy on
-    # hardware. Fitted rather than assumed because the recording cannot separate
-    # genuine transport latency from a stamping offset -- see FINDINGS.
-    "command_delay": (0.0, 0.8, False),
+    # hardware. Genuine transport latency only -- the streams now share an
+    # epoch (see vive.read_vive_pose), and epoch-corrected cross-correlation
+    # puts the real turn lag at ~0.17 s, so 0.3 brackets it comfortably. The
+    # old 0.8 ceiling existed to cover a 0.31 s stream-misalignment artifact.
+    "command_delay": (0.0, 0.3, False),
     # Competing explanation for the same lag: a heavier / more rotationally
     # sluggish trunk. Inertia delays and smooths the response; transport delay
     # only shifts it. Letting both into one space lets the data choose.
@@ -56,6 +58,11 @@ SPACE: dict[str, tuple[float, float, bool]] = {
     # Pareto front says no scalar on an existing term can match gait and
     # rotation at once, which points at a missing mechanism like this one.
     "actuator_tau": (0.0, 0.05, False),
+    # Foot-floor contact friction; menagerie ships 0.8 tangential and 0.02
+    # torsional (go2.xml, priority 1, condim 6). Torsional is what the stance
+    # feet pivot against in a turn, and neither value is measured.
+    "foot_friction": (0.3, 1.5, False),
+    "foot_friction_torsional": (0.002, 0.2, True),
 }
 
 # Statistics grouped into a few objectives. Seven separate objectives would make
@@ -64,7 +71,7 @@ SPACE: dict[str, tuple[float, float, bool]] = {
 # physics-only search bought gait accuracy with friction, the delay search bought
 # rotation accuracy and gave gait back.
 OBJECTIVES: dict[str, tuple[str, ...]] = {
-    "gait": ("gait_hz", "height_std"),
+    "gait": ("gait_hz", "height_std", "pitch_std", "roll_std"),
     "translation": ("speed", "speed_gain", "speed_lag"),
     "rotation": ("yaw_rate_gain", "yaw_lag"),
 }

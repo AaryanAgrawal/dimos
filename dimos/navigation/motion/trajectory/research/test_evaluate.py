@@ -21,10 +21,12 @@ import pytest
 
 from dimos.navigation.motion.trajectory.research import model as go2_model
 from dimos.navigation.motion.trajectory.research.evaluate import (
+    FOOT_GEOMS,
     LEG_DOFS,
     NOT_COMPARABLE,
     Report,
     _physics,
+    virtual_tracker,
 )
 from dimos.navigation.motion.trajectory.research.metrics import Summary
 
@@ -39,6 +41,8 @@ def _summary(**kw):
         gait_hz=2.0,
         speed_lag=0.2,
         yaw_lag=0.1,
+        pitch_std=0.02,
+        roll_std=0.02,
     )
     base.update(kw)
     return Summary(**base)
@@ -111,6 +115,38 @@ def test_physics_override_applies_and_restores():
     assert go2_model.load is original
     restored, _ = go2_model.load()
     assert float(restored.dof_armature[LEG_DOFS][0]) == pytest.approx(before)
+
+
+def test_virtual_tracker_sits_above_an_upright_base():
+    """Inverted mount, +0.207 in tracker frame -> the tracker rides 0.207 above
+    the base, so the virtual z must come out higher than the base z."""
+    pos = np.array([[0.0, 0.0, 0.30]])
+    quat = np.array([[1.0, 0.0, 0.0, 0.0]])
+    out = virtual_tracker(pos, quat, mount_yaw=94.0, tracker_z=0.207)
+    assert out[0, 2] == pytest.approx(0.30 + 0.207, abs=1e-9)
+    np.testing.assert_allclose(out[0, :2], pos[0, :2])  # xy untouched
+
+
+def test_virtual_tracker_swings_with_body_pitch():
+    """The lever arm must show up once the body tilts — that is the point of
+    comparing in sensor space."""
+    half = np.sin(0.1 / 2)  # 0.1 rad pitch about y
+    quat = np.array([[np.cos(0.1 / 2), 0.0, half, 0.0]])
+    pos = np.array([[0.0, 0.0, 0.30]])
+    out = virtual_tracker(pos, quat, mount_yaw=94.0, tracker_z=0.207)
+    assert out[0, 2] == pytest.approx(0.30 + 0.207 * np.cos(0.1), abs=1e-6)
+
+
+def test_physics_override_sets_foot_friction():
+    import mujoco
+
+    with _physics({"foot_friction": 1.1, "foot_friction_torsional": 0.09}):
+        model, _ = go2_model.load()
+        for name in FOOT_GEOMS:
+            gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            assert float(model.geom_friction[gid, 0]) == pytest.approx(1.1)
+            assert float(model.geom_friction[gid, 1]) == pytest.approx(0.09)
+            assert float(model.geom_friction[gid, 2]) == pytest.approx(0.01)  # rolling kept
 
 
 def test_physics_override_rejects_unknown_keys():

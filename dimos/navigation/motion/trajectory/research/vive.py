@@ -135,27 +135,49 @@ def mat_to_quat(m: np.ndarray) -> np.ndarray:
 
 
 def read_vive_pose(dataset: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return ``(t, pos, quat)`` — seconds from run start, (n, 3), (n, 4) wxyz."""
+    """Return ``(t, pos, quat)`` — (n, 3), (n, 4) wxyz, seconds on a shared epoch.
+
+    t=0 is the recording's **first walk command**, the same zero
+    :func:`walk.read_control_log` uses. Zeroing each stream at its own first
+    message instead put himloco01's vive samples 0.313 s early and v11's 4.4 s
+    early — how long the tracker streamed before the operator pressed walk —
+    and that bookkeeping offset read as "command delay": a search recovered
+    0.317 s for it, within 4 ms of the artifact. Samples before the first
+    command carry negative times.
+
+    Sample *spacing* still comes from the payload ``t_host``: monotonic, worst
+    gap 15 ms against 92 ms for log_time (the payload's own "ts" goes backwards
+    at 91 points in himloco01, so it is unusable raw). t_host and log_time are
+    the same clock to 2.5 ms +/- 3.4 ms with no drift over a run, so the mean
+    difference rebases t_host onto the log clock the commands are stamped in.
+    """
     from mcap.reader import make_reader
 
     ts: list[float] = []
+    deltas: list[float] = []
     pos: list[list[float]] = []
     quat: list[list[float]] = []
+    first_walk: float | None = None
     with Path(dataset).open("rb") as f:
-        for _schema, channel, msg in make_reader(f).iter_messages(topics=["vive/pose"]):
-            if channel.topic != "vive/pose":
-                continue
+        for _schema, channel, msg in make_reader(f).iter_messages(
+            topics=["vive/pose", "control_log"]
+        ):
             d = json.loads(msg.data)
-            # t_host is the cleanest clock here: monotonic, and its worst gap is
-            # 15 ms against 92 ms for log_time. The payload's own "ts" goes
-            # backwards at 91 points in himloco01, so it is unusable raw.
-            ts.append(d.get("t_host", msg.log_time / 1e9))
+            if channel.topic == "control_log":
+                if d.get("action") == "walk":
+                    t_cmd = msg.log_time / 1e9
+                    first_walk = t_cmd if first_walk is None else min(first_walk, t_cmd)
+                continue
+            t_host = d.get("t_host", msg.log_time / 1e9)
+            ts.append(t_host)
+            deltas.append(msg.log_time / 1e9 - t_host)
             pos.append(d["p"])
             quat.append(d["q"])
     if not ts:
         raise ValueError(f"{dataset}: no vive/pose messages")
-    t = np.array(ts)
-    return t - t[0], np.array(pos), np.array(quat)
+    t = np.array(ts) + float(np.mean(deltas))  # onto the log clock
+    zero = t[0] if first_walk is None else first_walk
+    return t - zero, np.array(pos), np.array(quat)
 
 
 def base_track(
@@ -166,6 +188,7 @@ def base_track(
     anchor_at: float = 0.0,
     anchor_pos: np.ndarray | None = None,
     anchor_quat: np.ndarray | None = None,
+    sensor_z: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Recorded base_link pose, re-anchored so t=0 sits at the sim's start pose.
 
@@ -178,6 +201,14 @@ def base_track(
     ``anchor_at`` picks the anchor time. Use it to skip a stand-up at the
     start of a run: the simulator always begins standing, so comparing from
     t=0 lines a standing robot up against one still getting to its feet.
+
+    ``sensor_z`` replaces the z column with the **raw tracker height** in the
+    room frame. The lever-arm correction moves the guessed tracker offset into
+    the "ground truth": on himloco01 it contributes 11.4 mm of z std against
+    5.6 mm from the tracker itself, so height statistics computed from the
+    corrected z mostly measure the guess. Score height against a virtual
+    tracker synthesized on the sim side instead (see ``evaluate``), so the
+    same guess distorts both sides identically and cancels.
     """
     off = DEFAULT_TRACKER_OFFSET if tracker_offset is None else np.asarray(tracker_offset, float)
     mnt = mount_rotation() if mount is None else np.asarray(mount, float)
@@ -200,5 +231,7 @@ def base_track(
         rel_r = np.einsum("ij,njk->nik", anchor_rot, rel_r)
     if anchor_pos is not None:
         rel_p = rel_p + np.asarray(anchor_pos, float)
+    if sensor_z:
+        rel_p[:, 2] = p[:, 2]
 
     return t, rel_p, np.array([mat_to_quat(r) for r in rel_r])

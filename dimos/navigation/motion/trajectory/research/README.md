@@ -70,9 +70,10 @@ agree to within what chaos already does to a rollout.
 python -m dimos.navigation.motion.trajectory.research.search data/ml-trajectory-research/unitree_himloco01.mcap data/ml-trajectory-research/freewalk_mcf.bin --trials 100
 ```
 
-Optuna + CMA-ES over leg-joint physics, an explicit command delay, and trunk
-mass/inertia. `--storage sqlite:///search.db` to resume, `--json out.json` to
-save the result.
+Optuna + CMA-ES over leg-joint physics, an explicit command delay, trunk
+mass/inertia and foot friction. `--storage sqlite:///search.db` to resume,
+`--json out.json` to save the result. `--multi` switches to NSGA-II and prints
+the Pareto front over the gait/translation/rotation objective groups.
 
 **Replay `lowcmd` instead of the policy** — drop `--policy`. The robot collapses;
 that is the data, not a bug. See `FINDINGS.md`.
@@ -94,6 +95,6 @@ that is the data, not a bug. See `FINDINGS.md`.
 ## Where this is going
 
 `FINDINGS.md` is the state of the sim-to-real work: what is calibrated, what
-the two recordings can and cannot answer, the two modelling gaps found so far
-(command delay, actuator lag), and the proposed next steps — foot contact is
-the standing hypothesis for the remaining rotation error.
+the two recordings can and cannot answer, the modelling gaps found so far,
+and the proposed next steps — the sim oscillating roughly twice as fast and
+twice as hard as the real robot is the dominant open gap.

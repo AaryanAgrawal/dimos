@@ -70,8 +70,8 @@ def test_rotation_applies_in_the_expected_direction():
     np.testing.assert_allclose(m @ np.array([1.0, 0, 0]), [0, 1, 0], atol=1e-6)
 
 
-def _write(tmp_path, pos, quat):
-    """A minimal mcap carrying only vive/pose, for base_track."""
+def _write(tmp_path, pos, quat, *, walk_at=None, t_host_shift=None):
+    """A minimal mcap carrying vive/pose (and optionally walk commands)."""
     import json
 
     from mcap.writer import Writer
@@ -83,8 +83,15 @@ def _write(tmp_path, pos, quat):
         sid = w.register_schema("go2/VivePose", "jsonschema", b"{}")
         cid = w.register_channel("vive/pose", "json", sid)
         for i, (p, q) in enumerate(zip(pos, quat, strict=True)):
-            payload = json.dumps({"p": list(p), "q": list(q)}).encode()
+            d = {"p": list(p), "q": list(q)}
+            if t_host_shift is not None:
+                d["t_host"] = i * 0.01 + t_host_shift
+            payload = json.dumps(d).encode()
             w.add_message(cid, log_time=int(i * 1e7), data=payload, publish_time=int(i * 1e7))
+        if walk_at is not None:
+            wid = w.register_channel("control_log", "json", sid)
+            payload = json.dumps({"action": "walk", "vx": 0.5, "vy": 0.0, "vyaw": 0.0}).encode()
+            w.add_message(wid, log_time=int(walk_at * 1e9), data=payload, publish_time=0)
         w.finish()
     return path
 
@@ -125,6 +132,53 @@ def test_anchor_pos_offsets_the_whole_track(tmp_path):
     )
     np.testing.assert_allclose(p[0], [0, 0, 0.27], atol=1e-9)
     np.testing.assert_allclose(p[1], [1.0, 0, 0.27], atol=1e-9)
+
+
+def test_vive_time_is_zeroed_at_the_first_walk_command(tmp_path):
+    """Both streams must share an epoch — zeroing each at its own first message
+    made himloco01's vive samples 0.313 s early, which a search then "fitted"
+    as 0.317 s of command delay."""
+    from dimos.navigation.motion.trajectory.research.vive import read_vive_pose
+
+    pos = [[0.0, 0, 0]] * 5
+    quat = [[1.0, 0, 0, 0]] * 5
+    t, _p, _q = read_vive_pose(_write(tmp_path, pos, quat, walk_at=0.02))
+    np.testing.assert_allclose(t, [-0.02, -0.01, 0.0, 0.01, 0.02], atol=1e-9)
+
+
+def test_vive_epoch_survives_a_t_host_clock_offset(tmp_path):
+    """t_host provides the sample spacing but must not shift the epoch: the
+    mean t_host-to-log_time difference rebases it onto the command clock."""
+    from dimos.navigation.motion.trajectory.research.vive import read_vive_pose
+
+    pos = [[0.0, 0, 0]] * 5
+    quat = [[1.0, 0, 0, 0]] * 5
+    t, _p, _q = read_vive_pose(_write(tmp_path, pos, quat, walk_at=0.02, t_host_shift=-5.0))
+    np.testing.assert_allclose(t, [-0.02, -0.01, 0.0, 0.01, 0.02], atol=1e-9)
+
+
+def test_vive_time_without_commands_starts_at_zero(tmp_path):
+    from dimos.navigation.motion.trajectory.research.vive import read_vive_pose
+
+    t, _p, _q = read_vive_pose(_write(tmp_path, [[0.0, 0, 0]] * 3, [[1.0, 0, 0, 0]] * 3))
+    np.testing.assert_allclose(t, [0.0, 0.01, 0.02], atol=1e-9)
+
+
+def test_sensor_z_keeps_the_raw_tracker_height(tmp_path):
+    """With sensor_z the z column must bypass both the lever arm and the anchor."""
+    from dimos.navigation.motion.trajectory.research.vive import base_track
+
+    pos = [[5.0, 5.0, 1.4], [5.5, 5.0, 1.5]]
+    quat = [[1.0, 0, 0, 0]] * 2
+    _t, p, _q = base_track(
+        _write(tmp_path, pos, quat),
+        tracker_offset=np.array([0.0, 0.0, -0.2]),
+        mount=np.eye(3),
+        anchor_pos=np.array([0.0, 0.0, 0.27]),
+        sensor_z=True,
+    )
+    np.testing.assert_allclose(p[:, 2], [1.4, 1.5], atol=1e-9)
+    np.testing.assert_allclose(p[:, 0], [0.0, 0.5], atol=1e-9)  # xy still anchored
 
 
 def test_mount_rotation_is_a_proper_rotation():

@@ -30,7 +30,13 @@ from dimos.navigation.motion.trajectory.research.search import (
 
 def test_space_brackets_the_menagerie_defaults():
     """A search that cannot reach the current values cannot tell you they are right."""
-    for name, default in (("armature", 0.01), ("damping", 2.0), ("frictionloss", 0.2)):
+    for name, default in (
+        ("armature", 0.01),
+        ("damping", 2.0),
+        ("frictionloss", 0.2),
+        ("foot_friction", 0.8),
+        ("foot_friction_torsional", 0.02),
+    ):
         lo, hi, _log = SPACE[name]
         assert lo < default < hi, name
 

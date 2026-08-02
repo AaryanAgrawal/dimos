@@ -45,7 +45,7 @@ from dimos.navigation.motion.trajectory.research import (
     walk as walk_mod,
 )
 from dimos.navigation.motion.trajectory.research.policy import FreePolicy
-from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation
+from dimos.navigation.motion.trajectory.research.vive import base_track, mount_rotation, quat_to_mat
 
 # Leg dofs in qvel/dof indexing: 6 free-joint dofs, then the twelve joints.
 LEG_DOFS = slice(6, 18)
@@ -58,9 +58,33 @@ already decorrelates position within seconds, so it measures the noise a
 parameter search has to beat rather than a plausible modelling error.
 """
 
-# Set by the anchor, not measured: the recorded height is only as good as the
-# tracker offset, so height_mean cannot be compared. See vive.py.
+# The recorded height lives in the Vive room frame, whose floor is unknown,
+# so the mean cannot be compared. See vive.py.
 NOT_COMPARABLE = ("height_mean",)
+
+# Foot geom names in the menagerie MJCF. Their contacts are already condim=6
+# (tangential + torsional + rolling friction, priority 1 -- the "condim=1"
+# in the go2 default class only governs the calf capsules), so what is open
+# to fitting is the friction values, not the contact dimensionality.
+FOOT_GEOMS = ("FL", "FR", "RL", "RR")
+
+
+def virtual_tracker(
+    pos: np.ndarray, quat: np.ndarray, *, mount_yaw: float, tracker_z: float
+) -> np.ndarray:
+    """Positions with z replaced by a virtual tracker's height.
+
+    Height statistics are compared in *sensor space*: the real side keeps the
+    raw tracker height (``base_track(sensor_z=True)``), and the sim side mounts
+    a virtual tracker on its base with the same guessed offset. Inverting the
+    guess on the real data instead put 11.4 mm of its z std against 5.6 mm from
+    the tracker itself; done this way the guess distorts both sides identically
+    and mostly cancels.
+    """
+    off_base = mount_rotation(mount_yaw).T @ np.array([0.0, 0.0, tracker_z])
+    out = pos.copy()
+    out[:, 2] = pos[:, 2] - np.einsum("nij,j->ni", quat_to_mat(quat), off_base)[:, 2]
+    return out
 
 
 @contextlib.contextmanager
@@ -75,6 +99,8 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
         "frictionloss",
         "trunk_mass_scale",
         "trunk_inertia_scale",
+        "foot_friction",
+        "foot_friction_torsional",
     }
     if unknown:
         raise ValueError(f"unknown physics override(s): {sorted(unknown)}")
@@ -97,6 +123,15 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
             model.body_mass[trunk] *= overrides["trunk_mass_scale"]
         if "trunk_inertia_scale" in overrides:
             model.body_inertia[trunk] *= overrides["trunk_inertia_scale"]
+        # geom_friction columns are (tangential, torsional, rolling); the foot
+        # has priority 1, so its values dictate the foot-floor contact pair.
+        # Torsional is what resists pivoting the stance feet in a turn.
+        for name in FOOT_GEOMS:
+            gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            if "foot_friction" in overrides:
+                model.geom_friction[gid, 0] = overrides["foot_friction"]
+            if "foot_friction_torsional" in overrides:
+                model.geom_friction[gid, 1] = overrides["foot_friction_torsional"]
         return model, data
 
     go2_model.load = patched  # type: ignore[assignment]
@@ -107,7 +142,13 @@ def _physics(overrides: dict[str, float] | None) -> Iterator[None]:
 
 
 def _noise_floor(
-    policy: FreePolicy, sched: Any, start: float, seconds: float, seeds: int
+    policy: FreePolicy,
+    sched: Any,
+    start: float,
+    seconds: float,
+    seeds: int,
+    mount_yaw: float = 94.0,
+    tracker_z: float = 0.207,
 ) -> dict[str, float]:
     runs = []
     base = policy.default_pose.copy()
@@ -118,7 +159,8 @@ def _noise_floor(
             t2 = walk_mod.walk(policy, schedule=sched, seconds=seconds, start=start)
         finally:
             object.__setattr__(policy, "default_pose", base)
-        runs.append(_summarize_run(t2.t, t2.pos, t2.quat, sched, start))
+        p2 = virtual_tracker(t2.pos, t2.quat, mount_yaw=mount_yaw, tracker_z=tracker_z)
+        runs.append(_summarize_run(t2.t, p2, t2.quat, sched, start))
     return metrics.chaos_spread(runs)
 
 
@@ -221,9 +263,10 @@ def evaluate(
             command_delay=command_delay,
             actuator_tau=actuator_tau,
         )
-        sim = _summarize_run(track.t, track.pos, track.quat, sched, start)
+        sim_p = virtual_tracker(track.pos, track.quat, mount_yaw=mount_yaw, tracker_z=tracker_z)
+        sim = _summarize_run(track.t, sim_p, track.quat, sched, start)
         if noise is None:
-            noise = _noise_floor(policy, sched, start, seconds, seeds)
+            noise = _noise_floor(policy, sched, start, seconds, seeds, mount_yaw, tracker_z)
 
     gt, gp, gq = base_track(
         dataset,
@@ -231,6 +274,7 @@ def evaluate(
         mount=mount_rotation(mount_yaw),
         anchor_at=start,
         anchor_pos=np.array([0.0, 0.0, anchor_height]),
+        sensor_z=True,
     )
     sel = (gt >= start) & (gt < start + seconds)
     real = _summarize_run(gt[sel] - start, gp[sel], gq[sel], sched, start)
