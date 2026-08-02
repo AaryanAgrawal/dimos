@@ -2,29 +2,31 @@
 
 Goal: make MuJoCo behave like the real Go2 well enough to train against.
 
-**Status: matched, on the fitted recording.** The same HIMLoco policy that ran
-on the robot runs in sim, driven by the recorded commands, scored against
-VR-tracker ground truth — and after modelling three mechanisms and fixing two
-judge artifacts, the multi-objective search collapses to a single point with
-**every statistic at or below its noise floor**:
+**Status: matched, base AND legs, on the fitted recording.** The same HIMLoco
+policy that ran on the robot runs in sim, driven by the recorded commands,
+scored against VR-tracker ground truth *and* the executor's own commanded
+joint targets (`policy/lowcmd`). The four-objective search's balanced point:
 
-    gait 0.23    translation 0.85    rotation 0.16
+    gait 1.06    translation 0.98    rotation 0.45    legs 0.81
 
-(noise-floor units: 1.0 = as close as two identical simulators land from each
-other under a 3° initial-pose perturbation, measured at default physics). In
-absolute terms: speed 0.404 vs 0.427 m/s, yaw gain 0.699 vs 0.678, yaw lag
-0.170 vs 0.170 s, pitch bob 0.021 vs 0.020 rad, gait 1.72 vs 1.67 Hz.
+(noise-floor units, default-physics floor). In absolute terms: commanded front
+foot lift **0.060 vs 0.065 m** — the base-only fit high-stepped at 0.217 and
+looked like prancing — rear 0.039 vs 0.035, pitch bob 0.018 vs 0.020 rad,
+gait 1.82 vs 1.67 Hz, speed 0.417 vs 0.427 m/s, yaw lag 0.160 vs 0.170 s.
 
 ```
-armature 0.0140   damping 0.2381   frictionloss 0.7372
-foot_friction 0.5692   foot_friction_torsional 0.0031
-trunk_mass_scale 1.326   trunk_inertia_scale 1.487
-command_delay 0.0231   actuator_tau 0.0289
+armature 0.0069   damping 0.1797   frictionloss 0.0327
+foot_friction 0.9013   foot_friction_torsional 0.0298
+trunk_mass_scale 1.20   trunk_inertia_scale 1.316
+trunk_com_x +0.0437   leg_mass_scale 0.716
+command_delay 0.0321   actuator_tau 0.0232
 ```
 
-These are *physical*: armature near the 0.01 spec, trunk 33% heavier (it
-carries a tracker and mounts), inertia ×1.5 rather than the ×3.4 an earlier
-contaminated fit produced, and a 23 ms genuine transport delay.
+Physically coherent: the com moves **4.4 cm forward — where the lidar and
+head actually sit**, torsional friction lands at 0.030 against the shipped
+0.02, trunk 20% heavier for the payload. A hard lesson is baked in here: the
+earlier base-only fit reached "everything sub-noise" while commanding 3x the
+real front foot lift. **A judge only constrains what it can see.**
 
 The honest caveat: fitted and validated on **one recording**. See Next steps.
 
@@ -40,10 +42,13 @@ The honest caveat: fitted and validated on **one recording**. See Next steps.
 | `vive_pose` | 253 Hz | ground-truth body pose (JSON: `p`, `q`, `t_host`) |
 | `policy_state` | once | which policy — check it matches the `.bin` |
 
-**There is no joint-space data.** Not commanded (`lowcmd.q` identically zero),
-not measured (`lowstate.q` calf angles are in their mechanical range in 0.0% of
-rows), not velocity or torque (identically zero). Comparison happens at
-body-pose level and cannot be moved to joint level without a new capture.
+**Joint-space data: commands yes, state no.** `policy/lowcmd` (~44 Hz) is the
+executor's own log of the joint targets it sent — the real policy's output,
+and the leg-space ground truth the `legs` objective scores against. What is
+still missing is joint *state*: `rt/lowcmd` is zeroed, `lowstate.q` calf
+angles are physical in 0.0% of rows, velocity and torque identically zero.
+(An earlier pass read only the zeroed `rt/lowcmd` and concluded no joint data
+existed at all.)
 
 This also means the simulator's initial pose cannot be restored from a
 recording — it always starts standing, so `--start 6` is needed to skip the
@@ -193,6 +198,23 @@ fitted config is the domain-randomization centre, and the noise-floor
 machinery doubles as a regression test that future sim changes stay matched.
 
 ---
+
+# Traps worth not repeating (leg edition)
+
+* **A judge only constrains what it can see.** Nine base statistics all
+  sub-noise, and the robot was visibly prancing — leg behavior was simply
+  outside the objective. When a match looks perfect and the eye disagrees,
+  believe the eye and find the missing statistic.
+* **Check every topic before declaring data absent.** `policy/lowcmd` sat in
+  the recording the whole time while FINDINGS said "no joint-space data" —
+  the check had read the zeroed `rt/lowcmd` and stopped.
+* **Compare command-to-command, not replay.** Open-loop replay of a closed
+  loop's commands falls over in seconds and proves nothing; FK on commanded
+  targets is stable and symmetric between sim and recording.
+* **Emergent gait style is not one knob.** Contact stiffness, torque limits,
+  com, leg mass, joint friction, dq smoothing — every single-parameter A/B on
+  front lift was null or backwards, then the joint search found a
+  configuration where five of those knobs *together* fix it.
 
 # Traps worth not repeating
 

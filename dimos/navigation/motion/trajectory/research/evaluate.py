@@ -111,19 +111,24 @@ def leg_stats(targets: np.ndarray) -> dict[str, float]:
     }
 
 
-# Best-known configuration: the point the multi-objective search collapsed to
-# on himloco01 (see FINDINGS). Every statistic at or below its noise floor.
+# Best-known configuration: the leg-aware search's min-max point on himloco01
+# (see FINDINGS) -- all four objective groups at or near the noise floor, and
+# commanded front foot lift 0.060 vs 0.065 real (the earlier base-only fit
+# high-stepped at 0.217). The com sits 4.4 cm forward, where the lidar and
+# head actually are.
 FITTED_PHYSICS = {
-    "armature": 0.01395,
-    "damping": 0.2381,
-    "frictionloss": 0.7372,
-    "trunk_mass_scale": 1.326,
-    "trunk_inertia_scale": 1.487,
-    "foot_friction": 0.5692,
-    "foot_friction_torsional": 0.003138,
+    "armature": 0.0069,
+    "damping": 0.1797,
+    "frictionloss": 0.03266,
+    "trunk_mass_scale": 1.2,
+    "trunk_inertia_scale": 1.316,
+    "foot_friction": 0.9013,
+    "foot_friction_torsional": 0.02983,
+    "trunk_com_x": 0.04366,
+    "leg_mass_scale": 0.7156,
 }
-FITTED_COMMAND_DELAY = 0.0231
-FITTED_ACTUATOR_TAU = 0.0289
+FITTED_COMMAND_DELAY = 0.0321
+FITTED_ACTUATOR_TAU = 0.02318
 
 
 def virtual_tracker(
