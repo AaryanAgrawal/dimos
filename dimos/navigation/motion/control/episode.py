@@ -127,6 +127,54 @@ def _path_arc(ref: RefereePath) -> float:
     return float(np.sum(np.linalg.norm(np.diff(xy, axis=0), axis=1)))
 
 
+def outline_indices(
+    xy: np.ndarray, yaws: np.ndarray, step: float = 0.35, yaw_step: float = 0.5
+) -> list[int]:
+    """Waypoints worth a footprint: every ``step`` of arc or ``yaw_step`` of
+    rotation (fans advance in yaw at zero displacement), plus the endpoint."""
+    if len(xy) == 0:
+        return []
+    picks = [0]
+    arc = 0.0
+    for i in range(1, len(xy)):
+        arc += float(np.linalg.norm(xy[i] - xy[i - 1]))
+        if arc >= step or abs(math.remainder(yaws[i] - yaws[picks[-1]], math.tau)) >= yaw_step:
+            picks.append(i)
+            arc = 0.0
+    if picks[-1] != len(xy) - 1:
+        picks.append(len(xy) - 1)
+    return picks
+
+
+PLAN_RGBA = (0.25, 0.55, 1.0, 0.22)
+
+
+def _draw_plan(viewer: object, ref: RefereePath, sc: Scenario) -> None:
+    """Expected body poses on the floor: one translucent footprint box per
+    outline waypoint, oriented by the plan's own yaw. Redrawn per (re)plan."""
+    scn = viewer.user_scn  # type: ignore[attr-defined]
+    xy = np.array([[p.position.x, p.position.y] for p in ref.poses]).reshape(-1, 2)
+    yaws = np.array([p.orientation.euler[2] for p in ref.poses])
+    e = sc.emb
+    scn.ngeom = 0
+    for i in outline_indices(xy, yaws):
+        if scn.ngeom >= scn.maxgeom:
+            break
+        yaw = float(yaws[i])
+        c, s = math.cos(yaw), math.sin(yaw)
+        g = scn.geoms[scn.ngeom]
+        mujoco.mjv_initGeom(  # type: ignore[attr-defined]
+            g,
+            mujoco.mjtGeom.mjGEOM_BOX,
+            np.array([e.length / 2.0, e.width / 2.0, 0.001]),
+            # body centre sits center_off along body x from the pose point
+            np.array([xy[i][0] + c * e.center_off, xy[i][1] + s * e.center_off, 0.003]),
+            np.array([c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0]),
+            np.array(PLAN_RGBA, dtype=np.float32),
+        )
+        scn.ngeom += 1
+
+
 def run_episode(
     sc: Scenario,
     controller: TrajectoryController,
@@ -222,6 +270,8 @@ def run_episode(
                     plans.append(ref)
                     nav_path = world.to_nav_path(ref, ts=t, frame_id=frame_id)
                     next_plan_t = t + replan_period
+                    if viewer is not None:
+                        _draw_plan(viewer, ref, sc)
                     if not plans[:-1] and _path_arc(ref) < STALL_ARC:
                         outcome = "refused"
                         break
