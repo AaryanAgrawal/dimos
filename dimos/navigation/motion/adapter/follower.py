@@ -43,6 +43,7 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.control.controller import (
     ControllerConfig,
     TrajectoryController,
@@ -50,6 +51,7 @@ from dimos.navigation.motion.control.controller import (
 )
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.control.tracks import TRACKS
+from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -114,7 +116,18 @@ class TrajectoryFollowerConfig(ModuleConfig):
     controller_config: ControllerConfig = Field(default_factory=ControllerConfig)
     control_frequency: float = 10.0
     goal_tolerance: float = 0.20  # planar distance that counts as arrival (m)
-    half_width: float = 0.155  # embodiment half-width for the clearance hint (go2)
+    # The clearance hint this module recomputes on the robot has to be the same
+    # quantity the planner stamped into the path, or the follower's governor is
+    # reading a different world than the one that was planned. The referee's
+    # control/world.py takes `emb.width / 2`, so this does too -- naming the
+    # EMBODIMENT rather than a number, so body dimensions live in exactly one
+    # place (planner/autoresearch/scenarios.py). Set half_width only to override.
+    embodiment: str = "go2"
+    half_width: float | None = None
+    # Seconds between "still not moving, and here is why" lines.
+    stall_report_s: float = 3.0
+    # A commanded speed at or under this is standing still, whatever the reason.
+    idle_speed: float = 0.02
 
 
 class TrajectoryFollower(Module):
@@ -140,9 +153,15 @@ class TrajectoryFollower(Module):
         self._clearance_key: tuple[int, int] | None = None
         self._latch = GoalLatch(self.config.goal_tolerance)
         self._track = TRACKS[self.config.track]
+        self._half_width = (
+            self.config.half_width
+            if self.config.half_width is not None
+            else EMBODIMENTS[self.config.embodiment].width / 2.0
+        )
         self._controller: TrajectoryController | None = None
         self._stop_event = Event()
         self._thread: Thread | None = None
+        self._stall = StallReporter("TrajectoryFollower", self.config.stall_report_s)
 
     @rpc
     def start(self) -> None:
@@ -195,7 +214,13 @@ class TrajectoryFollower(Module):
             started = time.perf_counter()
             with self._lock:
                 pose, path = self._pose, self._path
-            if pose is not None and path is not None:
+            # A follower with no pose or no plan is not "not moving", it is not
+            # RUNNING, and those want different fixes. `path` going None is also
+            # how stop_movement lands here, so it is named as such.
+            if self._stall.check(
+                {"odometry": pose is not None, "path (local plan)": path is not None}
+            ):
+                assert pose is not None and path is not None
                 self._step(pose, path)
             elapsed = time.perf_counter() - started
             self._stop_event.wait(max(0.0, period - elapsed))
@@ -210,9 +235,28 @@ class TrajectoryFollower(Module):
             return
         if self._latch.reached:
             self.nav_cmd_vel.publish(Twist())
+            self._stall.blocked("a new goal -- the last one is reached and latched")
             return
         tw = self._controller.update(pose, path, time.monotonic(), self._clearance_for(path))
         self.nav_cmd_vel.publish(tw)
+
+        # Standing still with a plan in hand is the ambiguous case, and the two
+        # causes want opposite fixes: a one-pose plan is the PLANNER refusing
+        # (look upstream -- map, clearance, goal), while a real plan the law
+        # answers with ~zero is the FOLLOWER's own governor or gait envelope.
+        speed = math.hypot(tw.linear.x, tw.linear.y)
+        if speed <= self.config.idle_speed and abs(tw.angular.z) <= self.config.idle_speed:
+            if len(path.poses) < 2:
+                self._stall.blocked(
+                    "the planner: it published a single-pose stub, i.e. no safe route"
+                )
+            else:
+                self._stall.blocked(
+                    f"nothing -- the law commands ~0 on a {len(path.poses)}-waypoint plan "
+                    f"(track={self.config.track}); suspect the speed governor or the gait envelope"
+                )
+        else:
+            self._stall.ok(f"driving: |v|={speed:.2f} m/s wz={tw.angular.z:+.2f} rad/s")
 
     def _clearance_for(self, path: Path) -> np.ndarray | None:
         if not self._track.annotate_clearance:
@@ -228,6 +272,6 @@ class TrajectoryFollower(Module):
         key = (id(path), id(cloud))
         if key != self._clearance_key:
             wp = np.array([[p.position.x, p.position.y] for p in path.poses]).reshape(-1, 2)
-            self._clearance = path_clearance(wp, cloud.points_f32(), self.config.half_width)
+            self._clearance = path_clearance(wp, cloud.points_f32(), self._half_width)
             self._clearance_key = key
         return self._clearance

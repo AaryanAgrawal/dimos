@@ -42,6 +42,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.control import world as world_bridge
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
@@ -111,6 +112,12 @@ class MotionPlannerConfig(ModuleConfig):
     # and a dropped link must not leave us replanning on a frozen world at
     # cruise speed — an old map is survivable, an unbounded one is not.
     max_map_age_s: float = 5.0
+    # Publish the plan's expected body poses for the viewer (0.0 = off). Drives
+    # adapter/viz.py's override too, so drawing and publishing cannot drift.
+    viz_publish_hz: float = 2.0
+    # Seconds between "still blocked, and here is what on" lines while an input
+    # the planner needs has never arrived or has gone away.
+    stall_report_s: float = 3.0
 
 
 class MotionPlanner(Module):
@@ -123,6 +130,7 @@ class MotionPlanner(Module):
     planner_path: In[Path]
 
     path: Out[Path]
+    plan_body: Out[Path]  # the same plan, subsampled, for the viewer's body boxes
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -136,6 +144,8 @@ class MotionPlanner(Module):
         self._emb = EMBODIMENTS["go2"]
         self._stop_event = Event()
         self._thread: Thread | None = None
+        self._stall = StallReporter("MotionPlanner", self.config.stall_report_s)
+        self._viz_at = 0.0
 
     @rpc
     def start(self) -> None:
@@ -187,6 +197,16 @@ class MotionPlanner(Module):
                 cloud, pose, global_xy = self._cloud, self._pose, self._global_xy
                 cloud_at = self._cloud_at
             age = None if cloud_at is None else time.monotonic() - cloud_at
+            # Why a tick did nothing, in the planner's own words. Silence here
+            # is the failure that looks like "the robot will not move" from the
+            # outside, and it is the one a log has to be able to answer.
+            self._stall.check(
+                {
+                    "local_map": cloud is not None,
+                    "odometry": pose is not None,
+                    "planner_path (global route/goal)": global_xy is not None,
+                }
+            )
             if pose is not None and age is not None and age > self.config.max_map_age_s:
                 self._hold(pose, age)
             elif cloud is not None and pose is not None and global_xy is not None:
@@ -216,7 +236,9 @@ class MotionPlanner(Module):
             position=Vector3(pose[0], pose[1], 0.0),
             orientation=Quaternion.from_euler(Vector3(0.0, 0.0, pose[2])),
         )
-        self.path.publish(Path(ts=ts, frame_id=self.config.world_frame, poses=[stub]))
+        held = Path(ts=ts, frame_id=self.config.world_frame, poses=[stub])
+        self.path.publish(held)
+        self._publish_viz(held)
 
     def _plan_once(
         self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
@@ -231,6 +253,18 @@ class MotionPlanner(Module):
         except Exception:
             logger.exception("planner failed; keeping the last published path")
             return
-        self.path.publish(
-            annotate(ref, ref_cloud, self._emb, ts=time.time(), frame_id=self.config.world_frame)
-        )
+        plan = annotate(ref, ref_cloud, self._emb, ts=time.time(), frame_id=self.config.world_frame)
+        self.path.publish(plan)
+        self._stall.ok(f"planning: {len(plan.poses)} waypoints")
+        self._publish_viz(plan)
+
+    def _publish_viz(self, plan: Path) -> None:
+        """Mirror the plan onto the viewer stream, at its own rate."""
+        hz = self.config.viz_publish_hz
+        if hz <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._viz_at < 1.0 / hz:
+            return
+        self._viz_at = now
+        self.plan_body.publish(plan)
