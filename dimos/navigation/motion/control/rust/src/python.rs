@@ -212,6 +212,17 @@ fn encode_precision(
     Ok(py.allow_threads(|| stamps::encode_precision(&rows, &clr, t0)))
 }
 
+/// The dialect's inverse leg: decoded speed ceilings back to the clearance
+/// that produced them. Exposed for parity against
+/// `profile.ceilings_to_clearance` -- on the robot the follower module calls
+/// the rust directly when it is on the hinted track with no cloud of its own.
+#[pyfunction]
+#[pyo3(signature = (ceilings))]
+fn ceilings_to_clearance(py: Python<'_>, ceilings: PyReadonlyArray1<'_, f64>) -> Vec<f64> {
+    let v: Vec<f64> = ceilings.as_array().iter().copied().collect();
+    py.allow_threads(|| stamps::ceilings_to_clearance(&v))
+}
+
 /// Per-waypoint room hint. `xy` is (N, 2) float64 waypoints, `points` the raw
 /// (M, 3) float32 cloud; the z-band filter happens inside. Exposed for parity
 /// against the python's `cKDTree` twins -- on the robot both modules call the
@@ -254,6 +265,7 @@ fn dimos_motion2_tc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(update_blind, m)?)?;
     m.add_function(wrap_pyfunction!(update_hinted_raw, m)?)?;
     m.add_function(wrap_pyfunction!(encode_precision, m)?)?;
+    m.add_function(wrap_pyfunction!(ceilings_to_clearance, m)?)?;
     m.add_class::<PyHintedLaw>()?;
     m.add("CMD_SLEW_PER_S", CMD_SLEW_PER_S)?;
     Ok(())

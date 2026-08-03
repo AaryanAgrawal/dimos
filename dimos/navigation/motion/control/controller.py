@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The controller seam: tf pose + Path in, body-frame Twist out.
+"""The controller seam: pose + Path in, body-frame Twist out.
 
 The protocol is the deployment seam — on the robot the same object consumes
-the live tf lookup of ``config.frame_id`` and the planner topic; here the
-episode runner feeds it the simulated equivalents. The laws themselves live
-in :mod:`dimos.navigation.motion.control.laws`, one module each, and a
-*track* names one through :mod:`dimos.navigation.motion.control.tracks` —
-nothing outside that map should name a law directly.
+the pose off the odometry message and the planner topic; here the episode
+runner feeds it the simulated equivalents. There is no tf lookup on either
+side. The laws themselves live in
+:mod:`dimos.navigation.motion.control.laws`, one module each, and a *track*
+names one through :mod:`dimos.navigation.motion.control.tracks` — nothing
+outside that map should name a law directly.
 """
 
 from __future__ import annotations
@@ -42,7 +43,6 @@ def angle_diff(a: float, b: float) -> float:
 
 
 class ControllerConfig(BaseConfig):
-    frame_id: str = "base_link"  # the tf frame the controller treats as itself
     lookahead: float = 0.35  # carrot distance along the path (m)
     max_speed: float = 0.5  # planar clamp (m/s)
     max_yaw_rate: float = 1.4  # rad/s
@@ -90,9 +90,8 @@ class ControllerConfig(BaseConfig):
     def law_params(self) -> tuple[float, ...]:
         """The numeric fields the rust laws take, in declaration order.
 
-        ``frame_id`` is a tf selector, not a law parameter, so it does not
-        travel; the gait calibration travels separately (:attr:`walk_params`)
-        because only one law reads it.
+        The gait calibration travels separately (:attr:`walk_params`) because
+        only one law reads it.
         """
         return (
             self.lookahead,

@@ -89,10 +89,12 @@ def test_yaw_rate_clamped() -> None:
     assert abs(tw.angular.z) <= 1.4 + 1e-9
 
 
-def test_config_frame_id_default() -> None:
-    assert ControllerConfig().frame_id == "base_link"
+def test_config_rejects_unknown_fields() -> None:
     with pytest.raises(Exception):
         ControllerConfig(nonexistent=1.0)  # extra=forbid
+    with pytest.raises(Exception):
+        # the controller never looked one up; the field claimed it did
+        ControllerConfig(frame_id="base_link")
 
 
 def test_governor_creeps_in_tight_room() -> None:

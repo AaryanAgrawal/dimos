@@ -24,8 +24,8 @@ use std::f64::consts::PI;
 
 use dimos_motion2_tc::geom::Params;
 use dimos_motion2_tc::stamps::{
-    decode_ceilings, encode_precision, governor_speed, FLOOR_CLEARANCE, MAX_SPEED, MAX_YAW_RATE,
-    MIN_SPEED, SPEED_CLEARANCE,
+    ceilings_to_clearance, decode_ceilings, encode_precision, governor_speed, FLOOR_CLEARANCE,
+    MAX_SPEED, MAX_YAW_RATE, MIN_SPEED, SPEED_CLEARANCE,
 };
 
 /// A straight run along +x at `step` metres per waypoint.
@@ -128,6 +128,45 @@ fn degenerate_paths_do_not_panic() {
     assert!(encode_precision(&[], &[], 0.0).is_empty());
     // a single pose is the planner's refusal stub: one stamp, no segments
     assert_eq!(encode_precision(&[[1.0, 2.0, 0.3]], &[0.1], 7.0), vec![7.0]);
+}
+
+#[test]
+fn ceilings_invert_the_governor_exactly() {
+    // the property the hinted-with-no-cloud fallback rests on: bending a
+    // decoded ceiling back into a clearance must land on a clearance the
+    // governor prices at that same ceiling
+    for &c in &[
+        f64::INFINITY,
+        SPEED_CLEARANCE,
+        0.2,
+        FLOOR_CLEARANCE,
+        0.0,
+        -1.0,
+    ] {
+        let v = governor_speed(c);
+        let back = ceilings_to_clearance(&[v])[0];
+        assert!(
+            (governor_speed(back) - v).abs() < 1e-12,
+            "clearance {c} -> {v} m/s -> {back} m re-prices at {}",
+            governor_speed(back)
+        );
+    }
+}
+
+#[test]
+fn ceilings_outside_the_band_saturate_at_its_ends() {
+    // the wire is free to hand over anything; the clip is what keeps the
+    // result inside the embodiment's own [floor, cruise] room band
+    assert_eq!(
+        ceilings_to_clearance(&[MIN_SPEED - 1.0])[0],
+        FLOOR_CLEARANCE
+    );
+    assert_eq!(
+        ceilings_to_clearance(&[MAX_SPEED + 1.0])[0],
+        SPEED_CLEARANCE
+    );
+    assert_eq!(ceilings_to_clearance(&[f64::INFINITY])[0], SPEED_CLEARANCE);
+    assert!(ceilings_to_clearance(&[]).is_empty());
 }
 
 #[test]

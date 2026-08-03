@@ -40,7 +40,12 @@ from dimos.navigation.motion.control.controller import (
 )
 from dimos.navigation.motion.control.laws import blind, hinted, seed
 from dimos.navigation.motion.control.laws.seed import make_rust
-from dimos.navigation.motion.control.profile import encode_precision
+from dimos.navigation.motion.control.profile import (
+    MAX_SPEED,
+    MIN_SPEED,
+    ceilings_to_clearance,
+    encode_precision,
+)
 
 TOL = 1e-9
 CASES = 240
@@ -351,6 +356,33 @@ def test_encode_precision_matches_python() -> None:
             assert abs(x - y) <= TOL, f"waypoint {k}: python {x!r} vs rust {y!r}"
             worst = max(worst, abs(x - y))
     assert worst == 0.0, f"unexpected non-zero divergence {worst:.3e}"
+
+
+def test_ceilings_to_clearance_matches_python() -> None:
+    """The dialect's inverse leg, the half the follower module runs.
+
+    A hinted follower with no cloud of its own has no clearance array, and the
+    hinted law takes no stamps -- so the stamps are decoded to ceilings and
+    bent back into the clearance that produced them. Both legs are wire
+    constants, so a divergence here would silently re-price every waypoint of
+    a plan the robot is already following.
+    """
+    rs = load_extension()
+    rng = np.random.default_rng(20260803)
+    # in band, either side of both knees, and the values the wire can hand over
+    # that the encoder never produces
+    ceilings = np.concatenate(
+        [
+            rng.uniform(0.0, 1.0, 200),
+            np.array([MIN_SPEED, MAX_SPEED, 0.0, -1.0, 1e9, np.inf]),
+        ]
+    )
+    want = ceilings_to_clearance(ceilings)
+    got = np.asarray(rs.ceilings_to_clearance(np.ascontiguousarray(ceilings)))
+    assert got.shape == want.shape
+    for k, (a, b) in enumerate(zip(want, got, strict=True)):
+        assert a == b, f"ceiling {ceilings[k]!r}: python {a!r} vs rust {b!r}"
+    assert not len(rs.ceilings_to_clearance(np.zeros(0)))
 
 
 def test_path_clearance_matches_scipy() -> None:
