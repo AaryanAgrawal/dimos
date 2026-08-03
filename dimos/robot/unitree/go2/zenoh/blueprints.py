@@ -23,7 +23,10 @@ so a failure can be bisected by dropping down a level:
 - ``go2-zenoh-raycaster`` — adds :class:`RayTracingVoxelMap`.
 - ``go2-zenoh-nav`` — the full stack: planner, goal relay and path follower.
 - ``go2-zenoh-motion`` — the motion stack: the evolved autoresearch planner and
-  the pursuit trajectory follower over the raycaster's local map.
+  the trajectory follower over the raycaster's local map, on the ``hinted`` track.
+- ``go2-zenoh-motion-blind`` — the same stack on the ``blind`` track: the follower
+  is handed no clearance array and reads required precision off the path stamps.
+  Same graph, so an A/B against ``go2-zenoh-motion`` isolates the law.
 """
 
 import math
@@ -214,12 +217,47 @@ _mls_planner_motion = MLSPlannerNative.blueprint(
 # replans to a point ~5 m of arc along it over the raycaster's local map, and the pursuit
 # follower tracks the local plan with the clearance-governed speed. Planner and follower
 # read the leveled body odometry their world frame ("odom") assumes.
-go2_zenoh_motion = autoconnect(
+#
+# The follower's TRACK picks its law and what it is handed (control/tracks.py). Both are
+# wired so the two can be A/B'd on the robot; the graph is otherwise identical, so a
+# difference between them is the law and nothing else.
+#
+# SPEEDS ARE SIM-CALIBRATED. Each law's envelope was measured against the freewalk_mcf
+# policy in the matched MuJoCo env, NOT against the gait the robot actually runs:
+# `hinted` asks up to 0.95 m/s commanded, and `blind` feeds its twist through a gait-slip
+# inverse keyed to that same blob (~23% over-speed on a different gait). Re-measure with
+# `python -m dimos.navigation.motion.control.probe_walk_slip` against the deployed gait
+# and re-key before trusting either at speed. Until then, dial the ceiling down here
+# rather than in the law -- e.g. controller_config=ControllerConfig(max_speed=0.5).
+#
+# Everything but the follower is shared, so it composes as a sub-blueprint the way
+# go2_zenoh_raycaster does above and the two tracks differ by one argument. Private
+# (leading underscore) so the generated registry does not offer a headless stack as a
+# runnable blueprint -- it has no follower and would plan without ever moving.
+_go2_zenoh_motion_base = autoconnect(
     go2_zenoh_raycaster,
     OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
     GoalRelay.blueprint(),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
     MotionPlanner.blueprint().remappings([(MotionPlanner, "odometry", "body_odometry")]),
-    TrajectoryFollower.blueprint().remappings([(TrajectoryFollower, "odometry", "body_odometry")]),
     MovementManager.blueprint(),
+)
+
+# hinted: the follower is handed the per-waypoint clearance array recomputed from the
+# raycaster's local map, which on this stack is live -- so this is the honest default.
+go2_zenoh_motion = autoconnect(
+    _go2_zenoh_motion_base,
+    TrajectoryFollower.blueprint(track="hinted").remappings(
+        [(TrajectoryFollower, "odometry", "body_odometry")]
+    ),
+).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
+
+# blind: the same graph with the clearance hint withheld. The law recovers the required
+# precision from the path's own timestamps instead (control/profile.py), which is the
+# regime that survives when the local map is stale, empty, or not the follower's to read.
+go2_zenoh_motion_blind = autoconnect(
+    _go2_zenoh_motion_base,
+    TrajectoryFollower.blueprint(track="blind").remappings(
+        [(TrajectoryFollower, "odometry", "body_odometry")]
+    ),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
