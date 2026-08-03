@@ -12,17 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod adjacency;
-mod dijkstra;
-pub mod edges;
-pub mod mls_planner;
-pub mod module;
-mod nodes;
-pub mod odom_body_frame;
-mod planner;
-mod smoother;
-mod surfaces;
-pub mod voxel;
+use dimos_mls_planner::odom_body_frame::OdomBodyFrame;
 
-#[cfg(feature = "python")]
-mod python;
+#[tokio::main]
+async fn main() {
+    dimos_module::run_with_transport::<OdomBodyFrame>().await;
+}

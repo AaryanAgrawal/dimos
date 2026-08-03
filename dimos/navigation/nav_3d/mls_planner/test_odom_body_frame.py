@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
+import pytest
+
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -58,3 +62,21 @@ def test_relabels_child_frame_and_passes_position_through():
     out = _level([0.0, 0.0, 0.0, 1.0], Quaternion(0.0, 0.0, 0.0, 1.0))
     assert out.child_frame_id == "base_link"
     assert out.position.to_tuple() == (1.0, 2.0, 3.0)
+
+
+# The Go2's real mount, MID360_MOUNT_RPY_DEG = (-60, 0, -90), and a body rolled,
+# pitched and yawed so no term of the quaternion product drops out. The rust port
+# is pinned to these same numbers in odom_body_frame.rs; keeping the pair in sync
+# is what makes its 1e-12 parity assertion mean anything.
+_MOUNT = (-0.35355339059327373, 0.3535533905932737, -0.6123724356957945, 0.6123724356957946)
+_SENSOR = (-0.5450515607112322, 0.13515397172907628, -0.39632409041884364, 0.7263466221066786)
+_LEVELED = (-0.13432939990042636, 0.019615081741061635, 0.3470173839448213, 0.9279815710081614)
+
+
+def test_go2_mount_vectors_the_rust_port_is_pinned_to():
+    assert Quaternion.from_euler(
+        Vector3(*(math.radians(d) for d in (-60.0, 0.0, -90.0)))
+    ).to_tuple() == pytest.approx(_MOUNT, abs=1e-12)
+
+    out = _level(_MOUNT, Quaternion(*_SENSOR))
+    assert out.orientation.to_tuple() == pytest.approx(_LEVELED, abs=1e-12)

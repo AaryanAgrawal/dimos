@@ -21,6 +21,7 @@ from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
+from dimos.core.native_module import NativeModule, NativeModuleConfig
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -65,3 +66,26 @@ class OdomBodyFrame(Module):
                 twist=msg.twist,
             )
         )
+
+
+class OdomBodyFrameNativeConfig(NativeModuleConfig):
+    cwd: str | None = "rust"
+    executable: str = "target/release/odom_body_frame"
+    build_command: str | None = "cargo build --release"
+    stdin_config: bool = True
+
+    # base_link from sensor mount rotation, xyzw. Identity says the sensor is
+    # already level, which is true of no robot that tilts its lidar: the Go2's
+    # value is _mount_rotation() in the go2 zenoh blueprints, and a baked host
+    # has to be handed it, since --emit-config emits this default instead.
+    mount_rotation: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
+    body_frame_id: str = "base_link"
+
+
+class OdomBodyFrameNative(NativeModule):
+    """Rust-backed odometry leveling. Needs no tf, only the mount quaternion."""
+
+    config: OdomBodyFrameNativeConfig
+
+    odometry: In[Odometry]
+    body_odometry: Out[Odometry]
