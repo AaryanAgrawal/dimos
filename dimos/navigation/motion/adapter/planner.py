@@ -107,6 +107,10 @@ class MotionPlannerConfig(ModuleConfig):
     # z-band (0.05..0.45 above the floor) lands where the floor actually is
     # when the map's z origin is not ground level.
     cloud_z_offset: float = 0.0
+    # Hold once the local map is this old. The mapper can live across a link,
+    # and a dropped link must not leave us replanning on a frozen world at
+    # cruise speed — an old map is survivable, an unbounded one is not.
+    max_map_age_s: float = 5.0
 
 
 class MotionPlanner(Module):
@@ -124,6 +128,8 @@ class MotionPlanner(Module):
         super().__init__(**kwargs)
         self._lock = RLock()
         self._cloud: PointCloud2 | None = None
+        self._cloud_at: float | None = None
+        self._stale = False
         self._pose: tuple[float, float, float] | None = None
         self._global_xy: np.ndarray | None = None
         self._episode: PlannerEpisode | None = None
@@ -154,6 +160,9 @@ class MotionPlanner(Module):
     def _on_local_map(self, msg: PointCloud2) -> None:
         with self._lock:
             self._cloud = msg
+            # arrival, not msg.ts: the mapper's clock may not be ours, and
+            # what this guards is "how long since the mapper was heard from"
+            self._cloud_at = time.monotonic()
 
     def _on_odometry(self, msg: Odometry) -> None:
         with self._lock:
@@ -176,11 +185,38 @@ class MotionPlanner(Module):
             started = time.perf_counter()
             with self._lock:
                 cloud, pose, global_xy = self._cloud, self._pose, self._global_xy
-            if cloud is not None and pose is not None and global_xy is not None:
+                cloud_at = self._cloud_at
+            age = None if cloud_at is None else time.monotonic() - cloud_at
+            if pose is not None and age is not None and age > self.config.max_map_age_s:
+                self._hold(pose, age)
+            elif cloud is not None and pose is not None and global_xy is not None:
+                if self._stale:
+                    self._stale = False
+                    logger.info("local_map is live again, resuming planning")
                 goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
                 self._plan_once(cloud, pose, goal)
             elapsed = time.perf_counter() - started
             self._stop_event.wait(max(0.0, period - elapsed))
+
+    def _hold(self, pose: tuple[float, float, float], age: float) -> None:
+        """Refuse the way the planner does — a single-pose stub reads as "stop"."""
+        # edge-triggered: the loop runs at replan_hz, and a dead link would
+        # otherwise warn five times a second for as long as it stays dead
+        if not self._stale:
+            self._stale = True
+            logger.warning(
+                "local_map is stale, holding",
+                age_s=round(age, 1),
+                max_map_age_s=self.config.max_map_age_s,
+            )
+        ts = time.time()
+        stub = PoseStamped(
+            ts=ts,
+            frame_id=self.config.world_frame,
+            position=Vector3(pose[0], pose[1], 0.0),
+            orientation=Quaternion.from_euler(Vector3(0.0, 0.0, pose[2])),
+        )
+        self.path.publish(Path(ts=ts, frame_id=self.config.world_frame, poses=[stub]))
 
     def _plan_once(
         self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
