@@ -40,6 +40,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.motion.adapter.follower import TrajectoryFollower
 from dimos.navigation.motion.adapter.planner import MotionPlanner
+from dimos.navigation.motion.adapter.viz import motion_visual_override
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
@@ -52,6 +53,11 @@ voxel_size = 0.08
 # Raise above 0 (2.0 works) to draw what the planner searched over: surface, nodes and
 # cost-coloured edges. Drives both its publishing and the rerun overrides.
 planner_viz_hz = 2.0
+# Draw the local plan's expected BODY POSES as oriented boxes, coloured by the
+# required precision the planner stamped into the path (green = room, amber =
+# inside the governor's ramp, red = at the embodiment's floor). 0.0 = off.
+# Drives MotionPlanner's publishing and the rerun override together.
+motion_viz_hz = 2.0
 
 # Feeds both the static tf GO2Zenoh publishes and the rotation that levels its odometry —
 # they must agree or nav steers off-heading. Verified against Point-LIO's own attitude.
@@ -134,6 +140,9 @@ def _rerun_config(visual_override: dict[str, Any] | None = None) -> dict[str, An
             "world/global_map": _render_map,
             "world/path": _render_path,
             **planner_visual_override(planner_viz_hz, voxel_size=voxel_size, wall_clearance_m=0.1),
+            # keyed by entity path, so it is inert on the stacks that have no
+            # MotionPlanner to publish world/plan_body -- same as the MLS one
+            **motion_visual_override(motion_viz_hz),
             **(visual_override or {}),
         },
     }
@@ -202,11 +211,11 @@ go2_zenoh_nav = autoconnect(
 _mls_planner_motion = MLSPlannerNative.blueprint(
     world_frame="odom",
     voxel_size=voxel_size,
-    robot_height=0.3,
-    surface_closing_radius=0.3,
+    robot_height=0.4,
+    surface_closing_radius=0.4,
     wall_clearance_m=0.05,
-    wall_buffer_m=0.5,
-    wall_buffer_weight=30.0,
+    wall_buffer_m=0.2,
+    wall_buffer_weight=20.0,
     step_threshold_m=0.16,
     step_penalty_weight=4.0,
     viz_publish_hz=planner_viz_hz,
@@ -239,7 +248,9 @@ _go2_zenoh_motion_base = autoconnect(
     OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
     GoalRelay.blueprint(),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
-    MotionPlanner.blueprint().remappings([(MotionPlanner, "odometry", "body_odometry")]),
+    MotionPlanner.blueprint(viz_publish_hz=motion_viz_hz).remappings(
+        [(MotionPlanner, "odometry", "body_odometry")]
+    ),
     MovementManager.blueprint(),
 )
 
