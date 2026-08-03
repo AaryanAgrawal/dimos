@@ -50,7 +50,70 @@ carrot along it.
 Notably this costs no extra bandwidth over the current cut: MLS consumes
 `local_map` too (its `global_map` is remapped off), so the cloud crosses the
 link either way — inbound now, outbound then. The blocker is purely whether
-the robot's SBC can afford the raycaster. **That measurement is in flight.**
+the robot's SBC can afford the raycaster. **It can, for short missions — see
+below.**
+
+## How much slower is the robot? (measured 2026-08-03)
+
+The Go2 board is a 7-core Cortex-A55 at 1.42 GHz (1.8 GHz max), Ubuntu 20.04,
+glibc 2.31, no rust toolchain. The laptop is a 20-thread Ryzen AI 9 365.
+
+**A wall-time ratio between the two machines is not a usable measure.** The
+raycaster's `update_map` is rayon-parallel, so wall time is a function of how
+many cores the pool happened to get — 8.3 on the laptop, 2.9 on the robot —
+and the ratio moves with the machine's width, not its speed. Two numbers are
+portable and worth remembering:
+
+| | laptop | robot | factor |
+|---|---|---|---|
+| single-thread CPU-s per 310 s of lidar | 100.8 | 310.8 | **3.08x** |
+| single-thread per-frame p50 / p95 / p99 (ms) | 28.9 / 64.7 / 87.3 | 99.7 / 187.7 / 237.7 | 3.4x / 2.9x / 2.7x |
+
+**Rule of thumb: one Go2 core ≈ one third of a laptop core on this workload.**
+Use the single-thread CPU-time ratio when sizing anything else for the robot;
+use per-frame p99 when the question is whether a loop closes on time.
+
+Do not use the multi-threaded ratio (fps 112.7 vs 21.6, ≈5.2x). Rayon's spin
+overhead more than doubles the CPU-seconds the job costs when the pool is
+wide — the laptop burned 227.8 CPU-s to do the same work it does in 100.8
+CPU-s on one thread — so that 5.2x is a statement about core counts, not speed.
+
+### What the raycaster actually costs on the robot
+
+Replaying `data/mid360_athens_stairs.db` (3093 clouds at 9.99 Hz, ~4.6k
+points/cloud, 310 s) through the real `RayTracingVoxelMap` at wall-clock speed,
+with the `go2_zenoh_raycaster` config (`voxel_size=0.08`, `emit_every=10`,
+`global_emit_every=100`, `support_min=4`):
+
+| | laptop | robot (rayon=7) | robot (rayon=2) |
+|---|---|---|---|
+| clouds processed | 99.9% | 97.0% | 91.8% |
+| sustained rate | 9.98 Hz | 9.69 Hz | 9.17 Hz |
+| cores consumed | 0.83 | 1.46 | 1.02 |
+| peak RSS | 305 MB | 304 MB | 304 MB |
+
+Robot idle baseline at the time: **2.80 of 7 cores busy, 4.20 free** (30 s
+`/proc/stat` sample), with the go2web bridge, `basic_service`, `mcf_main`,
+`dimos-pointlio`, `videohub` and friends running. So the raycaster fits — it
+adds ~1.5 cores to a machine with ~4.2 free — but three things bound the claim:
+
+- **The tail exceeds the frame budget.** p99 is 140 ms against a 100 ms
+  budget at 10 Hz. Nothing overflows the 128-deep input queue, but the module
+  is one `tokio::select!` loop over both inputs, so under load odometry gets
+  consumed behind lidar, drifts past the 0.1 s `POSE_MATCH_TOLERANCE_S`, and
+  the cloud is dropped for want of a pose. That is where the missing 3% (and
+  8% at rayon=2) goes — not to queue overflow.
+- **Cost grows with the map, without bound.** Single-threaded per-frame mean
+  went 73 ms → 161 ms over the 5-minute recording as the map reached 366k
+  voxels; `emit_points` walks every voxel on each emit. A 5-minute run fits.
+  A 20-minute one probably does not, at this `voxel_size`.
+- **Throttling rayon does not pay.** rayon=2 saves 0.44 cores but drops 8% of
+  clouds. If the raycaster moves to the robot, give it the full pool.
+
+Verdict: **option C is affordable for short missions and needs a bound on map
+growth before it is affordable for long ones.** Alongside a 5 Hz planner and a
+10 Hz controller the projected total is ~5.3 of 7 cores — real but thin
+headroom, and the growth curve is what will break first.
 
 ## Consequences we have to handle
 
@@ -220,8 +283,10 @@ something starting at boot.
 
 ## Open questions
 
-- **Can the robot host the raycaster?** Measurement in flight. Decides whether
-  we can reach the end state above.
+- ~~**Can the robot host the raycaster?**~~ Measured 2026-08-03: yes at 1.46
+  cores and 97% of clouds, for a 5-minute map. See "How much slower is the
+  robot?" above. What is still open is **bounding map growth** — per-frame cost
+  doubled over 5 minutes and nothing caps it.
 - **Plan-to-plan discontinuity.** Once the follower ticks steadily off a local
   path, what is left to twitch is the 5 Hz replan snapping the path between
   cycles. Does the battery score path-switch discontinuity across replans? If
