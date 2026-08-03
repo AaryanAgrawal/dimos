@@ -29,6 +29,91 @@ use crate::geom::Params;
 /// them.
 pub const FAN_EPS: f64 = 1e-6;
 
+/// The governor curve the ENCODER speaks, mirroring `profile.py`'s module
+/// constants.
+///
+/// Deliberately not `Params`. Decoding takes the consumer's own band, so a
+/// controller recovers the ceiling its own governor would have produced; but
+/// encoding is the producer's side of a WIRE contract, and if it moved with
+/// whatever config the planner process happened to hold, two robots with
+/// different controller tuning would stamp the same path differently. The
+/// python keeps these as module constants for the same reason, and notes that
+/// they are held in step with `AvoidanceConfig` and `ControllerConfig` by
+/// hand.
+pub const MAX_SPEED: f64 = 0.5;
+pub const MIN_SPEED: f64 = 0.2;
+pub const SPEED_CLEARANCE: f64 = 0.35;
+pub const FLOOR_CLEARANCE: f64 = 0.05;
+/// Prices fan segments, whose dt is a yaw span rather than a distance.
+pub const MAX_YAW_RATE: f64 = 1.4;
+
+/// Clearance (m) -> speed ceiling (m/s): creep at the floor, cruise with room.
+///
+/// A port of `profile.governor_speed`. Infinite clearance is expected and
+/// meaningful -- an empty z-band means nothing can touch the body, so the
+/// fraction saturates and the waypoint gets cruise.
+// `max` then `min` rather than `clamp`, which is what clippy wants here:
+// f64::clamp PANICS when handed a NaN. No caller can produce one (clearance is
+// a distance), but a panic in the planner tick is a far worse failure than the
+// creep this degrades to, and the encoder runs on whatever the map hands it.
+#[allow(clippy::manual_clamp)]
+pub fn governor_speed(clearance: f64) -> f64 {
+    let frac = (clearance - FLOOR_CLEARANCE) / (SPEED_CLEARANCE - FLOOR_CLEARANCE);
+    MIN_SPEED + (MAX_SPEED - MIN_SPEED) * frac.max(0.0).min(1.0)
+}
+
+/// Stamp a path with its precision profile: the timestamps, in order.
+///
+/// A port of `profile.encode_precision`, which states the dialect:
+/// `ts[i] - ts[i-1] = segment length / governor speed`, the governor evaluated
+/// at the TIGHTER of the segment's two endpoints. `decode_ceilings` above is
+/// the exact inverse.
+///
+/// Returns the stamps rather than mutating a path, because this crate has no
+/// message types -- the adapter writes them onto the poses. `clearance` of the
+/// wrong length is ignored and every segment gets cruise, matching the python's
+/// `if len(clearance) == n` guard: a planner that could not compute room still
+/// produces a well-formed path, it just carries no precision hint.
+///
+/// Fan segments (yaw with no displacement) are priced by yaw span at
+/// `MAX_YAW_RATE` instead, which is why the decoder has to skip them -- their
+/// dt is not a distance over a speed and reading one as such would invent a
+/// ceiling from a rotation.
+pub fn encode_precision(path: &[[f64; 3]], clearance: &[f64], t0: f64) -> Vec<f64> {
+    let n = path.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let use_clearance = clearance.len() == n;
+    let speed = |k: usize| {
+        if use_clearance {
+            governor_speed(clearance[k])
+        } else {
+            MAX_SPEED
+        }
+    };
+    let mut ts = vec![t0; n];
+    let mut t = t0;
+    for k in 1..n {
+        let (dx, dy) = (path[k][0] - path[k - 1][0], path[k][1] - path[k - 1][1]);
+        let ds = (dx * dx + dy * dy).sqrt();
+        if ds < FAN_EPS {
+            // `np.remainder` (floor-mod), NOT the IEEE remainder the laws use
+            // for angle_diff -- this mirrors the python statement exactly. The
+            // two disagree only at +/-pi, and the abs() below makes even that
+            // agree, but the form is kept so the port reads against its spec.
+            let dyaw = path[k][2] - path[k - 1][2];
+            let wrapped = (dyaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI;
+            t += wrapped.abs() / MAX_YAW_RATE;
+        } else {
+            t += ds / speed(k - 1).min(speed(k));
+        }
+        ts[k] = t;
+    }
+    ts
+}
+
 /// Per-waypoint speed ceiling (m/s) recovered from the stamps, or `None` when
 /// the producer does not speak the dialect.
 ///

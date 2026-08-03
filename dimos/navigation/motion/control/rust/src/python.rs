@@ -25,6 +25,7 @@ use crate::geom::Params;
 use crate::laws::blind::{update as blind_impl, BlindParams};
 use crate::laws::hinted::{update as hinted_impl, HintedParams, Law as HintedLaw, CMD_SLEW_PER_S};
 use crate::laws::seed::update as seed_impl;
+use crate::stamps;
 
 /// The numeric `ControllerConfig` fields, in declaration order.
 type BaseParams = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
@@ -191,11 +192,31 @@ fn update_hinted_raw(
     Ok(py.allow_threads(|| hinted_impl(pose, &rows, clr.as_deref(), &cfg)))
 }
 
+/// The planner's side of the stamp dialect: per-waypoint timestamps carrying
+/// the required-precision profile. Exposed for parity against
+/// `profile.encode_precision` -- on the robot the planner module calls the
+/// rust directly, with no python in the loop.
+#[pyfunction]
+#[pyo3(signature = (path, clearance, t0))]
+fn encode_precision(
+    py: Python<'_>,
+    path: PyReadonlyArray2<'_, f64>,
+    clearance: Option<PyReadonlyArray1<'_, f64>>,
+    t0: f64,
+) -> PyResult<Vec<f64>> {
+    let rows = rows_of(&path)?;
+    // no clearance and a wrong-length clearance are the same case to the
+    // encoder, so the empty vec stands in for both
+    let clr = vec_of(clearance.as_ref()).unwrap_or_default();
+    Ok(py.allow_threads(|| stamps::encode_precision(&rows, &clr, t0)))
+}
+
 #[pymodule]
 fn dimos_motion2_tc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(update_seed, m)?)?;
     m.add_function(wrap_pyfunction!(update_blind, m)?)?;
     m.add_function(wrap_pyfunction!(update_hinted_raw, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_precision, m)?)?;
     m.add_class::<PyHintedLaw>()?;
     m.add("CMD_SLEW_PER_S", CMD_SLEW_PER_S)?;
     Ok(())

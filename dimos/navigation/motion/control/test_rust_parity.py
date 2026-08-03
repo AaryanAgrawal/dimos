@@ -325,3 +325,28 @@ def test_reset_clears_every_tick_of_history(law: str) -> None:
         a = fresh.update(pose, path, 0.02, clearance)
         b = used.update(pose, path, 0.02, clearance)
         assert (a.linear.x, a.linear.y, a.angular.z) == (b.linear.x, b.linear.y, b.angular.z)
+
+
+def test_encode_precision_matches_python() -> None:
+    """The dialect's producer side, the half the planner module runs.
+
+    Same sweep as the laws, because the encoder sees the same paths: fan
+    clusters price by yaw, degenerate paths must not raise, and a
+    wrong-length annotation has to be ignored identically on both sides or a
+    stamped path would decode to a speed the planner never intended.
+    """
+    rs = load_extension()
+    worst = 0.0
+    for case in _cases():  # indexed, not unpacked: `_pose` is taken by the helper
+        path, clearance = case[2], case[3]
+        clr = np.asarray([] if clearance is None else clearance, dtype=np.float64)
+        # a t0 well off zero: only the deltas are the dialect, so an offset
+        # that cancels in the diff would hide a divergence in the base stamp
+        t0 = 1754212345.75
+        want = [p.ts for p in encode_precision(path, clr, t0=t0).poses]
+        got = rs.encode_precision(path_xy_yaw(path), clr if len(clr) else None, t0)
+        assert len(got) == len(want)
+        for k, (x, y) in enumerate(zip(want, got, strict=True)):
+            assert abs(x - y) <= TOL, f"waypoint {k}: python {x!r} vs rust {y!r}"
+            worst = max(worst, abs(x - y))
+    assert worst == 0.0, f"unexpected non-zero divergence {worst:.3e}"
