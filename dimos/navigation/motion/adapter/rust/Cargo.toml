@@ -1,0 +1,56 @@
+[package]
+name = "dimos-motion-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Transport shell for the motion2 planner and trajectory controller on the robot"
+license = "Apache-2.0"
+
+[lib]
+name = "dimos_motion_adapter"
+path = "src/lib.rs"
+# rlib only: this crate has no pyo3 surface. The algorithms it wraps are
+# already exposed to python by their own crates, and the two modules here reach
+# python through their `NativeModule` wrappers over stdin, not through an
+# extension module. So there is nothing for a cdylib to hold.
+crate-type = ["rlib"]
+
+[[bin]]
+name = "motion_planner"
+path = "src/bin/motion_planner.rs"
+
+# Registry entries read by `dimos bake` (graph + codegen) and cross-checked at
+# compile time by #[module(name = ...)]. The registry is keyed by module id, not
+# by crate, so this manifest grows one table per module it carries.
+#
+# threads = 2: the worker calls block_in_place around `plan()`, so a
+# current_thread runtime inside a baked host would stall the dispatch loop.
+[package.metadata.dimos.module.motion_planner]
+path = "dimos_motion_adapter::planner::MotionPlanner"
+python = "dimos.navigation.motion.adapter.planner_native:MotionPlannerNative"
+threads = 2
+
+[package.metadata.dimos.module.motion_planner.inputs]
+local_map = "sensor_msgs.PointCloud2"
+odometry = "nav_msgs.Odometry"
+planner_path = "nav_msgs.Path"
+
+[package.metadata.dimos.module.motion_planner.outputs]
+path = "nav_msgs.Path"
+plan_body = "nav_msgs.Path"
+
+[dependencies]
+dimos-module = { path = "../../../../../native/rust/dimos-module" }
+# The two pure crates, with their python feature off: a baked host is linked
+# statically and must not drag libpython symbols in through a transitive pyo3.
+dimos-motion2-target = { path = "../../planner/autoresearch/rust", default-features = false }
+dimos-motion2-tc = { path = "../../control/rust", default-features = false }
+lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+validator = { version = "0.20", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
