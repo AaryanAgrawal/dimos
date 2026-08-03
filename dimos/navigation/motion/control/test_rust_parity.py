@@ -32,6 +32,7 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
+from dimos.navigation.motion.adapter.follower import path_clearance as follower_clearance
 from dimos.navigation.motion.control.controller import (
     ControllerConfig,
     load_extension,
@@ -350,3 +351,32 @@ def test_encode_precision_matches_python() -> None:
             assert abs(x - y) <= TOL, f"waypoint {k}: python {x!r} vs rust {y!r}"
             worst = max(worst, abs(x - y))
     assert worst == 0.0, f"unexpected non-zero divergence {worst:.3e}"
+
+
+def test_path_clearance_matches_scipy() -> None:
+    """The room hint, against the cKDTree the python uses.
+
+    Only the DISTANCE crosses this boundary, never which point produced it,
+    so the rust is free to use a grid where the python uses a KD-tree: an
+    exact nearest-neighbour distance is unique even when the nearest point is
+    not. Agreement here is therefore exact, not approximate.
+    """
+    rs = load_extension()
+    rng = np.random.default_rng(20260803)
+    for case in range(60):
+        # spreads either side of the rust grid's cell size, so both the
+        # first-ring hit and the long ring walk are covered
+        spread = (0.05, 0.5, 5.0, 40.0)[case % 4]
+        pts = rng.uniform(-spread, spread, size=(1 + case * 7, 3)).astype(np.float32)
+        # z straddles both band edges, so the slice filter is under test too
+        pts[:, 2] = rng.uniform(-0.2, 0.7, size=len(pts)).astype(np.float32)
+        xy = rng.uniform(-spread, spread, size=(12, 2))
+
+        want = follower_clearance(xy, pts, 0.25)
+        got = np.asarray(rs.path_clearance(np.ascontiguousarray(xy), pts, 0.25))
+        assert got.shape == want.shape
+        for k, (a, b) in enumerate(zip(want, got, strict=True)):
+            # equality, not a difference: infinite room is a real value here
+            # (an empty band means nothing can touch the body) and inf - inf
+            # is nan, which would pass a tolerance check by accident
+            assert a == b, f"case {case} waypoint {k}: python {a!r} vs rust {b!r}"

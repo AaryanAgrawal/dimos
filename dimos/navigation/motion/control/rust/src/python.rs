@@ -21,6 +21,7 @@ use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::clearance;
 use crate::geom::Params;
 use crate::laws::blind::{update as blind_impl, BlindParams};
 use crate::laws::hinted::{update as hinted_impl, HintedParams, Law as HintedLaw, CMD_SLEW_PER_S};
@@ -211,8 +212,44 @@ fn encode_precision(
     Ok(py.allow_threads(|| stamps::encode_precision(&rows, &clr, t0)))
 }
 
+/// Per-waypoint room hint. `xy` is (N, 2) float64 waypoints, `points` the raw
+/// (M, 3) float32 cloud; the z-band filter happens inside. Exposed for parity
+/// against the python's `cKDTree` twins -- on the robot both modules call the
+/// rust directly.
+#[pyfunction]
+#[pyo3(signature = (xy, points, half_width))]
+fn path_clearance(
+    py: Python<'_>,
+    xy: PyReadonlyArray2<'_, f64>,
+    points: PyReadonlyArray2<'_, f32>,
+    half_width: f64,
+) -> PyResult<Vec<f64>> {
+    if xy.shape()[1] != 2 {
+        return Err(PyValueError::new_err(format!(
+            "xy must be (N, 2) float64, got shape {:?}",
+            xy.shape()
+        )));
+    }
+    if points.shape()[1] != 3 {
+        return Err(PyValueError::new_err(format!(
+            "points must be (M, 3) float32, got shape {:?}",
+            points.shape()
+        )));
+    }
+    let wv = xy.as_array();
+    let waypoints: Vec<[f64; 2]> = (0..wv.shape()[0])
+        .map(|k| [wv[[k, 0]], wv[[k, 1]]])
+        .collect();
+    let pv = points.as_array();
+    let cloud: Vec<[f32; 3]> = (0..pv.shape()[0])
+        .map(|k| [pv[[k, 0]], pv[[k, 1]], pv[[k, 2]]])
+        .collect();
+    Ok(py.allow_threads(|| clearance::path_clearance(&waypoints, &cloud, half_width)))
+}
+
 #[pymodule]
 fn dimos_motion2_tc(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(path_clearance, m)?)?;
     m.add_function(wrap_pyfunction!(update_seed, m)?)?;
     m.add_function(wrap_pyfunction!(update_blind, m)?)?;
     m.add_function(wrap_pyfunction!(update_hinted_raw, m)?)?;

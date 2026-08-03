@@ -41,6 +41,7 @@
 //! first minimum, `searchsorted` is side='left'), and angle wrapping is IEEE
 //! remainder like `math.remainder`, never `%` or `rem_euclid`.
 
+pub mod clearance;
 pub mod geom;
 pub mod laws;
 pub mod stamps;
