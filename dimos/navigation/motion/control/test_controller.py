@@ -20,7 +20,8 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.control.controller import ControllerConfig, PursuitController
+from dimos.navigation.motion.control.controller import ControllerConfig
+from dimos.navigation.motion.control.laws.seed import PursuitController
 
 
 def _pose(x: float, y: float, yaw: float = 0.0) -> PoseStamped:

@@ -49,6 +49,7 @@ from dimos.navigation.motion.control.controller import (
     load,
 )
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
+from dimos.navigation.motion.control.tracks import TRACKS
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -104,11 +105,15 @@ class GoalLatch:
 
 
 class TrajectoryFollowerConfig(ModuleConfig):
-    controller: str = "pursuit"  # registry name or "module:factory"
+    # The track fixes the law AND whether the controller is handed the path
+    # room hint (control/tracks.py). "hinted" is right wherever the raycaster's
+    # local map is actually live, which on the go2-zenoh stack it is; "blind"
+    # runs the law that recovers required precision from the path stamps alone.
+    track: str = "hinted"
+    controller: str | None = None  # registry name or "module:factory"; None = the track's law
     controller_config: ControllerConfig = Field(default_factory=ControllerConfig)
     control_frequency: float = 10.0
     goal_tolerance: float = 0.20  # planar distance that counts as arrival (m)
-    annotate_clearance: bool = True  # hand the controller the path room hint
     half_width: float = 0.155  # embodiment half-width for the clearance hint (go2)
 
 
@@ -134,6 +139,7 @@ class TrajectoryFollower(Module):
         self._clearance: np.ndarray | None = None
         self._clearance_key: tuple[int, int] | None = None
         self._latch = GoalLatch(self.config.goal_tolerance)
+        self._track = TRACKS[self.config.track]
         self._controller: TrajectoryController | None = None
         self._stop_event = Event()
         self._thread: Thread | None = None
@@ -141,7 +147,9 @@ class TrajectoryFollower(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        self._controller = load(self.config.controller)(self.config.controller_config)
+        self._controller = load(self.config.controller or self._track.controller)(
+            self.config.controller_config
+        )
         self._controller.reset()
         self.register_disposable(Disposable(self.path.subscribe(self._on_path)))
         self.register_disposable(Disposable(self.odometry.subscribe(self._on_odometry)))
@@ -207,7 +215,8 @@ class TrajectoryFollower(Module):
         self.nav_cmd_vel.publish(tw)
 
     def _clearance_for(self, path: Path) -> np.ndarray | None:
-        if not self.config.annotate_clearance:
+        if not self._track.annotate_clearance:
+            # the blind track: the law reads the path's own stamps instead
             return None
         with self._lock:
             cloud = self._cloud

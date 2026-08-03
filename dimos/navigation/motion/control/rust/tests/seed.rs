@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The pursuit law's behavioural cases, mirroring `test_controller.py` so a
+//! The SEED law's behavioural cases, mirroring `test_controller.py` so a
 //! regression shows up in `cargo test` and not only under pytest. Exact
 //! agreement with the python is a separate gate -- `test_rust_parity.py`.
 //!
+//! This law is the permanent baseline, so these cases are frozen: a research
+//! generation that wants different behaviour lands in its own track's law and
+//! brings its own test file (see `blind.rs`).
+//!
 //! Run with `cargo test --release --no-default-features` to skip the pyo3
-//! link; the crate exposes `pursuit` as an rlib.
+//! link; the crate exposes the laws as an rlib.
 
 use std::f64::consts::PI;
 
-use dimos_motion2_tc::pursuit::{ieee_remainder, update, Params, TAU};
+use dimos_motion2_tc::geom::{ieee_remainder, Params, TAU};
+use dimos_motion2_tc::laws::seed::update;
 
 /// 4 m of straight path along +x at yaw 0, the python `_straight_path()`.
 fn straight() -> Vec<[f64; 3]> {

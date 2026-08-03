@@ -34,6 +34,7 @@ from dimos.navigation.motion.control.episode import (
     run_episode,
 )
 from dimos.navigation.motion.control.judge import print_row, score_episode, summarize
+from dimos.navigation.motion.control.tracks import TRACKS
 from dimos.navigation.motion.planner.autoresearch.scenarios import SCENARIOS, generated
 from dimos.navigation.motion.simulation.policy import FreePolicy
 from dimos.utils.data import get_data
@@ -54,9 +55,11 @@ def main() -> None:
     ap.add_argument("--policy", default=DEFAULT_POLICY, help="FREE policy blob")
     ap.add_argument("--planner", default="target", help="referee planner registry name")
     ap.add_argument(
-        "--controller", default="pursuit", help="controller registry name or module:factory"
+        "--controller",
+        default=None,
+        help="controller registry name or module:factory (default: the track's law)",
     )
-    ap.add_argument("--blind", action="store_true", help="drop the clearance annotation")
+    ap.add_argument("--blind", action="store_true", help="the blind track: no clearance annotation")
     ap.add_argument("--dr", action="store_true", help="randomize mechanisms per episode")
     ap.add_argument("--seed", type=int, default=0, help="rng seed for --dr")
     ap.add_argument("--draws", type=int, default=1, help="DR draws per world (implies --dr)")
@@ -81,14 +84,20 @@ def main() -> None:
     if args.jobs > 1 and args.view:
         ap.error("--jobs > 1 cannot render; --view runs serially")
 
+    # The track fixes what the follower is handed AND which law it runs; an
+    # explicit --controller still overrides, so cross-track A/Bs stay possible.
+    track = TRACKS["blind" if args.blind else "hinted"]
+    controller_name = args.controller or track.controller
     cfg = EpisodeConfig(
-        replan_hz=args.replan_hz, planner=args.planner, annotate_clearance=not args.blind
+        replan_hz=args.replan_hz,
+        planner=args.planner,
+        annotate_clearance=track.annotate_clearance,
     )
     dr = DomainRandomization() if (args.dr or args.draws > 1) else None
 
     if args.view:
         policy = FreePolicy.load(get_data(args.policy))
-        make_controller = load_controller(args.controller)
+        make_controller = load_controller(controller_name)
         rng = np.random.default_rng(args.seed)
         rows = []
         for sc, group in tagged:
@@ -105,7 +114,7 @@ def main() -> None:
         rows = run_battery(
             tagged,
             policy_path=args.policy,
-            controller_name=args.controller,
+            controller_name=controller_name,
             cfg=cfg,
             dr=dr,
             seed=args.seed,

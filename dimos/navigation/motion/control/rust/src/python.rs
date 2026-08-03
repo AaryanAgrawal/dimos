@@ -12,29 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! One pyfunction per law. A new law gets a new entry point rather than a
+//! flag on an existing one: the signatures differ (a law marshals only the
+//! inputs it reads) and a track's binding must not shift when another track's
+//! generation lands.
+
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::pursuit::{update as update_impl, Params};
+use crate::geom::Params;
+use crate::laws::blind::{update as blind_impl, BlindParams};
+use crate::laws::seed::update as seed_impl;
 
-/// One controller tick. `path` is an (N, 3) float64 array of (x, y, yaw) in
-/// the pose's frame; `clearance` is an optional length-N float64 room
-/// annotation (any other length is ignored, as in the python). `params`
-/// carries the numeric `ControllerConfig` fields in declaration order:
-/// (lookahead, max_speed, max_yaw_rate, k_pos, k_yaw, fan_yaw_per_m,
-/// fan_yaw_done, min_speed, speed_clearance, speed_floor_clearance,
-/// speed_lookahead). Returns the body-frame twist (vx, vy, wz).
-#[pyfunction]
-#[pyo3(signature = (pose, path, clearance, params))]
-#[allow(clippy::type_complexity)]
-fn update(
-    py: Python<'_>,
-    pose: (f64, f64, f64),
-    path: PyReadonlyArray2<'_, f64>,
-    clearance: Option<PyReadonlyArray1<'_, f64>>,
-    params: (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64),
-) -> PyResult<(f64, f64, f64)> {
+/// The numeric `ControllerConfig` fields, in declaration order.
+type BaseParams = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
+
+fn rows_of(path: &PyReadonlyArray2<'_, f64>) -> PyResult<Vec<[f64; 3]>> {
     if path.shape()[1] != 3 {
         return Err(PyValueError::new_err(format!(
             "path must be (N, 3) float64, got shape {:?}",
@@ -42,32 +36,83 @@ fn update(
         )));
     }
     let view = path.as_array();
-    let rows: Vec<[f64; 3]> = (0..view.shape()[0])
+    Ok((0..view.shape()[0])
         .map(|k| [view[[k, 0]], view[[k, 1]], view[[k, 2]]])
-        .collect();
-    // copied rather than borrowed as a slice: a strided or non-contiguous
-    // view has no slice, and the annotation is one float per waypoint
-    let clr: Option<Vec<f64>> = clearance
-        .as_ref()
-        .map(|c| c.as_array().iter().copied().collect());
-    let cfg = Params {
-        lookahead: params.0,
-        max_speed: params.1,
-        max_yaw_rate: params.2,
-        k_pos: params.3,
-        k_yaw: params.4,
-        fan_yaw_per_m: params.5,
-        fan_yaw_done: params.6,
-        min_speed: params.7,
-        speed_clearance: params.8,
-        speed_floor_clearance: params.9,
-        speed_lookahead: params.10,
+        .collect())
+}
+
+// copied rather than borrowed as a slice: a strided or non-contiguous view
+// has no slice, and these are one float per waypoint
+fn vec_of(a: Option<&PyReadonlyArray1<'_, f64>>) -> Option<Vec<f64>> {
+    a.map(|v| v.as_array().iter().copied().collect())
+}
+
+fn base_params(p: BaseParams) -> Params {
+    Params {
+        lookahead: p.0,
+        max_speed: p.1,
+        max_yaw_rate: p.2,
+        k_pos: p.3,
+        k_yaw: p.4,
+        fan_yaw_per_m: p.5,
+        fan_yaw_done: p.6,
+        min_speed: p.7,
+        speed_clearance: p.8,
+        speed_floor_clearance: p.9,
+        speed_lookahead: p.10,
+    }
+}
+
+/// One tick of the seed law. `path` is an (N, 3) float64 array of (x, y, yaw)
+/// in the pose's frame; `clearance` is an optional length-N float64 room
+/// annotation (any other length is ignored, as in the python). Returns the
+/// body-frame twist (vx, vy, wz).
+#[pyfunction]
+#[pyo3(signature = (pose, path, clearance, params))]
+fn update_seed(
+    py: Python<'_>,
+    pose: (f64, f64, f64),
+    path: PyReadonlyArray2<'_, f64>,
+    clearance: Option<PyReadonlyArray1<'_, f64>>,
+    params: BaseParams,
+) -> PyResult<(f64, f64, f64)> {
+    let rows = rows_of(&path)?;
+    let clr = vec_of(clearance.as_ref());
+    let cfg = base_params(params);
+    Ok(py.allow_threads(|| seed_impl(pose, &rows, clr.as_deref(), &cfg)))
+}
+
+/// One tick of the blind law. As `update_seed`, plus `ts`, the optional
+/// length-N vector of the path's own per-waypoint stamps carrying the
+/// planner's required-precision profile (see `stamps::decode_ceilings`), and
+/// the three gait-calibration fields `BlindControllerConfig` adds after the
+/// base ones (walk_gain, walk_slip, slip_ramp).
+#[pyfunction]
+#[pyo3(signature = (pose, path, clearance, ts, params, walk))]
+fn update_blind(
+    py: Python<'_>,
+    pose: (f64, f64, f64),
+    path: PyReadonlyArray2<'_, f64>,
+    clearance: Option<PyReadonlyArray1<'_, f64>>,
+    ts: Option<PyReadonlyArray1<'_, f64>>,
+    params: BaseParams,
+    walk: (f64, f64, f64),
+) -> PyResult<(f64, f64, f64)> {
+    let rows = rows_of(&path)?;
+    let clr = vec_of(clearance.as_ref());
+    let stamps = vec_of(ts.as_ref());
+    let cfg = BlindParams {
+        base: base_params(params),
+        walk_gain: walk.0,
+        walk_slip: walk.1,
+        slip_ramp: walk.2,
     };
-    Ok(py.allow_threads(|| update_impl(pose, &rows, clr.as_deref(), &cfg)))
+    Ok(py.allow_threads(|| blind_impl(pose, &rows, clr.as_deref(), stamps.as_deref(), &cfg)))
 }
 
 #[pymodule]
 fn dimos_motion2_tc(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(update, m)?)?;
+    m.add_function(wrap_pyfunction!(update_seed, m)?)?;
+    m.add_function(wrap_pyfunction!(update_blind, m)?)?;
     Ok(())
 }

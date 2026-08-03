@@ -36,16 +36,12 @@ from typing import Any
 import numpy as np
 
 from dimos.navigation.motion.control.episode import EpisodeResult
+from dimos.navigation.motion.control.tracks import track_of
 from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
 from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
-# m/s the executor should hold through curves; pace=1 at this. Per track:
-# blind may only decode the path stamps (governor band 0.2-0.5 m/s), so it
-# is judged against the mid-band; hinted may outrun the encoding where the
-# live clearance shows room, so it is judged against the ~0.81 m/s the
-# plant reaches at the command ceiling.
-CRUISE_BLIND = 0.35
-CRUISE_HINTED = 0.75
+# The cruise target and the pace weight are per track and travel together --
+# see control/tracks.py, which is also what the CLI and the adapter name.
 GRACE_S = 2.0  # flat allowance: settle, first-step lag, terminal deceleration
 TILT_SCALE = 0.35  # tilt p99 (rad, ~20 deg) at which stability hits 0
 CHURN_SCALE = 0.25  # forced-replan deviation (m) at which calm hits 0 (referee CONSIST_SCALE)
@@ -204,15 +200,14 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
     # faster cruise target AND a pace pillar heavy enough to chase (115.5-max
     # totals). Blind cannot legally exceed the encoding: mid-band cruise,
     # bottom-tier weight, totals stay 111-shaped.
-    hinted = result.cfg.annotate_clearance
+    track = track_of(result.cfg.annotate_clearance)
     if refused_ok:
         pace = 1.0
     elif result.outcome == "goal" and result.time_to_goal is not None:
-        cruise = CRUISE_HINTED if hinted else CRUISE_BLIND
-        pace = min(1.0, (arc / cruise + GRACE_S) / max(result.time_to_goal, 1e-6))
+        pace = min(1.0, (arc / track.cruise + GRACE_S) / max(result.time_to_goal, 1e-6))
     else:
         pace = 0.0
-    pace_weight = 5.0 if hinted else 0.5
+    pace_weight = track.pace_weight
     tilt_p99 = float(np.percentile(result.tilt, 99)) if len(result.tilt) else 0.0
     stability = max(0.0, 1.0 - tilt_p99 / TILT_SCALE)
     sat = _saturation(result)

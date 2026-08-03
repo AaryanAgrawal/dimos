@@ -24,7 +24,7 @@ from dimos.navigation.motion.adapter.planner import (
     carrot_along,
     to_nav_path,
 )
-from dimos.navigation.motion.control.controller import PursuitController
+from dimos.navigation.motion.control.laws.seed import PursuitController
 from dimos.navigation.motion.planner.autoresearch.planners.gold import pose_stamped
 from dimos.navigation.motion.planner.autoresearch.types import Path as RefereePath
 

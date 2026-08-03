@@ -38,7 +38,8 @@ python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree
 python -m dimos.navigation.motion.control --view -s corridor
 
 # judge the controller on the curated 16 (+ generated with --gen N)
-python -m dimos.navigation.motion.control --score
+python -m dimos.navigation.motion.control --score          # hinted track
+python -m dimos.navigation.motion.control --score --blind  # blind track + its law
 ```
 
 ## adapter ([adapter/tools.md](adapter/tools.md))

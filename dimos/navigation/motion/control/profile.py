@@ -83,14 +83,20 @@ def encode_precision(path: Path, clearance: np.ndarray, t0: float = 0.0) -> Path
     return path
 
 
-def decode_ceilings(path: Path) -> np.ndarray | None:
+def decode_ceilings(path: Path, lo: float = MIN_SPEED, hi: float = MAX_SPEED) -> np.ndarray | None:
     """Per-waypoint speed ceiling (m/s) from the stamps; None if unstamped.
 
     Unstamped = flat or non-monotone ts (a plain path from a producer that
     does not speak this dialect) — the follower then falls back to its own
     clearance source or plain max speed. Fan segments inherit the previous
-    ceiling; the result is clipped into [MIN_SPEED, MAX_SPEED] so a slow
-    upstream planner can only ever make the robot more careful.
+    ceiling; the result is clipped into ``[lo, hi]`` so a slow upstream
+    planner can only ever make the robot more careful, and garbage stamps
+    saturate at cruise instead of commanding something absurd.
+
+    ``lo``/``hi`` default to this module's governor band, which is what a
+    third-party consumer wants. A controller passes its own
+    ``ControllerConfig`` band instead, so that a non-default config decodes
+    the same ceiling its own governor would have produced.
     """
     n = len(path.poses)
     if n < 2:
@@ -101,11 +107,18 @@ def decode_ceilings(path: Path) -> np.ndarray | None:
         return None
     xy, _ = _segments(path)
     ds = np.linalg.norm(np.diff(xy, axis=0), axis=1)
-    out = np.full(n, MAX_SPEED)
-    prev = MAX_SPEED
+    # a config is free to set min above max; ordering here rather than
+    # trusting the caller keeps the clip a clip
+    lo, hi = min(lo, hi), max(lo, hi)
+    out = np.full(n, hi)
+    prev = hi
     for i in range(1, n):
         if ds[i - 1] >= _FAN_EPS and dt[i - 1] > 0:
-            prev = float(np.clip(ds[i - 1] / dt[i - 1], MIN_SPEED, MAX_SPEED))
+            v = ds[i - 1] / dt[i - 1]
+            # a non-finite ratio would propagate straight out through the
+            # twist; the encoder cannot produce one, the wire can
+            if np.isfinite(v):
+                prev = float(np.clip(v, lo, hi))
         out[i] = prev
     out[0] = out[1] if n > 1 else prev
     return out

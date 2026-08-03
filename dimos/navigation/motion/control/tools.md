@@ -24,13 +24,20 @@ python -m dimos.navigation.motion.control --score --planner target-py
 python -m dimos.navigation.motion.control --score --controller my.candidate:make
 python -m dimos.navigation.motion.control --view -s slalom --policy ml-trajectory-research/freewalk_mcf.bin
 
-# the rust controller (onboard build for the RK3588) -- build once, then run it
+# the rust laws (onboard build for the RK3588) -- build once, then run one
 uv run maturin develop --uv --release -m dimos/navigation/motion/control/rust/Cargo.toml
-python -m dimos.navigation.motion.control --score --controller pursuit-rs
+python -m dimos.navigation.motion.control --score --controller seed-rs
 
-# domain randomization (per-episode mechanism draws) and the blind A/B
+# domain randomization (per-episode mechanism draws)
 python -m dimos.navigation.motion.control --score --dr --seed 3
+
+# the blind track: no clearance array, and --controller defaults to its law
 python -m dimos.navigation.motion.control --score --blind
+# ...against the seed on the same track, which is the A/B that shows the gain
+python -m dimos.navigation.motion.control --score --blind --controller seed
+
+# what the gait actually delivers (provenance for walk_gain/walk_slip)
+python -m dimos.navigation.motion.control.probe_walk_slip
 
 # tests and types
 python -m pytest dimos/navigation/motion/control -q
@@ -38,8 +45,34 @@ python -m mypy dimos/navigation/motion/control
 cargo test --release --manifest-path dimos/navigation/motion/control/rust/Cargo.toml
 ```
 
-`pursuit-rs` is a port of `pursuit`, not a variant: `test_rust_parity.py` holds
-the two to 1e-9 per twist component over 240 seeded cases (observed spread: 0).
+## Tracks and laws
+
+A **track** is an input regime — what the follower is allowed to know, and the
+pace it is held to. `tracks.py` is the one place both are written down, and the
+CLI, the episode config, the judge and the deployed adapter all name a track
+rather than a law:
+
+| track    | eval           | `update()` receives                         | law     |
+|----------|----------------|---------------------------------------------|---------|
+| `hinted` | `--score`      | pose + path + per-waypoint clearance array   | `seed`  |
+| `blind`  | `--score --blind` | pose + path (stamps still carry precision) | `blind` |
+
+Laws live one per module in `laws/` (`rust/src/laws/` for their ports), over
+shared facilities: `geom` (arc length, progress, fan detection, carrot,
+clearance governor) and `stamps` (the `profile.py` wire dialect). `seed` is the
+permanent baseline — every A/B is against it and every autoresearch lab seeds
+from it, so it does not absorb research results. A research generation lands by
+replacing its own track's law and flipping one line in `TRACKS`.
+
+`blind` is `motion-tc-autoresearch@blind_research01` (evo exp_0013): the gait
+slip inverse (`walk_command`), constant time headway, and the governor read off
+the path stamps. Its `walk_gain`/`walk_slip` are properties of the POLICY BLOB,
+not of the law — re-run `probe_walk_slip.py` against the deployed gait and
+re-key them before this drives hardware.
+
+Each `*-rs` law is a port of its python twin, not a variant: `test_rust_parity.py`
+holds every pair to 1e-9 per twist component over 240 seeded cases (observed
+spread: 0, asserted separately).
 
 Score per world = `gate * (100*arrived + 10*precision + 1*(pace+composure)/2)`,
 max 111 (referee scale). Gate 0 on wall contact or fall; refusal counts as

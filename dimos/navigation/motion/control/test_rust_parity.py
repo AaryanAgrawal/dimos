@@ -32,11 +32,10 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.control.controller import (
-    ControllerConfig,
-    PursuitController,
-    make_rust,
-)
+from dimos.navigation.motion.control.controller import ControllerConfig
+from dimos.navigation.motion.control.laws import blind, seed
+from dimos.navigation.motion.control.laws.seed import make_rust
+from dimos.navigation.motion.control.profile import encode_precision
 
 TOL = 1e-9
 CASES = 240
@@ -108,6 +107,10 @@ GENERATORS = (_straight, _s_curve, _with_fans, _with_fans, _degenerate)
 def _cases(seed: int = 20260802, n: int = CASES):  # type: ignore[no-untyped-def]
     """(config, pose, path, clearance) tuples covering every branch."""
     rng = np.random.default_rng(seed)
+    # a SEPARATE stream for the stamps: drawing them from `rng` would shift
+    # every later draw and silently replace the sweep this file's tolerances
+    # were characterised on
+    srng = np.random.default_rng(seed + 1)
     for k in range(n):
         states = GENERATORS[k % len(GENERATORS)](rng)
         path = _path(states)
@@ -127,6 +130,16 @@ def _cases(seed: int = 20260802, n: int = CASES):  # type: ignore[no-untyped-def
             clearance = rng.uniform(0.0, 0.8, len(states))
             if k % 8 == 1:  # a wrong-length annotation must be ignored by both
                 clearance = clearance[:-1]
+        # Stamp a share of the paths with the precision profile: it is the
+        # blind law's only governor channel, and an unstamped path exercises
+        # its fallback. k % 8 == 3 leaves stamps that are deliberate nonsense.
+        if k % 3 and len(states) > 1:
+            enc = np.clip(srng.uniform(0.0, 0.8, len(states)), 0.0, None)
+            encode_precision(path, enc, t0=float(srng.uniform(0.0, 1e9)))
+            if k % 8 == 3:
+                for q in path.poses:
+                    q.ts = 5.0  # flat: not the dialect, both must ignore it
+
         cfg = ControllerConfig()
         if k % 5 == 0:  # non-default gains, so the params tuple order is load-bearing
             cfg = ControllerConfig(
@@ -141,23 +154,32 @@ def _cases(seed: int = 20260802, n: int = CASES):  # type: ignore[no-untyped-def
                 speed_clearance=float(rng.uniform(0.2, 0.8)),
                 speed_floor_clearance=float(rng.uniform(0.01, 0.15)),
                 speed_lookahead=float(rng.uniform(0.5, 4.0)),
+                walk_gain=float(srng.uniform(0.7, 1.3)),
+                walk_slip=float(srng.uniform(0.0, 0.3)),
+                walk_slip_ramp=float(srng.uniform(0.02, 0.3)),
             )
         yield cfg, pose, path, clearance
 
 
-def _twists(cfg, pose, path, clearance):  # type: ignore[no-untyped-def]
-    py = PursuitController(cfg).update(pose, path, 0.0, clearance)
-    rs = make_rust(cfg).update(pose, path, 0.0, clearance)
+# every law and its rust twin; each pair is held to TOL independently
+LAWS = {"seed": (seed.make, seed.make_rust), "blind": (blind.make, blind.make_rust)}
+
+
+def _twists(law, cfg, pose, path, clearance):  # type: ignore[no-untyped-def]
+    make_py, make_rs = LAWS[law]
+    py = make_py(cfg).update(pose, path, 0.0, clearance)
+    rs = make_rs(cfg).update(pose, path, 0.0, clearance)
     return (
         (py.linear.x, py.linear.y, py.angular.z),
         (rs.linear.x, rs.linear.y, rs.angular.z),
     )
 
 
-def test_rust_matches_python() -> None:
+@pytest.mark.parametrize("law", sorted(LAWS))
+def test_rust_matches_python(law: str) -> None:
     seen = {"fan": 0, "governed": 0, "clamped": 0, "held": 0}
     for k, case in enumerate(_cases()):
-        a, b = _twists(*case)
+        a, b = _twists(law, *case)
         for c, (x, y) in enumerate(zip(a, b, strict=True)):
             assert abs(x - y) <= TOL, f"case {k} component {c}: python {x!r} vs rust {y!r}"
         cfg = case[0]
@@ -173,11 +195,12 @@ def test_rust_matches_python() -> None:
     assert all(v > 0 for v in seen.values()), f"unexercised branches: {seen}"
 
 
-def test_parity_headroom() -> None:
+@pytest.mark.parametrize("law", sorted(LAWS))
+def test_parity_headroom(law: str) -> None:
     """Report the real spread: it must sit far under the asserted tolerance."""
     worst = 0.0
     for case in _cases():
-        a, b = _twists(*case)
+        a, b = _twists(law, *case)
         worst = max(worst, max(abs(x - y) for x, y in zip(a, b, strict=True)))
     assert worst <= TOL, f"max component diff {worst:.3e}"
     # libm hypot/sin/cos are shared between the two, so the only expected
@@ -191,16 +214,20 @@ def test_parity_headroom() -> None:
 def test_wrap_boundaries(yaw: float) -> None:
     """+-pi is where a `%`-based wrap diverges from IEEE remainder."""
     path = _path([(0.0, 0.0, math.pi), (0.0, 0.0, -math.pi + 0.2), (1.0, 0.0, -math.pi + 0.2)])
-    a, b = _twists(ControllerConfig(), _pose(0.0, 0.0, yaw), path, None)
-    assert a == b, f"yaw={yaw!r}: python {a} vs rust {b}"
+    for law in sorted(LAWS):
+        a, b = _twists(law, ControllerConfig(), _pose(0.0, 0.0, yaw), path, None)
+        assert a == b, f"{law} yaw={yaw!r}: python {a} vs rust {b}"
 
 
 def test_registry_and_build_hint() -> None:
     from dimos.navigation.motion.control.controller import REGISTRY, load
 
-    assert REGISTRY["pursuit-rs"].endswith(":make_rust")
-    assert load("pursuit-rs") is make_rust
-    assert isinstance(load("pursuit-rs")().config, ControllerConfig)
+    for name, (_, make_rs) in LAWS.items():
+        assert REGISTRY[f"{name}-rs"].endswith(":make_rust")
+        assert load(f"{name}-rs") is make_rs
+        assert isinstance(load(f"{name}-rs")().config, ControllerConfig)
+    # the seed's pre-split names still resolve
+    assert load("pursuit-rs") is seed.make_rust
 
 
 def test_corridor_reaches_goal_rust() -> None:

@@ -5,7 +5,7 @@ Local motion: plan a path around obstacles, walk it, prove both work.
 | dir           | what                                                                                         | docs                                                             |
 |---------------|----------------------------------------------------------------------------------------------|------------------------------------------------------------------|
 | `planner/`    | SE(2) local planner (evolved rust crate) + its referee: worlds, gold oracle, judge           | [planner/autoresearch/README.md](planner/autoresearch/README.md) |
-| `control/`    | closed-loop executor: episode runner, follower law (python + bit-exact rust), executor judge | [control/tools.md](control/tools.md)                             |
+| `control/`    | closed-loop executor: episode runner, per-track follower laws (python + bit-exact rust), executor judge | [control/tools.md](control/tools.md)          |
 | `simulation/` | the matched Go2 MuJoCo env (physics fitted to two real recordings)                           | [simulation/tools.md](simulation/tools.md)                       |
 | `adapter/`    | planner + follower as dimos modules for the go2-zenoh blueprints                             | [adapter/tools.md](adapter/tools.md)                             |
 
@@ -43,7 +43,15 @@ Putting the time-critical half on the robot: [deployment_plan.md](deployment_pla
 update(pose: PoseStamped, path: Path, t, clearance: ndarray | None) -> Twist
 ```
 
+One law per *track* — the input regime the follower is researched and judged
+under. `hinted` gets the clearance array, `blind` does not and recovers the
+same profile from the path's own stamps; `control/tracks.py` is the only place
+that maps a track to its law, so the follower config, the CLI and the judge
+never name a law directly. Interchangeable behind the signature above.
+
 The path timestamps are NOT a schedule — only their deltas carry information
 (slow segment = tight segment = track carefully), a follower must never chase
 the clock, and running slower than the encoding is always legal. Third-party
 Path producers/consumers interoperate; they just don't get the precision hint.
+Because the encoding rides on the path itself it survives the blind track,
+which is what makes blind a real deployment case rather than a handicap.
