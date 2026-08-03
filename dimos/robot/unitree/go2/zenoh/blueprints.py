@@ -41,6 +41,7 @@ from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.motion.adapter.follower import TrajectoryFollower
 from dimos.navigation.motion.adapter.planner import MotionPlanner
 from dimos.navigation.motion.adapter.viz import motion_visual_override
+from dimos.navigation.movement_manager.cmd_vel_mux import CmdVelMux
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
@@ -148,12 +149,13 @@ def _rerun_config(visual_override: dict[str, Any] | None = None) -> dict[str, An
     }
 
 
-# Streams + teleop only. cmd_vel still reaches the robot through MovementManager, so this
+# Streams + teleop only. cmd_vel still reaches the robot through CmdVelMux, so this
 # is the layer to drive from when something upstream is suspect.
 go2_zenoh_basic = autoconnect(
     vis_module(viewer_backend=global_config.viewer, rerun_config=_rerun_config()),
     GO2Zenoh.blueprint(mid360_mount_rpy_deg=MID360_MOUNT_RPY_DEG),
     MovementManager.blueprint(),
+    CmdVelMux.blueprint(),
 ).global_config(transport="zenoh", n_workers=4, robot_model="unitree_go2")
 
 # global_map is remapped off so the planner runs purely on the
@@ -201,6 +203,7 @@ go2_zenoh_nav = autoconnect(
         [(BasicPathFollower, "odometry", "body_odometry")]
     ),
     MovementManager.blueprint(),
+    CmdVelMux.blueprint(),
 ).global_config(transport="zenoh", n_workers=8, robot_model="unitree_go2")
 
 # The motion stack's own MLS tuning: the local planner + follower are the precision
@@ -252,6 +255,7 @@ _go2_zenoh_motion_base = autoconnect(
         [(MotionPlanner, "odometry", "body_odometry")]
     ),
     MovementManager.blueprint(),
+    CmdVelMux.blueprint(),
 )
 
 # hinted: the follower is handed the per-waypoint clearance array recomputed from the

@@ -33,6 +33,7 @@ from dimos.memory2.module import pose_setter_for
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
+from dimos.navigation.movement_manager.cmd_vel_mux import CmdVelMux
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
@@ -206,6 +207,7 @@ unitree_go2_nav_3d = autoconnect(
         [(BasicPathFollower, "odometry", "body_odometry")]
     ),
     MovementManager.blueprint(),
+    CmdVelMux.blueprint(),
 ).global_config(n_workers=10, robot_model="unitree_go2", obstacle_avoidance=False)
 
 # The nav blueprint leaves PointLio on its default lidar / odometry topics, so

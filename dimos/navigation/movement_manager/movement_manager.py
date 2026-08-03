@@ -14,12 +14,13 @@
 
 """MovementManager: the click-to-goal relay, and the teleop cancel that goes with it.
 
-The velocity mux this module used to also be now lives in the `cmd_vel_mux`
-native module (`cmd_vel_mux_native.py`), because it belongs on the robot with
-the follower while the click relay belongs on the laptop with rerun. One teleop
-keystroke still has to land on both halves, so both subscribe `tele_cmd_vel`:
-the rust half preempts nav and stops the follower, this half cancels the goal.
-Nothing routes the cancel back the other way — teleop originates here.
+The velocity mux this module used to also be is now its own module — `CmdVelMux`
+in python, `CmdVelMuxNative` in rust — because it belongs on the robot with the
+follower while the click relay belongs on the laptop with rerun. A stack needs
+both: `MovementManager.blueprint()` alone turns clicks into goals but drives
+nothing. One teleop keystroke has to land on both halves, so both subscribe
+`tele_cmd_vel`: the mux preempts nav and stops the follower, this cancels the
+goal. Nothing routes the cancel back the other way — teleop originates here.
 """
 
 from __future__ import annotations

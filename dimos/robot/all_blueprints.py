@@ -235,6 +235,7 @@ all_modules = {
     "mid360-realsense-static-tf": "dimos.robot.assembly.mid360_realsense_30.Mid360RealsenseStaticTf",
     "mls-planner-native": "dimos.navigation.nav_3d.mls_planner.mls_planner_native.MLSPlannerNative",
     "mock-b1-connection-module": "dimos.robot.unitree.b1.connection.MockB1ConnectionModule",
+    "cmd-vel-mux": "dimos.navigation.movement_manager.cmd_vel_mux.CmdVelMux",
     "module-a": "dimos.robot.unitree.demo_error_on_name_conflicts.ModuleA",
     "module-b": "dimos.robot.unitree.demo_error_on_name_conflicts.ModuleB",
     "motion-planner": "dimos.navigation.motion.adapter.planner.MotionPlanner",
