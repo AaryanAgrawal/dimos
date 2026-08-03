@@ -50,10 +50,14 @@ class Embodiment:
     below it is fiction, planning it is planning a contact).
     """
 
+    # Moving-body envelope measured in the fitted MuJoCo sim (union of all
+    # robot geometry over stand/fwd/reverse/strafe/spin/arc/crab commands,
+    # yaw-aligned base frame): the swinging legs, not the 0.31 m trunk, set
+    # the width. Measured 0.852 x 0.495, centre +x offset -0.009.
     tag: str = "go2"
     length: float = 0.85
-    width: float = 0.31
-    center_off: float = -0.025  # body center relative to the pose point
+    width: float = 0.50
+    center_off: float = -0.01  # body center relative to the pose point
     comfort: float = 0.4
     precision: float = 0.05
     # gait cost multipliers for the SE(2) reference (and any rollout later):
@@ -81,7 +85,8 @@ class Embodiment:
 GO2 = Embodiment()
 EMBODIMENTS = {
     "go2": GO2,
-    "go2-payload": Embodiment(tag="go2-payload", width=0.45, comfort=0.5),
+    # payload adds 8 cm in front: longer body, centre 4 cm further forward
+    "go2-payload": Embodiment(tag="go2-payload", length=0.93, center_off=0.03, comfort=0.5),
     "slim": Embodiment(tag="slim", length=2.0, width=0.24, comfort=0.3),
     "diffdrive": Embodiment(tag="diffdrive", strafe=50.0, reverse=3.0),  # cannot crab
 }
@@ -186,8 +191,8 @@ SCENARIOS = [
         "door_side",
         [Box(2.0, 1.28, 0.15, 1.6), Box(2.0, -1.28, 0.15, 1.6)],
         goal=(4.0, 0.0),
-        start=(1.6, 1.15, 2.0),
-        note="starts beside the door, 0.3 m off the wall, facing away",
+        start=(1.4, 1.15, 2.0),
+        note="starts beside the door, 0.5 m off the wall, facing away",
     ),
     Scenario(
         "goal_by_wall",
@@ -248,7 +253,7 @@ SCENARIOS = [
         [Box(2.0, 1.13, 0.15, 2.0), Box(2.0, -1.13, 0.15, 2.0)],
         goal=(4.0, 0.0),
         expect="safe",
-        note="0.26 m opening, body is 0.31: around or stop, never squeeze",
+        note="0.26 m opening, body is 0.50: around or stop, never squeeze",
     ),
     Scenario(
         "zigzag_room",
@@ -403,7 +408,7 @@ def _write_atomic(path: FilePath, payload: bytes) -> None:
 
 
 # The true body footprint, sampled densely enough that a 4 cm slat cannot
-# slip between sample points (GO2 box 0.85 x 0.31, centered -0.025).
+# slip between sample points (GO2 box 0.85 x 0.50, centered -0.01).
 _SE2_CACHE = _CACHE_BASE / ".se2_cache.pkl"
 
 

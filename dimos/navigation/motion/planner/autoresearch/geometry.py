@@ -112,15 +112,16 @@ class CollisionShape(BaseConfig):
         return np.asarray(outside + inside)
 
 
-# Unitree Go2: 70 x 31 x 40 cm standing (official spec, and the collision box
-# in go2.urdf), plus 10 cm behind and 5 cm ahead — the walking legs swing out
-# past the torso box mid-gait (field: contact at planned +0.03 m margin,
-# actual sweep −0.16). The asymmetric extension shifts the box center back.
-# Planner paths are ground-level (z=0), so the box is lifted half its height to
-# sit on the ground rather than straddle the waypoint.
+# Unitree Go2 moving-body envelope, measured in the fitted MuJoCo sim (union
+# of all robot geometry over stand/fwd/reverse/strafe/spin/arc/crab commands,
+# yaw-aligned base frame): 0.852 x 0.495, centre offset -0.009. The swinging
+# legs, not the 0.31 m trunk of the official spec, set the width — strafe and
+# spin splay them to ~0.50 m. Planner paths are ground-level (z=0), so the box
+# is lifted half its height to sit on the ground rather than straddle the
+# waypoint.
 GO2_BODY = CollisionShape(
-    primitive=SolidPrimitive.box(0.85, 0.31, 0.40),
-    pose=Pose(-0.025, 0.0, 0.20),
+    primitive=SolidPrimitive.box(0.85, 0.50, 0.40),
+    pose=Pose(-0.01, 0.0, 0.20),
 )
 
 

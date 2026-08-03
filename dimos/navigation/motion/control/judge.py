@@ -39,7 +39,13 @@ from dimos.navigation.motion.control.episode import EpisodeResult
 from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
 from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
-CRUISE = 0.35  # m/s the executor should hold through curves; pace=1 at this
+# m/s the executor should hold through curves; pace=1 at this. Per track:
+# blind may only decode the path stamps (governor band 0.2-0.5 m/s), so it
+# is judged against the mid-band; hinted may outrun the encoding where the
+# live clearance shows room, so it is judged against the ~0.81 m/s the
+# plant reaches at the command ceiling.
+CRUISE_BLIND = 0.35
+CRUISE_HINTED = 0.75
 GRACE_S = 2.0  # flat allowance: settle, first-step lag, terminal deceleration
 TILT_SCALE = 0.35  # tilt p99 (rad, ~20 deg) at which stability hits 0
 CHURN_SCALE = 0.25  # forced-replan deviation (m) at which calm hits 0 (referee CONSIST_SCALE)
@@ -197,7 +203,8 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
     if refused_ok:
         pace = 1.0
     elif result.outcome == "goal" and result.time_to_goal is not None:
-        pace = min(1.0, (arc / CRUISE + GRACE_S) / max(result.time_to_goal, 1e-6))
+        cruise = CRUISE_HINTED if result.cfg.annotate_clearance else CRUISE_BLIND
+        pace = min(1.0, (arc / cruise + GRACE_S) / max(result.time_to_goal, 1e-6))
     else:
         pace = 0.0
     tilt_p99 = float(np.percentile(result.tilt, 99)) if len(result.tilt) else 0.0
