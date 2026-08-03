@@ -21,4 +21,5 @@
 //! the shared facilities stay in `geom`/`stamps`.
 
 pub mod blind;
+pub mod hinted;
 pub mod seed;

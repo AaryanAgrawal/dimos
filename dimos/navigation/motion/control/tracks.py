@@ -49,8 +49,8 @@ class Track:
 TRACKS: dict[str, Track] = {
     # The python law is the default so nothing needs the crate built; its
     # rust twin ("seed-rs" / "blind-rs") is parity-locked and is what deploys.
-    # hinted still runs the seed: its research branch has not landed yet.
-    "hinted": Track("hinted", "seed", True, 0.75, 5.0),
+    # hinted runs hint_research01 (motion-tc-autoresearch, evo exp_0045).
+    "hinted": Track("hinted", "hinted", True, 0.75, 5.0),
     # blind runs blind_research01 (motion-tc-autoresearch, evo exp_0013).
     "blind": Track("blind", "blind", False, 0.35, 0.5),
 }

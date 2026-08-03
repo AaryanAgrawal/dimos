@@ -23,6 +23,7 @@ use pyo3::prelude::*;
 
 use crate::geom::Params;
 use crate::laws::blind::{update as blind_impl, BlindParams};
+use crate::laws::hinted::{update as hinted_impl, HintedParams, Law as HintedLaw, CMD_SLEW_PER_S};
 use crate::laws::seed::update as seed_impl;
 
 /// The numeric `ControllerConfig` fields, in declaration order.
@@ -110,9 +111,92 @@ fn update_blind(
     Ok(py.allow_threads(|| blind_impl(pose, &rows, clr.as_deref(), stamps.as_deref(), &cfg)))
 }
 
+/// The six terms `HintedParams` adds after the base ones, in the order
+/// `ControllerConfig.hinted_params` yields them.
+type HintedExtra = (f64, f64, f64, f64, f64, f64);
+
+fn hinted_params(p: BaseParams, h: HintedExtra) -> HintedParams {
+    HintedParams {
+        base: base_params(p),
+        tangent_preview: h.0,
+        escape_clearance: h.1,
+        escape_preview: h.2,
+        escape_speed: h.3,
+        brake_accel: h.4,
+        brake_margin: h.5,
+    }
+}
+
+/// The hinted law, which keeps one tick of memory (its own previous command
+/// and the time it was issued) so it can ramp its output at the plant's own
+/// command slew. A class rather than a free function for exactly that reason;
+/// `reset()` clears the history.
+#[pyclass(name = "HintedLaw")]
+pub struct PyHintedLaw {
+    inner: HintedLaw,
+}
+
+#[pymethods]
+impl PyHintedLaw {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: HintedLaw::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// One tick, rate limited. As `update_seed`, plus the tick time `t` and the
+    /// six extra `HintedParams` terms.
+    #[pyo3(signature = (pose, path, clearance, t, params, hinted))]
+    // the binding is a marshalling boundary: every argument is one input the
+    // law reads, and bundling them would only hide the count behind a tuple
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        &mut self,
+        py: Python<'_>,
+        pose: (f64, f64, f64),
+        path: PyReadonlyArray2<'_, f64>,
+        clearance: Option<PyReadonlyArray1<'_, f64>>,
+        t: f64,
+        params: BaseParams,
+        hinted: HintedExtra,
+    ) -> PyResult<(f64, f64, f64)> {
+        let rows = rows_of(&path)?;
+        let clr = vec_of(clearance.as_ref());
+        let cfg = hinted_params(params, hinted);
+        let inner = &mut self.inner;
+        Ok(py.allow_threads(move || inner.step(pose, &rows, clr.as_deref(), &cfg, t)))
+    }
+}
+
+/// The hinted law WITHOUT its rate limiter -- the pure tick, for parity sweeps
+/// and for anything that wants the request rather than the ramped command.
+#[pyfunction]
+#[pyo3(signature = (pose, path, clearance, params, hinted))]
+fn update_hinted_raw(
+    py: Python<'_>,
+    pose: (f64, f64, f64),
+    path: PyReadonlyArray2<'_, f64>,
+    clearance: Option<PyReadonlyArray1<'_, f64>>,
+    params: BaseParams,
+    hinted: HintedExtra,
+) -> PyResult<(f64, f64, f64)> {
+    let rows = rows_of(&path)?;
+    let clr = vec_of(clearance.as_ref());
+    let cfg = hinted_params(params, hinted);
+    Ok(py.allow_threads(|| hinted_impl(pose, &rows, clr.as_deref(), &cfg)))
+}
+
 #[pymodule]
 fn dimos_motion2_tc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(update_seed, m)?)?;
     m.add_function(wrap_pyfunction!(update_blind, m)?)?;
+    m.add_function(wrap_pyfunction!(update_hinted_raw, m)?)?;
+    m.add_class::<PyHintedLaw>()?;
+    m.add("CMD_SLEW_PER_S", CMD_SLEW_PER_S)?;
     Ok(())
 }

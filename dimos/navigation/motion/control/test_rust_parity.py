@@ -32,8 +32,12 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.control.controller import ControllerConfig
-from dimos.navigation.motion.control.laws import blind, seed
+from dimos.navigation.motion.control.controller import (
+    ControllerConfig,
+    load_extension,
+    path_xy_yaw,
+)
+from dimos.navigation.motion.control.laws import blind, hinted, seed
 from dimos.navigation.motion.control.laws.seed import make_rust
 from dimos.navigation.motion.control.profile import encode_precision
 
@@ -162,7 +166,39 @@ def _cases(seed: int = 20260802, n: int = CASES):  # type: ignore[no-untyped-def
 
 
 # every law and its rust twin; each pair is held to TOL independently
-LAWS = {"seed": (seed.make, seed.make_rust), "blind": (blind.make, blind.make_rust)}
+LAWS = {
+    "seed": (seed.make, seed.make_rust),
+    "blind": (blind.make, blind.make_rust),
+    "hinted": (hinted.make, hinted.make_rust),
+}
+
+# laws that keep state across ticks, so a single call proves nothing: their
+# parity has to be replayed as a SEQUENCE through one controller instance
+STATEFUL = {"hinted"}
+
+
+def _raw_twists(law, cfg, pose, path, clearance):  # type: ignore[no-untyped-def]
+    """The PURE tick of a law, before any state it keeps.
+
+    A stateful law's first tick is the only one a fresh instance can produce,
+    and for `hinted` that tick is rate limited from a standing start -- so
+    sweeping `update()` would never reach the clamp or the governor's ceiling
+    and the branch census below would be measuring the limiter, not the law.
+    The limiter has its own gate in `test_stateful_parity_over_a_sequence`.
+    """
+    if law not in STATEFUL:
+        return _twists(law, cfg, pose, path, clearance)
+    ext = load_extension()
+    clr = None if clearance is None else np.ascontiguousarray(clearance, dtype=np.float64)
+    py = hinted.update(pose, path, cfg, clearance)
+    rs = ext.update_hinted_raw(
+        (float(pose.position.x), float(pose.position.y), float(pose.yaw)),
+        path_xy_yaw(path),
+        clr,
+        cfg.law_params,
+        cfg.hinted_params,
+    )
+    return py, rs
 
 
 def _twists(law, cfg, pose, path, clearance):  # type: ignore[no-untyped-def]
@@ -179,7 +215,7 @@ def _twists(law, cfg, pose, path, clearance):  # type: ignore[no-untyped-def]
 def test_rust_matches_python(law: str) -> None:
     seen = {"fan": 0, "governed": 0, "clamped": 0, "held": 0}
     for k, case in enumerate(_cases()):
-        a, b = _twists(law, *case)
+        a, b = _raw_twists(law, *case)
         for c, (x, y) in enumerate(zip(a, b, strict=True)):
             assert abs(x - y) <= TOL, f"case {k} component {c}: python {x!r} vs rust {y!r}"
         cfg = case[0]
@@ -200,7 +236,7 @@ def test_parity_headroom(law: str) -> None:
     """Report the real spread: it must sit far under the asserted tolerance."""
     worst = 0.0
     for case in _cases():
-        a, b = _twists(law, *case)
+        a, b = _raw_twists(law, *case)
         worst = max(worst, max(abs(x - y) for x, y in zip(a, b, strict=True)))
     assert worst <= TOL, f"max component diff {worst:.3e}"
     # libm hypot/sin/cos are shared between the two, so the only expected
@@ -242,3 +278,50 @@ def test_corridor_reaches_goal_rust() -> None:
     result = run_episode(sc, make_rust(), policy, EpisodeConfig(replan_hz=0.0))
     assert result.outcome == "goal"
     assert not result.contact.any()
+
+
+@pytest.mark.parametrize("law", sorted(STATEFUL))
+def test_stateful_parity_over_a_sequence(law: str) -> None:
+    """A law with memory has to agree tick after tick, not just once.
+
+    One instance each, fed the whole sweep in order at a realistic 50 Hz clock:
+    a rate limiter that diverged by an ulp on tick one would carry that ulp
+    forward, so this is the assertion that actually binds it. The tick times
+    deliberately include a stall longer than the limiter's MAX_TICK and a
+    repeated timestamp, both of which its dt fallback has to handle the same
+    way on either side.
+    """
+    make_py, make_rs = LAWS[law]
+    cases = list(_cases())
+    py_law, rs_law = make_py(cases[0][0]), make_rs(cases[0][0])
+    worst = 0.0
+    t = 0.0
+    for k, (cfg, pose, path, clearance) in enumerate(cases):
+        # the config is per-case in this sweep, so rebuild on a change and
+        # reset BOTH -- a fresh law and a reset law must answer identically
+        if k and cfg is not cases[k - 1][0]:
+            py_law, rs_law = make_py(cfg), make_rs(cfg)
+        t += (0.02, 0.02, 0.0, 0.5)[k % 4]  # nominal, nominal, repeat, stall
+        a = py_law.update(pose, path, t, clearance)
+        b = rs_law.update(pose, path, t, clearance)
+        got = ((a.linear.x, a.linear.y, a.angular.z), (b.linear.x, b.linear.y, b.angular.z))
+        for c, (x, y) in enumerate(zip(*got, strict=True)):
+            assert abs(x - y) <= TOL, f"tick {k} component {c}: python {x!r} vs rust {y!r}"
+            worst = max(worst, abs(x - y))
+    assert worst == 0.0, f"unexpected non-zero divergence {worst:.3e}"
+
+
+@pytest.mark.parametrize("law", sorted(STATEFUL))
+def test_reset_clears_every_tick_of_history(law: str) -> None:
+    """reset() must make a used law indistinguishable from a fresh one."""
+    make_py, make_rs = LAWS[law]
+    cfg, pose, path, clearance = next(c for c in _cases() if len(c[2].poses) > 3)
+    other = next(c for c in _cases() if len(c[2].poses) > 3 and c[2] is not path)
+    for make in (make_py, make_rs):
+        fresh, used = make(cfg), make(cfg)
+        for _ in range(5):  # give `used` a foreign history to forget
+            used.update(other[1], other[2], 0.02, other[3])
+        used.reset()
+        a = fresh.update(pose, path, 0.02, clearance)
+        b = used.update(pose, path, 0.02, clearance)
+        assert (a.linear.x, a.linear.y, a.angular.z) == (b.linear.x, b.linear.y, b.angular.z)

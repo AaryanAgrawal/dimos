@@ -52,10 +52,10 @@ pace it is held to. `tracks.py` is the one place both are written down, and the
 CLI, the episode config, the judge and the deployed adapter all name a track
 rather than a law:
 
-| track    | eval           | `update()` receives                         | law     |
-|----------|----------------|---------------------------------------------|---------|
-| `hinted` | `--score`      | pose + path + per-waypoint clearance array   | `seed`  |
-| `blind`  | `--score --blind` | pose + path (stamps still carry precision) | `blind` |
+| track    | eval              | `update()` receives                        | law      |
+|----------|-------------------|--------------------------------------------|----------|
+| `hinted` | `--score`         | pose + path + per-waypoint clearance array | `hinted` |
+| `blind`  | `--score --blind` | pose + path (stamps still carry precision) | `blind`  |
 
 Laws live one per module in `laws/` (`rust/src/laws/` for their ports), over
 shared facilities: `geom` (arc length, progress, fan detection, carrot,
@@ -66,9 +66,21 @@ replacing its own track's law and flipping one line in `TRACKS`.
 
 `blind` is `motion-tc-autoresearch@blind_research01` (evo exp_0013): the gait
 slip inverse (`walk_command`), constant time headway, and the governor read off
-the path stamps. Its `walk_gain`/`walk_slip` are properties of the POLICY BLOB,
-not of the law — re-run `probe_walk_slip.py` against the deployed gait and
-re-key them before this drives hardware.
+the path stamps. `hinted` is `@hint_research01` (evo exp_0045): a walk-threshold
+envelope (0.45/0.95 commanded, carried by the law's own config default), a
+tangent feedforward with foot correction in place of the aim-at-the-carrot term,
+a brake-feasible preview, a pinch-escape leg, and a self-rate-limited command.
+
+Both tracks hit the same plant dead zone and solved it differently on purpose —
+blind with an actuator inverse, hinted by moving its envelope — because the two
+labs are researched independently and sharing a mechanism biases the other's
+search. Both calibrations are properties of the POLICY BLOB, not of a law: on a
+different gait re-run `probe_walk_slip.py` and re-key before driving hardware.
+
+`hinted` is the only law that keeps state (one tick of its own previous command,
+so it can ramp at the plant's slew). It is a `#[pyclass]` on the rust side,
+`reset()` must make a used instance indistinguishable from a fresh one, and its
+parity is replayed as a sequence rather than asserted on a single tick.
 
 Each `*-rs` law is a port of its python twin, not a variant: `test_rust_parity.py`
 holds every pair to 1e-9 per twist component over 240 seeded cases (observed

@@ -25,8 +25,16 @@
 //! RULES. Every law is a PORT, not a redesign -- its `control/laws/*.py` twin
 //! is the specification and `control/test_rust_parity.py` holds the two to
 //! 1e-9 per component. Any change to an algorithm has to land on the python
-//! side first. Stateless per tick (the python `reset()` is a no-op),
-//! single-threaded, deterministic; dependencies stay at pyo3/numpy.
+//! side first. Single-threaded and deterministic; dependencies stay at
+//! pyo3/numpy.
+//!
+//! STATE. A law may keep some, and `laws/hinted.rs` does -- one tick of its
+//! own previous command, so it can ramp its output at the plant's slew. Such a
+//! law is a `#[pyclass]` rather than a free function, `reset()` must make a
+//! used instance indistinguishable from a fresh one, and its parity is
+//! replayed as a SEQUENCE (a single call would only ever prove tick one).
+//! Determinism is unchanged by this: no wall clock, no unseeded randomness,
+//! and the tick time arrives as an argument.
 //!
 //! NUMERICS. Parity is per-operation, not per-formula: `geom.rs` keeps the
 //! python's operation ORDER and its exact tie-breaks (`argmin` takes the

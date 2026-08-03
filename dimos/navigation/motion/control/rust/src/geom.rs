@@ -30,6 +30,7 @@
 
 /// The numeric half of `ControllerConfig`. `frame_id` stays python-side: it
 /// selects the tf lookup, it does not enter the law.
+#[derive(Clone)]
 pub struct Params {
     pub lookahead: f64,
     pub max_speed: f64,

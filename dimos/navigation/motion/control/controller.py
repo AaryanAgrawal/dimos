@@ -71,6 +71,20 @@ class ControllerConfig(BaseConfig):
     walk_gain: float = 0.964
     walk_slip: float = 0.132
     walk_slip_ramp: float = 0.08  # below this intended speed the correction fades out
+    # --- read by the hinted law only (laws/hinted.py) ---
+    # Centred window the tangent feedforward reads the plan's direction over.
+    tangent_preview: float = 0.15
+    # The governor's pinch-escape leg: below escape_clearance of room (read over
+    # escape_preview of arc, not the ramp's speed_lookahead) the lower anchor
+    # rises toward escape_speed, because what kills in a gap is dwell.
+    escape_clearance: float = 0.10
+    escape_preview: float = 1.00
+    escape_speed: float = 0.75
+    # Brake-feasible preview: a previewed waypoint imposes only what it can,
+    # given the body may decelerate on the way there. brake_accel 0 reproduces
+    # the seed's flat minimum exactly.
+    brake_accel: float = 0.8
+    brake_margin: float = 0.15
 
     @property
     def law_params(self) -> tuple[float, ...]:
@@ -98,6 +112,17 @@ class ControllerConfig(BaseConfig):
     def walk_params(self) -> tuple[float, float, float]:
         return (self.walk_gain, self.walk_slip, self.walk_slip_ramp)
 
+    @property
+    def hinted_params(self) -> tuple[float, float, float, float, float, float]:
+        return (
+            self.tangent_preview,
+            self.escape_clearance,
+            self.escape_preview,
+            self.escape_speed,
+            self.brake_accel,
+            self.brake_margin,
+        )
+
 
 class TrajectoryController(Protocol):
     config: ControllerConfig
@@ -117,6 +142,8 @@ REGISTRY = {
     "seed-rs": "dimos.navigation.motion.control.laws.seed:make_rust",
     "blind": "dimos.navigation.motion.control.laws.blind:make",
     "blind-rs": "dimos.navigation.motion.control.laws.blind:make_rust",
+    "hinted": "dimos.navigation.motion.control.laws.hinted:make",
+    "hinted-rs": "dimos.navigation.motion.control.laws.hinted:make_rust",
     # the seed's names before the tracks split; kept so old invocations work
     "pursuit": "dimos.navigation.motion.control.laws.seed:make",
     "pursuit-rs": "dimos.navigation.motion.control.laws.seed:make_rust",
