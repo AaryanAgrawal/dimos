@@ -15,6 +15,10 @@ crate-type = ["cdylib", "rlib"]
 name = "mls_planner"
 path = "src/main.rs"
 
+[[bin]]
+name = "odom_body_frame"
+path = "src/bin/odom_body_frame.rs"
+
 # Registry entry read by `dimos bake` (graph + codegen) and cross-checked at
 # compile time by #[module(name = "mls_planner")].
 # threads = 2: the handle loop must keep dispatching while the planning worker
@@ -36,6 +40,20 @@ surface_map = "sensor_msgs.PointCloud2"
 nodes = "sensor_msgs.PointCloud2"
 node_edges = "nav_msgs.Path"
 path = "nav_msgs.Path"
+
+# A second module id in this crate: the registry is keyed by id, not by crate,
+# and odom_body_frame is one quaternion product — too small to be worth its own
+# Cargo.lock. It shares nothing with the planner but the manifest.
+[package.metadata.dimos.module.odom_body_frame]
+path = "dimos_mls_planner::odom_body_frame::OdomBodyFrame"
+python = "dimos.navigation.nav_3d.mls_planner.odom_body_frame:OdomBodyFrameNative"
+threads = 1
+
+[package.metadata.dimos.module.odom_body_frame.inputs]
+odometry = "nav_msgs.Odometry"
+
+[package.metadata.dimos.module.odom_body_frame.outputs]
+body_odometry = "nav_msgs.Odometry"
 
 [features]
 # pyo3 is only needed for the python extension module. `dimos bake` links this
