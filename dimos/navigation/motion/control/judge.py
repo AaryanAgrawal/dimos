@@ -229,7 +229,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         tilt_p99=round(tilt_p99, 4),
         saturation=round(sat, 4),
         plan_ms=round(float(np.max(result.plan_ms)), 2) if result.plan_ms else 0.0,
-        total=round(100.0 * arrived + 10.0 * precision + 0.5 * pace + 0.5 * composure, 2),
+        total=round(100.0 * arrived + 10.0 * precision + 5.0 * pace + 0.5 * composure, 2),
     )
     return out
 

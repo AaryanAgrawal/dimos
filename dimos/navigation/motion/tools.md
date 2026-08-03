@@ -53,5 +53,7 @@ dimos run go2-zenoh-motion
 python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --spawn
 ```
 
-Both batteries score `gate * (100 + 10 + 1)`-shaped pillars, max 111: the
-planner against the SE(2) gold oracle, the controller against physics.
+Both batteries score gate-times-pillars: the planner against the SE(2) gold
+oracle (`gate * (100 + 10 + 1)`, max 111), the controller against physics
+(`gate * (100 + 10 + 5 + 0.5)`, max 115.5 — pace weighted up so the hinted
+track has a speed gradient worth chasing).
