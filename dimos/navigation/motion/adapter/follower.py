@@ -121,9 +121,11 @@ class TrajectoryFollowerConfig(ModuleConfig):
     # reading a different world than the one that was planned. The referee's
     # control/world.py takes `emb.width / 2`, so this does too -- naming the
     # EMBODIMENT rather than a number, so body dimensions live in exactly one
-    # place (planner/autoresearch/scenarios.py). Set half_width only to override.
+    # place (planner/autoresearch/scenarios.py). There is deliberately no
+    # half_width override: a `float | None` cannot cross into the native module
+    # (`to_config_dict` drops None and `#[native_config]` bans Option), and a
+    # knob the deployed twin cannot carry is a knob that drifts.
     embodiment: str = "go2"
-    half_width: float | None = None
     # Seconds between "still not moving, and here is why" lines.
     stall_report_s: float = 3.0
     # A commanded speed at or under this is standing still, whatever the reason.
@@ -153,11 +155,7 @@ class TrajectoryFollower(Module):
         self._clearance_key: tuple[int, int] | None = None
         self._latch = GoalLatch(self.config.goal_tolerance)
         self._track = TRACKS[self.config.track]
-        self._half_width = (
-            self.config.half_width
-            if self.config.half_width is not None
-            else EMBODIMENTS[self.config.embodiment].width / 2.0
-        )
+        self._half_width = EMBODIMENTS[self.config.embodiment].width / 2.0
         self._controller: TrajectoryController | None = None
         self._stop_event = Event()
         self._thread: Thread | None = None

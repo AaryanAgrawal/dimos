@@ -235,7 +235,9 @@ def run_episode(
 
     sim_dt = model.opt.timestep
     decim = max(1, round(CONTROL_DT / sim_dt))
-    frame_id = controller.config.frame_id
+    # Pose and plan are both mujoco world coordinates here, so that is what the
+    # label says. A controller has no frame of its own to name.
+    frame_id = "world"
 
     hist: collections.deque[np.ndarray] = collections.deque(maxlen=policy.hist)
     last_action = np.zeros(policy.act_dim)

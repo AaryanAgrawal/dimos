@@ -190,6 +190,37 @@ pub fn decode_ceilings(ts: &[f64], path: &[[f64; 3]], cfg: &Params) -> Option<Ve
     Some(out)
 }
 
+/// Speed ceilings -> the clearance that reproduces them under the ENCODER's
+/// governor.
+///
+/// A port of `profile.ceilings_to_clearance`, and the exact linear inverse of
+/// `governor_speed` on `[MIN_SPEED, MAX_SPEED]`. Deliberately keyed to this
+/// module's wire constants rather than to a consumer `Params`, for the same
+/// reason `governor_speed` is: it undoes the encoder, and the encoder is the
+/// producer's half of a wire contract.
+///
+/// WHY IT EXISTS. A follower on the hinted track with no cloud of its own has
+/// no clearance array, but the hinted law's only room channel IS the clearance
+/// argument (`laws::hinted::update` takes `Option<&[f64]>` and no stamps). So
+/// the stamps are decoded to ceilings and bent back into the clearance that
+/// would have produced them, which puts the planner's precision profile under
+/// a law that cannot read stamps -- without touching the law, which is
+/// parity-locked. Blind needs none of this: it decodes the stamps itself.
+// `max` then `min` rather than `clamp`, for `governor_speed`'s reason: the
+// input is whatever the stamps decoded to, and f64::clamp PANICS on a NaN.
+#[allow(clippy::manual_clamp)]
+pub fn ceilings_to_clearance(ceilings: &[f64]) -> Vec<f64> {
+    ceilings
+        .iter()
+        .map(|&v| {
+            // `np.clip` order, and `max` then `min` rather than `clamp`, which
+            // panics on a NaN the wire is free to hand us
+            let frac = (v.max(MIN_SPEED).min(MAX_SPEED) - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+            FLOOR_CLEARANCE + frac * (SPEED_CLEARANCE - FLOOR_CLEARANCE)
+        })
+        .collect()
+}
+
 /// The tightest decoded ceiling within `speed_lookahead` of `arcs[i]`.
 ///
 /// Read from `i + 1` rather than `i`. That is not an off-by-one: a decoded
