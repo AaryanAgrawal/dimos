@@ -18,12 +18,20 @@ crate-type = ["rlib"]
 name = "motion_planner"
 path = "src/bin/motion_planner.rs"
 
+[[bin]]
+name = "trajectory_follower"
+path = "src/bin/trajectory_follower.rs"
+
 # Registry entries read by `dimos bake` (graph + codegen) and cross-checked at
 # compile time by #[module(name = ...)]. The registry is keyed by module id, not
-# by crate, so this manifest grows one table per module it carries.
+# by crate, so one manifest carries a table per module -- which is why the two
+# adapters share a crate: they share both pure crates, one Cargo.lock and one
+# dependency list, and they mirror the python package layout.
 #
-# threads = 2: the worker calls block_in_place around `plan()`, so a
-# current_thread runtime inside a baked host would stall the dispatch loop.
+# threads = 2 on both: their worker tasks call block_in_place -- the planner
+# around `plan()`, the follower around the clearance rebuild -- so a
+# current_thread runtime inside a baked host would stall that module's
+# dispatch loop.
 [package.metadata.dimos.module.motion_planner]
 path = "dimos_motion_adapter::planner::MotionPlanner"
 python = "dimos.navigation.motion.adapter.planner_native:MotionPlannerNative"
@@ -37,6 +45,21 @@ planner_path = "nav_msgs.Path"
 [package.metadata.dimos.module.motion_planner.outputs]
 path = "nav_msgs.Path"
 plan_body = "nav_msgs.Path"
+
+[package.metadata.dimos.module.trajectory_follower]
+path = "dimos_motion_adapter::follower::TrajectoryFollower"
+python = "dimos.navigation.motion.adapter.follower_native:TrajectoryFollowerNative"
+threads = 2
+
+[package.metadata.dimos.module.trajectory_follower.inputs]
+path = "nav_msgs.Path"
+odometry = "nav_msgs.Odometry"
+local_map = "sensor_msgs.PointCloud2"
+stop_movement = "std_msgs.Bool"
+
+[package.metadata.dimos.module.trajectory_follower.outputs]
+nav_cmd_vel = "geometry_msgs.Twist"
+goal_reached = "std_msgs.Bool"
 
 [dependencies]
 dimos-module = { path = "../../../../../native/rust/dimos-module" }

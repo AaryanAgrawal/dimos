@@ -29,5 +29,6 @@
 //! the last stage of the loop can run on the Go2 without python in the tick.
 
 pub mod emb;
+pub mod follower;
 pub mod msg;
 pub mod planner;
