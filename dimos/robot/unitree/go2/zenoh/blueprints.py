@@ -276,3 +276,65 @@ go2_zenoh_motion_blind = autoconnect(
         [(TrajectoryFollower, "odometry", "body_odometry")]
     ),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
+
+# go2-zenoh-motion-local: go2-zenoh-motion with the time-critical half lifted off
+# the laptop. The four modules below are ABSENT here because they run on the robot
+# as one baked host (`dimos/navigation/motion/deployment_plan.md`):
+#
+#     odom_body_frame -> motion_planner -> trajectory_follower -> cmd_vel_mux
+#
+# So this composes from the module list rather than from go2_zenoh_raycaster, which
+# would drag in the CmdVelMux that now belongs on the robot. What stays here is
+# everything that is either expensive (the raycaster), global (the MLS graph), or
+# attached to the operator (rerun, clicks, teleop).
+#
+# THIS BLUEPRINT ALONE DOES NOT DRIVE. Without the baked host running there is no
+# planner, no follower and no mux, so clicks become goals and MLS plans a global
+# path that nothing tracks. Bring the robot host up first:
+#
+#     dimos bake motion_planner trajectory_follower cmd_vel_mux odom_body_frame \
+#         -o motion-host --target aarch64-unknown-linux-gnu \
+#         --remap motion_planner.odometry=body_odometry \
+#         --remap trajectory_follower.odometry=body_odometry
+#
+# and run it with DIMOS_ZENOH_LISTEN on a port of its own (the go2web bridge owns
+# 7447), then dial both from here: --robot-ips <ip>:7447,<ip>:7448.
+#
+# THE HOST MUST ALSO DIAL THE BRIDGE ITSELF, over loopback:
+#
+#     DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447
+#
+# Both robot-side sessions are passive listeners, so without this neither ever
+# links to the other and `dimos/odometry` -- which go2web publishes, not this
+# laptop -- never reaches odom_body_frame. The failure is quiet and asymmetric:
+# local_map and planner_path still arrive, because the laptop's native children
+# dial 7448 directly, so the host looks half-connected rather than misconfigured.
+# Dialling the bridge locally also keeps odometry off the wifi entirely.
+#
+# The mount rotation is the sharp edge: `dimos bake --emit-config` writes the
+# python class DEFAULT, which is identity -- "the sensor is already level", true of
+# no robot that tilts its lidar. The host's config must carry _mount_rotation()
+# below or body_odometry comes out unleveled and everything downstream steers off
+# heading with nothing in the logs to say why.
+#
+# cmd_vel still crosses back to the laptop, because GO2Zenoh is what talks to the
+# go2web bridge. This cut buys jitter immunity on the control loop, not fewer wire
+# crossings -- see "What this cut does and does not buy" in the deployment plan.
+go2_zenoh_motion_local = autoconnect(
+    vis_module(
+        viewer_backend=global_config.viewer,
+        rerun_config=_rerun_config({"world/pointlio_map": None, "world/lidar": None}),
+    ),
+    GO2Zenoh.blueprint(mid360_mount_rpy_deg=MID360_MOUNT_RPY_DEG),
+    RayTracingVoxelMap.blueprint(
+        voxel_size=voxel_size,
+        emit_every=10,
+        global_emit_every=100,
+        min_health=-1,
+        max_health=5,
+        support_min=4,
+    ),
+    _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
+    GoalRelay.blueprint(),
+    MovementManager.blueprint(),
+).global_config(transport="zenoh", n_workers=6, robot_model="unitree_go2")
