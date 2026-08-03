@@ -22,8 +22,6 @@ so a failure can be bisected by dropping down a level:
 - ``go2-zenoh-basic`` — streams plus teleop; the bridge, tf and camera, no mapping.
 - ``go2-zenoh-raycaster`` — adds :class:`RayTracingVoxelMap`.
 - ``go2-zenoh-nav`` — the full stack: planner, goal relay and path follower.
-- ``go2-zenoh-htc`` — ``go2-zenoh-nav`` with the follower swapped for the
-  ``DanLocalPlanner`` + ``DanHolonomicTC`` pair from ``unitree-go2-mls-htc``.
 - ``go2-zenoh-motion`` — the motion stack: the evolved autoresearch planner and
   the pursuit trajectory follower over the raycaster's local map.
 """
@@ -37,8 +35,6 @@ from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
-from dimos.navigation.dannav.holonomic_tc.module import DanHolonomicTC
-from dimos.navigation.dannav.local_planner.module import DanLocalPlanner
 from dimos.navigation.motion.adapter.follower import TrajectoryFollower
 from dimos.navigation.motion.adapter.planner import MotionPlanner
 from dimos.navigation.movement_manager.movement_manager import MovementManager
@@ -175,8 +171,8 @@ go2_zenoh_raycaster = autoconnect(
     ),
     RayTracingVoxelMap.blueprint(
         voxel_size=voxel_size,
-        emit_every=1,
-        global_emit_every=50,
+        emit_every=10,
+        global_emit_every=100,
         min_health=-1,
         max_health=5,
         support_min=4,
@@ -206,7 +202,7 @@ _mls_planner_motion = MLSPlannerNative.blueprint(
     robot_height=0.3,
     surface_closing_radius=0.3,
     wall_clearance_m=0.05,
-    wall_buffer_m=0.35,
+    wall_buffer_m=0.5,
     wall_buffer_weight=30.0,
     step_threshold_m=0.16,
     step_penalty_weight=4.0,
@@ -225,26 +221,5 @@ go2_zenoh_motion = autoconnect(
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
     MotionPlanner.blueprint().remappings([(MotionPlanner, "odometry", "body_odometry")]),
     TrajectoryFollower.blueprint().remappings([(TrajectoryFollower, "odometry", "body_odometry")]),
-    MovementManager.blueprint(),
-).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
-
-# The nav stack with BasicPathFollower swapped for the DanLocalPlanner + DanHolonomicTC
-# pair from unitree-go2-mls-htc. The raw planner stream moves to planner_path; the gate
-# forwards committed paths on path, so world/planner_path is muted in rerun.
-go2_zenoh_htc = autoconnect(
-    go2_zenoh_raycaster,
-    OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
-    _mls_planner.remappings([(MLSPlannerNative, "path", "planner_path")]),
-    # Fed the leveled odometry, so its start_pose doubles as the body-frame PoseStamped
-    # the Dan modules consume — mirroring mls_htc, where planner start and follower odom
-    # are the same topic.
-    GoalRelay.blueprint().remappings([(GoalRelay, "odometry", "body_odometry")]),
-    # Setting resample_spacing_m to > 0.0 will smooth out jagged paths returned by MLSP
-    DanLocalPlanner.blueprint(resample_spacing_m=0.1).remappings(
-        [(DanLocalPlanner, "odom", "start_pose")]
-    ),
-    DanHolonomicTC.blueprint(run_profile="walk").remappings(
-        [(DanHolonomicTC, "odom", "start_pose")]
-    ),
     MovementManager.blueprint(),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")

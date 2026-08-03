@@ -15,6 +15,8 @@ Oneliners for everything: [tools.md](tools.md).
 
 **MotionPlanner** (adapter)
 
+# local map is what we internally call "local global" - accumultad map around the robot
+
 - in: `local_map: sensor_msgs.PointCloud2` — raycaster cloud
 - in: `odometry: nav_msgs.Odometry` — own pose (pointlio, `odom` frame)
 - in: `planner_path: nav_msgs.Path` — global path; the goal is a carrot along it
