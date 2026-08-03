@@ -11,6 +11,8 @@ Local motion: plan a path around obstacles, walk it, prove both work.
 
 Oneliners for everything: [tools.md](tools.md).
 
+Putting the time-critical half on the robot: [deployment_plan.md](deployment_plan.md).
+
 ## I/O — everything is stock dimos msgs
 
 **MotionPlanner** (adapter)
