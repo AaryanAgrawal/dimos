@@ -200,13 +200,19 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         if len(first_xy) > 1
         else 0.0
     )
+    # The hinted track is allowed to outrun the path encoding, so it gets a
+    # faster cruise target AND a pace pillar heavy enough to chase (115.5-max
+    # totals). Blind cannot legally exceed the encoding: mid-band cruise,
+    # bottom-tier weight, totals stay 111-shaped.
+    hinted = result.cfg.annotate_clearance
     if refused_ok:
         pace = 1.0
     elif result.outcome == "goal" and result.time_to_goal is not None:
-        cruise = CRUISE_HINTED if result.cfg.annotate_clearance else CRUISE_BLIND
+        cruise = CRUISE_HINTED if hinted else CRUISE_BLIND
         pace = min(1.0, (arc / cruise + GRACE_S) / max(result.time_to_goal, 1e-6))
     else:
         pace = 0.0
+    pace_weight = 5.0 if hinted else 0.5
     tilt_p99 = float(np.percentile(result.tilt, 99)) if len(result.tilt) else 0.0
     stability = max(0.0, 1.0 - tilt_p99 / TILT_SCALE)
     sat = _saturation(result)
@@ -229,7 +235,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         tilt_p99=round(tilt_p99, 4),
         saturation=round(sat, 4),
         plan_ms=round(float(np.max(result.plan_ms)), 2) if result.plan_ms else 0.0,
-        total=round(100.0 * arrived + 10.0 * precision + 5.0 * pace + 0.5 * composure, 2),
+        total=round(100.0 * arrived + 10.0 * precision + pace_weight * pace + 0.5 * composure, 2),
     )
     return out
 

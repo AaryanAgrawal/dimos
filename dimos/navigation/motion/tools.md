@@ -54,6 +54,9 @@ python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --spawn
 ```
 
 Both batteries score gate-times-pillars: the planner against the SE(2) gold
-oracle (`gate * (100 + 10 + 1)`, max 111), the controller against physics
-(`gate * (100 + 10 + 5 + 0.5)`, max 115.5 — pace weighted up so the hinted
-track has a speed gradient worth chasing).
+oracle (`gate * (100 + 10 + 1)`, max 111), the controller against physics —
+per track: blind `gate * (100 + 10 + 0.5 + 0.5)` (max 111, cruise 0.35 =
+the stamp-encoding mid-band it may not exceed), hinted
+`gate * (100 + 10 + 5 + 0.5)` (max 115.5, cruise 0.75 = the plant ceiling:
+a speed gradient worth chasing, since the hint permits outrunning the
+encoding).
