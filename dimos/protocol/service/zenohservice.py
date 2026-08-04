@@ -42,6 +42,9 @@ _CONNECT_POLL_INTERVAL = 0.05
 # interface name, and Darwin spells loopback differently.
 LOOPBACK_INTERFACE = "lo0" if platform.system() == "Darwin" else "lo"
 
+# Zenoh's own name for "every multicast-capable interface".
+ALL_INTERFACES = "auto"
+
 
 def _default_connect_endpoints() -> list[str]:
     """Dial known robots directly instead of trusting multicast scouting.
@@ -71,6 +74,12 @@ def _default_scouting() -> bool:
     from dimos.core.global_config import global_config
 
     return global_config.zenoh_scouting
+
+
+def _default_scouting_interface() -> str:
+    from dimos.core.global_config import global_config
+
+    return global_config.zenoh_interface.strip()
 
 
 def _default_connect_timeout() -> float:
@@ -104,14 +113,21 @@ class ZenohConfig(BaseConfig):
     listen: list[str] = []
     # Discover peers across the network. Off keeps discovery on loopback.
     scouting: bool = Field(default_factory=_default_scouting)
+    # Named interface to scout on, overriding `scouting`. Empty derives it.
+    scouting_interface: str = Field(default_factory=_default_scouting_interface)
     # Seconds to block in start() waiting for `connect` endpoints to link.
     connect_timeout: float = Field(default_factory=_default_connect_timeout)
+
+    @property
+    def multicast_interface(self) -> str:
+        """Interface multicast scouting binds to."""
+        return self.scouting_interface or (ALL_INTERFACES if self.scouting else LOOPBACK_INTERFACE)
 
     @property
     def session_key(self) -> str:
         return (
             f"{self.mode}|{json.dumps(sorted(self.connect))}"
-            f"|{json.dumps(sorted(self.listen))}|{self.scouting}"
+            f"|{json.dumps(sorted(self.listen))}|{self.multicast_interface}"
         )
 
 
@@ -131,15 +147,17 @@ class ZenohSessionPool:
                     zconfig.insert_json5("connect/endpoints", json.dumps(config.connect))
                 if config.listen:
                     zconfig.insert_json5("listen/endpoints", json.dumps(config.listen))
-                if not config.scouting:
-                    # Loopback multicast stays on so sibling worker processes on
-                    # this host still discover each other -- cutting scouting
-                    # outright leaves them unable to reach one another at all,
-                    # since peers don't route each other's traffic.
-                    zconfig.insert_json5(
-                        "scouting/multicast/interface", json.dumps(LOOPBACK_INTERFACE)
-                    )
-                    zconfig.insert_json5("scouting/gossip/enabled", "false")
+                # Multicast scouting always runs; the interface sets how far it
+                # reaches. Loopback by default, so sibling worker processes on
+                # this host still discover each other -- cutting scouting
+                # outright leaves them unable to reach one another at all,
+                # since peers don't route each other's traffic. Gossip stays on
+                # at every scope: it is what turns one dialled endpoint into the
+                # whole mesh, handing back the peers behind it instead of making
+                # every one of them a hand-written endpoint.
+                zconfig.insert_json5(
+                    "scouting/multicast/interface", json.dumps(config.multicast_interface)
+                )
                 self._sessions[key] = zenoh.open(zconfig)
                 logger.debug(f"Zenoh session opened in {config.mode} mode")
             return self._sessions[key]

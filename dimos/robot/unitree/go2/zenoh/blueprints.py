@@ -275,7 +275,10 @@ go2_zenoh_motion_blind = autoconnect(
 #         -o motion-host --target aarch64-unknown-linux-gnu
 #
 # and run it with DIMOS_ZENOH_LISTEN on a port of its own (the go2web bridge owns
-# 7447), then dial both from here: --robot-ips <ip>:7447,<ip>:7448.
+# 7447), then dial both from here: --robot-ips <ip>:7447,<ip>:7448. Dialling both
+# is belt-and-braces now that gossip is on at every scope -- one endpoint hands
+# back the peers behind it -- but the fixed listen port still earns its keep: it
+# is what makes the host dialable at all before any gossip has happened.
 #
 # THE HOST MUST ALSO DIAL THE BRIDGE ITSELF, over loopback:
 #

@@ -184,11 +184,16 @@ def _spawn_env(extra_env: dict[str, str]) -> dict[str, str]:
     # Native zenoh sessions scout on their own; on multicast-filtering
     # LANs they never find the robot. Hand them the same explicit dial
     # endpoints the python sessions use.
-    from dimos.protocol.service.zenohservice import _default_connect_endpoints
+    from dimos.protocol.service.zenohservice import ZenohConfig, _default_connect_endpoints
 
     endpoints = _default_connect_endpoints()
     if endpoints:
         env["DIMOS_ZENOH_CONNECT"] = ",".join(endpoints)
+
+    # Scouting only pairs two sessions when both bind the same interface, so the
+    # child inherits the resolved one rather than picking its own default.
+    if global_config.transport == "zenoh":
+        env["DIMOS_ZENOH_INTERFACE"] = ZenohConfig().multicast_interface
 
     # set Rust logging to match Python level
     env["RUST_LOG"] = _PYTHON_TO_RUST_LEVELS.get(

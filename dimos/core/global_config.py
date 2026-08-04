@@ -61,6 +61,10 @@ class GlobalConfig(BaseSettings):
     # Sibling worker processes still find each other,
     # remote peers come solely from the connect endpoints derived from --robot-ip
     zenoh_scouting: bool = False
+    # Interface multicast scouting binds to, overriding the choice above. Name a
+    # link (`--zenoh-interface wlan0`) to scout exactly that one -- how robots on
+    # a shared LAN find each other without scouting every interface they own.
+    zenoh_interface: str = ""
     # Seconds ZenohService.start() blocks for the configured connect endpoints to
     # link before giving up and continuing. 0 disables the wait.
     zenoh_connect_timeout: float = 1.0

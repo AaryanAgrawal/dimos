@@ -72,6 +72,37 @@ pub struct ZenohTransport {
     publishers: Mutex<HashMap<String, Arc<Publisher<'static>>>>,
 }
 
+/// Zenoh takes an interface name, and Darwin spells loopback differently.
+const LOOPBACK_INTERFACE: &str = if cfg!(target_os = "macos") {
+    "lo0"
+} else {
+    "lo"
+};
+
+/// Zenoh's own name for "every multicast-capable interface".
+const ALL_INTERFACES: &str = "auto";
+
+/// Interface multicast scouting binds to, mirroring the python session: an
+/// explicit `DIMOS_ZENOH_INTERFACE` wins (the launcher passes the parent's
+/// resolved one), `DIMOS_ZENOH_SCOUTING=on` widens it to every interface, and
+/// the default stays on loopback.
+fn scouting_interface() -> String {
+    resolve_scouting_interface(
+        std::env::var("DIMOS_ZENOH_INTERFACE").ok().as_deref(),
+        std::env::var("DIMOS_ZENOH_SCOUTING").ok().as_deref(),
+    )
+}
+
+fn resolve_scouting_interface(iface: Option<&str>, scouting: Option<&str>) -> String {
+    match iface.map(str::trim) {
+        Some(iface) if !iface.is_empty() => iface.to_string(),
+        _ if matches!(scouting.map(str::trim), Some("on" | "true" | "1")) => {
+            ALL_INTERFACES.to_string()
+        }
+        _ => LOOPBACK_INTERFACE.to_string(),
+    }
+}
+
 /// Comma-separated locator list (`DIMOS_ZENOH_CONNECT`) as a JSON5 array for
 /// `connect/endpoints`. `None` when no non-empty locator remains.
 fn connect_endpoints_json5(endpoints: &str) -> Option<String> {
@@ -114,20 +145,19 @@ impl ZenohTransport {
                 .insert_json5("listen/endpoints", &json5)
                 .map_err(|e| io::Error::other(e.to_string()))?;
         }
-        // Multicast scouting is a liability on robot deployments: the scout
-        // flood tripped a zenoh Hello EINVAL on the laptop (link-local
-        // locator) and discovery never converged. Explicit endpoints only.
-        if matches!(
-            std::env::var("DIMOS_ZENOH_SCOUTING").as_deref(),
-            Ok("off" | "false" | "0")
-        ) {
-            config
-                .insert_json5("scouting/multicast/enabled", "false")
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            config
-                .insert_json5("scouting/gossip/enabled", "false")
-                .map_err(|e| io::Error::other(e.to_string()))?;
-        }
+        // Multicast scouting always runs; the interface sets how far it reaches.
+        // Scouting every interface is a liability on robot deployments -- the
+        // scout flood tripped a zenoh Hello EINVAL on the laptop (link-local
+        // locator) and discovery never converged -- so this stays on loopback
+        // unless asked otherwise. Gossip stays on at every scope: it is what
+        // lets a module dialled over one explicit endpoint pick up the peers
+        // behind it, ephemeral listen ports and all.
+        config
+            .insert_json5(
+                "scouting/multicast/interface",
+                &format!("\"{}\"", scouting_interface()),
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
         let session = ::zenoh::open(config).await.map_err(to_io)?;
         Ok(Self {
             session,
@@ -204,6 +234,30 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn scouting_stays_on_loopback_by_default() {
+        assert_eq!(resolve_scouting_interface(None, None), LOOPBACK_INTERFACE);
+        assert_eq!(
+            resolve_scouting_interface(Some("  "), Some("off")),
+            LOOPBACK_INTERFACE
+        );
+    }
+
+    #[test]
+    fn scouting_on_reaches_every_interface() {
+        assert_eq!(resolve_scouting_interface(None, Some("on")), ALL_INTERFACES);
+        assert_eq!(resolve_scouting_interface(None, Some("1")), ALL_INTERFACES);
+    }
+
+    #[test]
+    fn named_interface_overrides_scouting() {
+        assert_eq!(
+            resolve_scouting_interface(Some("wlan0"), Some("on")),
+            "wlan0"
+        );
+        assert_eq!(resolve_scouting_interface(Some(" wlan0 "), None), "wlan0");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn round_trip_delivers_payload() {

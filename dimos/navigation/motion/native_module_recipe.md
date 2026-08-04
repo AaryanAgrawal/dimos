@@ -299,8 +299,10 @@ stdin and closes it:
 
 (`_stdin_blob`, native_module.py:480-489; read by `read_stdin_config`,
 dimos-module/src/module.rs:458-464). The env gets `DIMOS_TRANSPORT`,
-`DIMOS_ZENOH_CONNECT` (explicit dial endpoints — multicast-hostile LANs) and
-`RUST_LOG` mapped from the python log level (native_module.py:177-197). The
+`DIMOS_ZENOH_CONNECT` (explicit dial endpoints — multicast-hostile LANs),
+`DIMOS_ZENOH_INTERFACE` (the parent's resolved scouting interface, so parent and
+child discover on the same one) and `RUST_LOG` mapped from the python log level
+(native_module.py:177-201). The
 child's JSON stderr lines are re-emitted through the python logger; a child
 that dies unexpectedly takes the module down (`_watch_process`). `prctl`
 PDEATHSIG kills the child if python dies.
