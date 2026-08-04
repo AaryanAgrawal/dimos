@@ -48,7 +48,7 @@ import numpy as np
 
 from dimos.msgs.helpers import resolve_msg_type
 from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
-from dimos.navigation.motion.adapter.planner import carrot_along
+from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
 from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS, Scenario
@@ -114,6 +114,9 @@ class Tick:
     # Where tf put the ground under the base at this tick: the bound the floor
     # estimate is held to, exactly as MotionPlanner._floor_prior computes it.
     floor_prior: float | None = None
+    # Bumped when the global route MOVED, so (imap, route_seq) is the pair
+    # MotionPlanner's replan gate keys on.
+    route_seq: int = 0
 
 
 @dataclass
@@ -187,6 +190,11 @@ def load_recording(
     )
     map_ts = np.array([t for t, _ in maps])
     global_ts = np.array([t for t, _ in globals_])
+    # MLS republishes its route at ~1 Hz whether or not it moved; the module's
+    # gate keys on the route CHANGING, so number them the same way.
+    route_seq = [0]
+    for a, b in pairwise(globals_):
+        route_seq.append(route_seq[-1] + int(route_changed(a[1], b[1])))
     for ts, xy in plans:
         i, j, k = _before(ts, map_ts), _before(ts, rec.odom_ts), _before(ts, global_ts)
         if min(i, j, k) < 0 or rec.poses[j] is None or not len(globals_[k][1]):
@@ -195,9 +203,27 @@ def load_recording(
         assert pose is not None
         goal = carrot_along(globals_[k][1], (pose[0], pose[1]), lookahead)
         rec.ticks.append(
-            Tick(ts=ts, imap=i, pose=pose, goal=goal, recorded=xy, floor_prior=priors[j])
+            Tick(
+                ts=ts,
+                imap=i,
+                pose=pose,
+                goal=goal,
+                recorded=xy,
+                floor_prior=priors[j],
+                route_seq=route_seq[k],
+            )
         )
     return rec
+
+
+def gated_ticks(ticks: list[Tick]) -> list[Tick]:
+    """The ticks a replan gate would keep: the first of each (map, route) pair."""
+    kept: list[Tick] = []
+    for tick in ticks:
+        key = (tick.imap, tick.route_seq)
+        if not kept or (kept[-1].imap, kept[-1].route_seq) != key:
+            kept.append(tick)
+    return kept
 
 
 # ------------------------------------------------------------------ metrics --
@@ -471,10 +497,12 @@ def replay(
     ablate: bool,
     anchor: bool = True,
     ground_margin: float = 0.16,
+    gate: bool = False,
     rr: Any = None,
 ) -> list[dict[str, float]]:
     """Re-plan every recorded tick from its own inputs; optionally ablate one input at a time."""
     ep = episode(planner, embodiment)
+    ticks = gated_ticks(rec.ticks) if gate else rec.ticks
     offset = np.array([0.0, 0.0, z_offset], dtype=np.float32)
 
     def plan(
@@ -492,7 +520,7 @@ def replay(
                 pts = anchor_to_floor(pts, floor, ground_margin)
         return _xy(ep.plan(RefereeCloud.from_numpy(pts, frame_id="odom"), pose, goal))
 
-    t = rec.ticks[len(rec.ticks) // 2]
+    t = ticks[len(ticks) // 2]
     twice = plan(t.imap, t.pose, t.goal, t.floor_prior), plan(t.imap, t.pose, t.goal, t.floor_prior)
     deterministic = twice[0].shape == twice[1].shape and bool(np.allclose(*twice))
     anchored = anchor and any(t.floor_prior is not None for t in rec.ticks)
@@ -500,7 +528,7 @@ def replay(
     rows: list[dict[str, float]] = []
     started = time.perf_counter()
     previous: np.ndarray | None = None
-    for tick in rec.ticks:
+    for tick in ticks:
         out = plan(tick.imap, tick.pose, tick.goal, tick.floor_prior)
         row = {
             "ts": tick.ts,
@@ -534,7 +562,11 @@ def replay(
     rep_hold = np.array([r["n_replay"] < 2 for r in rows])
     both = ~rec_hold & ~rep_hold
     band = "floor-anchored" if anchored else "raw z-band"
-    print(f"\n=== replay ({planner}, {band}, z_offset {z_offset:+.2f} m, {len(rows)} ticks) ===")
+    cadence = "gated on input arrival" if gate else "every recorded tick"
+    print(
+        f"\n=== replay ({planner}, {band}, {cadence}, "
+        f"z_offset {z_offset:+.2f} m, {len(rows)} ticks) ==="
+    )
     print(
         f"deterministic (same inputs twice): {deterministic}\n"
         f"holds: recorded {int(rec_hold.sum())}, replayed {int(rep_hold.sum())}, agreeing "
@@ -548,14 +580,14 @@ def replay(
         f"plan wall time {1e3 * wall / len(rows):.1f} ms/tick"
     )
     if ablate:
-        _ablate(rec, ep, plan)
+        _ablate(ticks, plan)
     return rows
 
 
-def _ablate(rec: Recording, ep: PlannerEpisode, plan: Any) -> None:
+def _ablate(ticks: list[Tick], plan: Any) -> None:
     """Re-plan each tick pair changing ONE input, to attribute the change."""
     rows = []
-    for a, b in pairwise(rec.ticks):
+    for a, b in pairwise(ticks):
         # the floor prior travels with the pose: it is read off the same
         # odometry message the pose is
         base = plan(a.imap, a.pose, a.goal, a.floor_prior)
@@ -731,6 +763,9 @@ def main() -> None:
     ap.add_argument(
         "--no-anchor", action="store_true", help="replay on the raw z-band, as deployed before"
     )
+    ap.add_argument(
+        "--gate", action="store_true", help="replay only the ticks a replan gate would keep"
+    )
     ap.add_argument("--no-ablate", action="store_true", help="skip the one-input-at-a-time replay")
     ap.add_argument("--spawn", action="store_true", help="live rerun viewer instead of an rrd")
     ap.add_argument("--out", default="recordings", help="where the rrd and svgs land")
@@ -768,6 +803,7 @@ def main() -> None:
             not args.no_ablate,
             anchor=not args.no_anchor,
             ground_margin=args.ground_margin,
+            gate=args.gate,
             rr=rr,
         )
     latency_rows = latency(rec) if "latency" in passes else []

@@ -17,9 +17,9 @@
 //! A port of `adapter/planner.py`, which is the specification. The raycaster's
 //! `local_map` is the cloud, leveled body odometry is the pose, and the goal is
 //! a carrot -- `goal_lookahead_m` of arc along the MLS global route
-//! (`planner_path`), clamped to its end. Replans on a fixed cadence in a
-//! spawned worker, never off an input, and publishes the result as a stamped
-//! nav Path.
+//! (`planner_path`), clamped to its end. A spawned worker ticks on a fixed
+//! cadence but replans only when an input that matters has changed, and
+//! publishes the result as a stamped nav Path.
 //!
 //! A REFUSAL COMES OUT AS THE PLANNER MADE IT: a single-pose stub, which the
 //! follower reads as "hold". That is also the shape the staleness guard
@@ -68,6 +68,12 @@ pub struct Config {
     /// lidar's, not the robot's. tf resolves it into the body; messages are
     /// dropped until the mount leg arrives.
     pub base_frame: String,
+    /// Plan when an input that MATTERS changed -- a new local map, or a global
+    /// route that is not the one already planned against -- rather than on
+    /// every tick of the clock. The planner ticks at 5 Hz over a 1 Hz map, so
+    /// four ticks in five re-solve an unchanged world; the follower tracks the
+    /// published path as the robot moves and needs no republish to do it.
+    pub replan_on_change: bool,
     /// Anchor the cloud to the floor under the robot before planning, so the
     /// planner's body z-band (0.05..0.45 ABOVE THE GROUND) lands where the
     /// ground actually is. Off leaves the band where the map's z origin puts
@@ -119,6 +125,9 @@ struct Shared {
     /// Where tf puts the ground under the base: the floor estimate's bound.
     floor_prior: Option<f64>,
     global_xy: Option<Vec<[f64; 2]>>,
+    /// Bumped only when the route actually MOVED, not per arrival: MLS
+    /// republishes at ~1 Hz and holds still for seconds at a time.
+    route_seq: u64,
 }
 
 #[derive(Module)]
@@ -210,7 +219,12 @@ impl MotionPlanner {
             .iter()
             .map(|p| [p.pose.position.x, p.pose.position.y])
             .collect();
-        self.shared.lock().expect("shared mutex").global_xy = (!xy.is_empty()).then_some(xy);
+        let route = (!xy.is_empty()).then_some(xy);
+        let mut s = self.shared.lock().expect("shared mutex");
+        if route_changed(s.global_xy.as_deref(), route.as_deref()) {
+            s.route_seq = s.route_seq.wrapping_add(1);
+        }
+        s.global_xy = route;
     }
 }
 
@@ -239,6 +253,24 @@ pub fn carrot_along(route: &[[f64; 2]], robot: (f64, f64), lookahead: f64) -> Op
         remaining -= seg;
     }
     Some((last[0], last[1]))
+}
+
+/// Is this a different global route, or the same one published again?
+///
+/// MLS republishes at ~1 Hz and holds still for seconds at a time. Re-solving
+/// against a route the plan already accounts for is what the gate exists to
+/// skip, so "changed" has to mean the waypoints moved, not that a message came.
+pub fn route_changed(old: Option<&[[f64; 2]]>, new: Option<&[[f64; 2]]>) -> bool {
+    match (old, new) {
+        (Some(a), Some(b)) => a != b,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+/// Has an input the plan depends on arrived since the plan was made?
+pub fn replan_due(gate: bool, inputs: (u64, u64), planned: Option<(u64, u64)>) -> bool {
+    !gate || planned != Some(inputs)
 }
 
 /// What one tick of the replan loop should do. The python `_plan_loop`'s
@@ -403,6 +435,7 @@ struct Snapshot {
     pose: Option<(f64, f64, f64)>,
     floor_prior: Option<f64>,
     route: Option<Vec<[f64; 2]>>,
+    route_seq: u64,
 }
 
 impl Worker {
@@ -417,6 +450,8 @@ impl Worker {
         let mut gate = StaleGate::default();
         let mut viz = RateCap::new(self.config.viz_publish_hz);
         let mut points: Option<(u64, Arc<Vec<[f32; 3]>>)> = None;
+        // The (cloud, route) pair the published plan was made from.
+        let mut planned: Option<(u64, u64)> = None;
 
         loop {
             ticker.tick().await;
@@ -436,6 +471,10 @@ impl Worker {
                             "local_map is stale, holding"
                         );
                     }
+                    // A hold is not gated: it is a statement about the CLOCK,
+                    // and nothing arriving is exactly the case it fires on.
+                    // Forget what was planned so the first live tick plans.
+                    planned = None;
                     let pose = snap.pose.expect("Hold implies a pose");
                     let held = hold_stub(pose, &self.config.world_frame, msg::now_secs());
                     self.publish(&held, now, &mut viz).await;
@@ -443,6 +482,10 @@ impl Worker {
                 Tick::Plan => {
                     if gate.recover() {
                         info!("local_map is live again, resuming planning");
+                    }
+                    let inputs = (snap.cloud_seq, snap.route_seq);
+                    if !replan_due(self.config.replan_on_change, inputs, planned) {
+                        continue;
                     }
                     let pose = snap.pose.expect("Plan implies a pose");
                     let route = snap.route.expect("Plan implies a route");
@@ -467,6 +510,7 @@ impl Worker {
                         ))
                     });
                     if let Some(produced) = produced {
+                        planned = Some(inputs);
                         self.publish(&produced, now, &mut viz).await;
                     }
                 }
@@ -490,6 +534,7 @@ impl Worker {
             pose: s.pose,
             floor_prior: s.floor_prior,
             route: s.global_xy.clone(),
+            route_seq: s.route_seq,
         }
     }
 
@@ -696,6 +741,7 @@ mod tests {
             goal_lookahead_m: 5.0,
             world_frame: "odom".into(),
             base_frame: "base_link".into(),
+            replan_on_change: true,
             floor_anchor: true,
             lidar_height: 0.0,
             ground_margin_m: 0.16,
@@ -883,6 +929,52 @@ mod tests {
             .filter(|p| p[2] > cfg.ground_margin_m as f32)
             .collect();
         assert_eq!(anchored.as_ref(), kept.as_slice());
+    }
+
+    // the replan gate
+
+    #[test]
+    fn a_tick_with_nothing_new_does_not_replan() {
+        assert!(!replan_due(true, (7, 2), Some((7, 2))));
+    }
+
+    #[test]
+    fn a_new_map_or_a_new_route_replans() {
+        assert!(replan_due(true, (8, 2), Some((7, 2))));
+        assert!(replan_due(true, (7, 3), Some((7, 2))));
+    }
+
+    #[test]
+    fn the_first_tick_replans_because_nothing_was_planned_yet() {
+        assert!(replan_due(true, (0, 0), None));
+    }
+
+    #[test]
+    fn an_ungated_planner_replans_on_every_tick() {
+        assert!(replan_due(false, (7, 2), Some((7, 2))));
+    }
+
+    #[test]
+    fn a_route_republished_unchanged_is_not_a_change() {
+        let r = route(&[(0.0, 0.0), (1.0, 0.0)]);
+        assert!(!route_changed(Some(&r), Some(&r)));
+    }
+
+    #[test]
+    fn a_route_that_moved_is_a_change() {
+        let a = route(&[(0.0, 0.0), (1.0, 0.0)]);
+        let b = route(&[(0.0, 0.0), (1.0, 0.1)]);
+        assert!(route_changed(Some(&a), Some(&b)));
+        // and so is one that grew or shrank
+        assert!(route_changed(Some(&a), Some(&route(&[(0.0, 0.0)]))));
+    }
+
+    #[test]
+    fn a_route_appearing_or_going_away_is_a_change() {
+        let r = route(&[(0.0, 0.0), (1.0, 0.0)]);
+        assert!(route_changed(None, Some(&r)));
+        assert!(route_changed(Some(&r), None));
+        assert!(!route_changed(None, None));
     }
 
     #[test]

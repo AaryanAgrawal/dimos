@@ -190,6 +190,54 @@ holds are stale-map holds — every hold in this recording is the planner saying
    is only real on the sweep that hit it still blinks at the emit rate (15 % of
    interior vanishings).
 
+## Fixes landed
+
+Fixes 1–3 above are in. Replaying the same 410 ticks, one search per tick, all
+four numbers from `adapter/diagnose.py` on the same code path:
+
+| | plans published | holds | flips > 0.5 m | mean divergence | mean plan arc |
+|---|---|---|---|---|---|
+| **baseline** (raw band, 5 Hz) | 410 | 39 | 25 | 0.275 m | 7.53 m |
+| **fix 1** floor-anchored, 5 Hz | 410 | **175** | **18** | 0.299 m | **6.61 m** |
+| fix 3 raw band, gated | 107 | 10 | 27 | 1.017 m | 8.27 m |
+| **fix 1 + 3** anchored, gated | **107** | 42 | 17 | 0.908 m | 7.63 m |
+
+(arc is over the ticks that produced a plan; the carrot averages 2.82 m.)
+
+Read it in flips per MINUTE, not per published plan — gating shrinks the
+denominator to only the pairs that could ever differ, so a per-pair divergence
+is not comparable across the two cadences. Over the recording's 82.6 s:
+**18.2 flips/min baseline → 13.1 with the band anchored → 12.3 anchored and
+gated**, on 74 % fewer published plans and 74 % less search.
+
+**The holds go UP, and that is the fix working.** §4 predicted it: at a merely
+less-wrong band (+0.20) the planner already refused 59 % of ticks, because the
+corridor it was driven through is genuinely tight at body height and the
+deployed band hid that by looking over the obstacles. Anchored, the band sees
+clutter 0.2–0.5 m from the robot on essentially every tick — real returns,
+clustered by direction, not a ground carpet. A planner that refuses where there
+is no room is correct; making it move anyway is the recovery layer, and that is
+a separate piece of work.
+
+Two things the numbers here cannot say:
+
+- **Fix 2 is unscoreable on this recording.** The breathing window is baked into
+  the local maps it contains; a fixed emit radius changes what the mapper
+  publishes, not how the planner reads what was published. It is covered by
+  `voxel_ray_tracer.rs::region_radius_tests` instead — the property pinned there
+  is that the same map cropped by a near batch's window and by a far batch's
+  window is the same set of voxels, which is exactly the 68 % of churn §3
+  attributes to the boundary.
+- **The ground margin is 0.16 m, two voxel layers, not one.** A floor whose true
+  height sits near a voxel boundary quantises into both layers either side of
+  it. At one voxel the robot is inside its own band on 100 % of ticks here and
+  every tick refuses — the +0.29 failure again, one layer lower. At two it is
+  7 %.
+
+Not done, and deliberately: the FOLLOWER's clearance (`adapter/follower.py`)
+still reads the raw `Z_BAND` off the unanchored local map, so its speed governor
+and the planner's stamped profile now measure different slices of the world.
+
 ## Artifacts
 
 - `recordings/20260805-033007.zenoh-diagnose.rrd` — per-frame appeared/disappeared

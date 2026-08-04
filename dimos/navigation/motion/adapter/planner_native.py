@@ -53,6 +53,7 @@ class MotionPlannerNativeConfig(NativeModuleConfig):
     goal_lookahead_m: float = 5.0
     world_frame: str = "odom"
     base_frame: str = "base_link"
+    replan_on_change: bool = True
     floor_anchor: bool = True
     lidar_height: float = 0.0
     ground_margin_m: float = 0.16

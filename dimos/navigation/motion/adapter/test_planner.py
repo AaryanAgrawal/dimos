@@ -122,6 +122,56 @@ def test_hold_draws_the_veto_so_it_is_not_mistaken_for_a_dead_module():
     assert len(drawn[0].poses) == 1
 
 
+# --- the replan gate
+
+
+def _gated_planner(**config):
+    """A MotionPlanner with just enough wired up to call _due."""
+    planner = object.__new__(MotionPlanner)
+    planner.config = MotionPlannerConfig(**config)
+    planner._planned = None
+    return planner
+
+
+def test_a_tick_with_nothing_new_does_not_replan():
+    planner = _gated_planner()
+    assert planner._due((7, 2))  # nothing planned yet
+    planner._planned = (7, 2)
+    assert not planner._due((7, 2))
+
+
+def test_a_new_map_or_a_new_route_replans():
+    planner = _gated_planner()
+    planner._planned = (7, 2)
+    assert planner._due((8, 2))
+    assert planner._due((7, 3))
+
+
+def test_an_ungated_planner_replans_on_every_tick():
+    planner = _gated_planner(replan_on_change=False)
+    planner._planned = (7, 2)
+    assert planner._due((7, 2))
+
+
+def test_a_route_republished_unchanged_is_not_a_change():
+    # MLS republishes at ~1 Hz and holds still for seconds at a time
+    route = np.array([[0.0, 0.0], [1.0, 0.0]])
+    assert not planner_module.route_changed(route, route.copy())
+
+
+def test_a_route_that_moved_is_a_change():
+    route = np.array([[0.0, 0.0], [1.0, 0.0]])
+    assert planner_module.route_changed(route, np.array([[0.0, 0.0], [1.0, 0.1]]))
+    assert planner_module.route_changed(route, np.array([[0.0, 0.0]]))
+
+
+def test_a_route_appearing_or_going_away_is_a_change():
+    route = np.array([[0.0, 0.0], [1.0, 0.0]])
+    assert planner_module.route_changed(None, route)
+    assert planner_module.route_changed(route, None)
+    assert not planner_module.route_changed(None, None)
+
+
 # --- the floor anchoring (adapter/floor.py is the estimator; this is the wiring)
 
 

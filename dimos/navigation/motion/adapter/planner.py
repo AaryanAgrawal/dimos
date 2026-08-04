@@ -17,9 +17,9 @@
 Bridges the referee-side ``PlannerEpisode`` protocol onto module streams:
 the raycaster's ``local_map`` is the cloud, leveled body odometry is the
 pose, and the goal is a carrot — ``goal_lookahead_m`` of arc along the MLS
-global path (``planner_path``), clamped to its end. Replans on a fixed
-cadence (receding horizon, as the control battery runs it) and republishes
-the result as a nav Path. A refusal comes out as the planner made it — a
+global path (``planner_path``), clamped to its end. Ticks on a fixed cadence
+but replans only when an input that matters has changed, and publishes the
+result as a nav Path. A refusal comes out as the planner made it — a
 single-pose stub the follower reads as "hold" — while MLS reroutes globally.
 """
 
@@ -101,9 +101,29 @@ def carrot_along(
     return (float(xy[-1][0]), float(xy[-1][1]))
 
 
+def route_changed(old: np.ndarray | None, new: np.ndarray | None) -> bool:
+    """Is this a different global route, or the same one published again?
+
+    MLS republishes at ~1 Hz and holds still for seconds at a time. Re-solving
+    against a route the plan already accounts for is what the gate exists to
+    skip, so "changed" has to mean the waypoints moved, not that a message came.
+    """
+    if old is None or new is None:
+        return old is not new
+    return old.shape != new.shape or not bool(np.array_equal(old, new))
+
+
 class MotionPlannerConfig(ModuleConfig):
     planner: str = "target"  # referee registry name or "module:factory"
     embodiment: str = "go2"
+    # Plan when an input that MATTERS changed — a new local map, or a global
+    # route that is not the one already planned against — rather than on every
+    # tick of the clock. The planner ticks at 5 Hz over a 1 Hz map, so four
+    # ticks in five re-solve an unchanged world; between maps the plan is stable
+    # to 0.15 m, so those four are work whose only output is jitter. The
+    # follower tracks the published path as the robot moves and needs no
+    # republish to do it. False replans every tick, as it used to.
+    replan_on_change: bool = True
     # Odometry is stamped at the SENSOR (mid360_link on the go2), so the pose it
     # carries is the lidar's, not the robot's -- 0.30 m ahead and 0.16 m above on
     # this rig. tf resolves it into the body; ticks are dropped until it can.
@@ -127,8 +147,9 @@ class MotionPlannerConfig(ModuleConfig):
     # Measured on 20260805-033007: at 0.08 the robot is inside the band on
     # every tick, at 0.16 on 7 % of them.
     ground_margin_m: float = 0.16
-    # Manual trim added to cloud z after anchoring. A calibration escape hatch;
-    # the anchoring above is what makes the band right.
+    # Manual trim on the map's z ORIGIN, so it lands before the floor is
+    # measured off that map. With floor_anchor on it is very nearly inert; the
+    # anchoring above is what makes the band right.
     cloud_z_offset: float = 0.0
     # Hold once the local map is this old. The mapper can live across a link,
     # and a dropped link must not leave us replanning on a frozen world at
@@ -161,6 +182,10 @@ class MotionPlanner(Module):
         self._cloud: PointCloud2 | None = None
         self._cloud_at: float | None = None
         self._stale = False
+        # Arrival counters, and the pair the published plan was made from.
+        self._cloud_seq = 0
+        self._route_seq = 0
+        self._planned: tuple[int, int] | None = None
         self._pose: tuple[float, float, float] | None = None
         self._base_z: float | None = None
         self._base_height: float | None = None
@@ -197,6 +222,7 @@ class MotionPlanner(Module):
     def _on_local_map(self, msg: PointCloud2) -> None:
         with self._lock:
             self._cloud = msg
+            self._cloud_seq += 1
             # arrival, not msg.ts: the mapper's clock may not be ours, and
             # what this guards is "how long since the mapper was heard from"
             self._cloud_at = time.monotonic()
@@ -229,9 +255,13 @@ class MotionPlanner(Module):
         # MLS emits an empty path when it finds no route: no carrot, hold the
         # last local plan rather than chase a stale one.
         xy = np.array([[p.position.x, p.position.y] for p in msg.poses]).reshape(-1, 2)
+        route = xy if len(xy) else None
         with self._lock:
-            self._global_xy = xy if len(xy) else None
-        if self._episode is not None:
+            changed = route_changed(self._global_xy, route)
+            self._global_xy = route
+            if changed:
+                self._route_seq += 1
+        if changed and self._episode is not None:
             # a new task: warm starts and hysteresis from the old route are
             # stale (no-op for the stateless rust target)
             self._episode.reset()
@@ -243,6 +273,7 @@ class MotionPlanner(Module):
             with self._lock:
                 cloud, pose, global_xy = self._cloud, self._pose, self._global_xy
                 cloud_at = self._cloud_at
+                inputs = (self._cloud_seq, self._route_seq)
             age = None if cloud_at is None else time.monotonic() - cloud_at
             # Why a tick did nothing, in the planner's own words. Silence here
             # is the failure that looks like "the robot will not move" from the
@@ -255,15 +286,25 @@ class MotionPlanner(Module):
                 }
             )
             if pose is not None and age is not None and age > self.config.max_map_age_s:
+                # A hold is not gated: it is a statement about the CLOCK, and
+                # nothing arriving is exactly the case it fires on. Forget what
+                # was planned so the first live tick plans again.
+                self._planned = None
                 self._hold(pose, age)
             elif cloud is not None and pose is not None and global_xy is not None:
                 if self._stale:
                     self._stale = False
                     logger.info("local_map is live again, resuming planning")
-                goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
-                self._plan_once(cloud, pose, goal)
+                if self._due(inputs):
+                    goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
+                    if self._plan_once(cloud, pose, goal):
+                        self._planned = inputs
             elapsed = time.perf_counter() - started
             self._stop_event.wait(max(0.0, period - elapsed))
+
+    def _due(self, inputs: tuple[int, int]) -> bool:
+        """Has an input the plan depends on arrived since the plan was made?"""
+        return not self.config.replan_on_change or inputs != self._planned
 
     def _hold(self, pose: tuple[float, float, float], age: float) -> None:
         """Refuse the way the planner does — a single-pose stub reads as "stop"."""
@@ -325,7 +366,8 @@ class MotionPlanner(Module):
 
     def _plan_once(
         self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
-    ) -> None:
+    ) -> bool:
+        """Plan and publish. False when the search raised and nothing went out."""
         assert self._episode is not None
         # The trim corrects the map's z ORIGIN, so it lands before the floor is
         # measured off that map — which is also where the rust twin applies it
@@ -339,11 +381,12 @@ class MotionPlanner(Module):
             ref = self._episode.plan(ref_cloud, pose, goal)
         except Exception:
             logger.exception("planner failed; keeping the last published path")
-            return
+            return False
         plan = annotate(ref, ref_cloud, self._emb, ts=time.time(), frame_id=self.config.world_frame)
         self.path.publish(plan)
         self._stall.ok(f"planning: {len(plan.poses)} waypoints")
         self._publish_viz(plan)
+        return True
 
     def _publish_viz(self, plan: Path) -> None:
         """Mirror the plan onto the viewer stream, at its own rate."""
