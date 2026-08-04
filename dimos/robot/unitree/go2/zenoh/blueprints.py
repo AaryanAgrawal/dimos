@@ -236,7 +236,12 @@ _go2_zenoh_motion_base = autoconnect(
     go2_zenoh_raycaster,
     GoalRelay.blueprint(lidar_height=ROBOT_HEIGHT),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
-    MotionPlanner.blueprint(viz_publish_hz=motion_viz_hz),
+    # lidar_height is what lets tf say how far the base sits above the ground,
+    # and the local planner needs that: its body z-band is 0.05..0.45 ABOVE THE
+    # FLOOR, while the map's z origin is base height. Without it the band reads
+    # a slab over the robot's head-room -- blind to the bottom of every
+    # obstacle, steering off table tops (adapter/floor.py).
+    MotionPlanner.blueprint(viz_publish_hz=motion_viz_hz, lidar_height=ROBOT_HEIGHT),
     MovementManager.blueprint(),
     CmdVelMux.blueprint(),
 )

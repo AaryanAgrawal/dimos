@@ -72,12 +72,33 @@ impl OdomBasePose {
     /// which the caller must DROP rather than fall back on: the sensor pose
     /// wearing the body's name is the bug this exists to fix.
     pub fn resolve(&mut self, msg: &Odometry) -> Option<State> {
+        self.resolve_iso(msg).map(|iso| state_of(&iso))
+    }
+
+    /// The full base transform, for callers that need more than `(x, y, yaw)`
+    /// -- the floor prior needs the base's HEIGHT.
+    pub fn resolve_iso(&mut self, msg: &Odometry) -> Option<Isometry3<f64>> {
         let pose = &msg.pose.pose;
         if msg.child_frame_id == self.base_frame {
-            return Some(state_of(&iso_of(pose)));
+            return Some(iso_of(pose));
         }
         let leg = self.sensor_to_base(&msg.child_frame_id)?;
-        Some(state_of(&(iso_of(pose) * leg)))
+        Some(iso_of(pose) * leg)
+    }
+
+    /// How far the base sits above the ground while standing, off the mount
+    /// leg. `None` for base-stamped odometry, which has no leg to subtract --
+    /// the twin of `tf_pose.base_height_above_ground` plus GoalRelay's guard.
+    pub fn base_height_above_ground(
+        &mut self,
+        sensor_frame: &str,
+        lidar_height: f64,
+    ) -> Option<f64> {
+        if sensor_frame == self.base_frame {
+            return None;
+        }
+        let leg = self.sensor_to_base(sensor_frame)?;
+        Some(lidar_height - leg.inverse().translation.z)
     }
 
     /// The cached static sensor -> base leg. Logs once per outage, not per
@@ -124,7 +145,8 @@ fn iso_of(pose: &Pose) -> Isometry3<f64> {
     )
 }
 
-fn state_of(iso: &Isometry3<f64>) -> State {
+/// The planar `(x, y, yaw)` a full transform implies.
+pub fn state_of(iso: &Isometry3<f64>) -> State {
     let q = iso.rotation.quaternion();
     let yaw = yaw_of(&lcm_msgs::geometry_msgs::Quaternion {
         x: q.i,
@@ -236,6 +258,33 @@ mod tests {
                 .is_some());
         }
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_base_height_is_the_lidar_height_less_the_mount() {
+        let mut resolver = OdomBasePose::with_lookup(arm(LEVER), "base_link");
+        let got = resolver
+            .base_height_above_ground("mid360_link", 0.45)
+            .expect("the leg is there");
+        assert!((got - (0.45 - LEVER[2])).abs() < 1e-12, "{got}");
+    }
+
+    #[test]
+    fn base_stamped_odometry_has_no_base_height() {
+        let mut resolver = OdomBasePose::with_lookup(arm(LEVER), "base_link");
+        assert_eq!(resolver.base_height_above_ground("base_link", 0.45), None);
+    }
+
+    #[test]
+    fn the_resolved_iso_keeps_the_height_the_state_drops() {
+        let mut resolver = OdomBasePose::with_lookup(arm(LEVER), "base_link");
+        let mut msg = odometry("mid360_link", 1.0, 2.0, 0.0);
+        msg.pose.pose.position.z = 0.34;
+        let iso = resolver.resolve_iso(&msg).expect("the leg is there");
+        assert!(
+            (iso.translation.z - (0.34 - LEVER[2])).abs() < 1e-12,
+            "{iso:?}"
+        );
     }
 
     #[test]

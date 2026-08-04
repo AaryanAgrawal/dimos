@@ -44,6 +44,7 @@ from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
+from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
 from dimos.navigation.motion.control import world as world_bridge
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
@@ -53,7 +54,7 @@ from dimos.navigation.motion.planner.autoresearch.types import (
     Path as RefereePath,
     PointCloud2 as RefereeCloud,
 )
-from dimos.navigation.tf_pose import OdomBasePose
+from dimos.navigation.tf_pose import OdomBasePose, base_height_above_ground
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -110,9 +111,24 @@ class MotionPlannerConfig(ModuleConfig):
     replan_hz: float = 5.0  # the control battery's reality default
     goal_lookahead_m: float = 5.0  # carrot arc along the global path
     world_frame: str = "odom"
-    # Calibration: added to cloud z before planning, so the planner's body
-    # z-band (0.05..0.45 above the floor) lands where the floor actually is
-    # when the map's z origin is not ground level.
+    # Anchor the cloud to the floor under the robot before planning, so the
+    # planner's body z-band (0.05..0.45 ABOVE THE GROUND) lands where the
+    # ground actually is. Off leaves the band where the map's z origin puts it,
+    # which on a LIO stack is base height — see adapter/floor.py.
+    floor_anchor: bool = True
+    # Lidar height above the ground while standing. With it, tf gives the base
+    # height above ground and hence a prior the floor estimate is bounded
+    # against; 0 estimates off the cloud alone. Same knob GoalRelay carries.
+    lidar_height: float = 0.0
+    # Drop returns within this of the estimated floor before the band is taken.
+    # TWO voxel layers, not one: a floor whose true height sits near a voxel
+    # boundary quantises into both layers either side of it, and a one-voxel
+    # margin leaves the upper one standing as a carpet the search cannot cross.
+    # Measured on 20260805-033007: at 0.08 the robot is inside the band on
+    # every tick, at 0.16 on 7 % of them.
+    ground_margin_m: float = 0.16
+    # Manual trim added to cloud z after anchoring. A calibration escape hatch;
+    # the anchoring above is what makes the band right.
     cloud_z_offset: float = 0.0
     # Hold once the local map is this old. The mapper can live across a link,
     # and a dropped link must not leave us replanning on a frozen world at
@@ -146,6 +162,9 @@ class MotionPlanner(Module):
         self._cloud_at: float | None = None
         self._stale = False
         self._pose: tuple[float, float, float] | None = None
+        self._base_z: float | None = None
+        self._base_height: float | None = None
+        self._unanchored_warned = False
         self._base_pose: OdomBasePose | None = None
         self._global_xy: np.ndarray | None = None
         self._episode: PlannerEpisode | None = None
@@ -188,8 +207,23 @@ class MotionPlanner(Module):
         pose = self._base_pose.resolve(msg)
         if pose is None:
             return
+        self._resolve_base_height(msg.child_frame_id)
         with self._lock:
             self._pose = (pose.position.x, pose.position.y, pose.orientation.euler[2])
+            self._base_z = pose.position.z
+
+    def _resolve_base_height(self, sensor_frame: str) -> None:
+        """Cache how far the base sits above the ground, off the mount leg."""
+        if self._base_height is not None or self.config.lidar_height <= 0.0:
+            return
+        # Base-stamped odometry has no mount leg to subtract, so it cannot say
+        # where the ground is; the cloud is then the only source.
+        if sensor_frame == self.config.base_frame:
+            return
+        assert self._base_pose is not None
+        leg = self._base_pose.sensor_to_base(sensor_frame)
+        if leg is not None:
+            self._base_height = base_height_above_ground(self.config.lidar_height, -leg)
 
     def _on_planner_path(self, msg: Path) -> None:
         # MLS emits an empty path when it finds no route: no carrot, hold the
@@ -253,13 +287,53 @@ class MotionPlanner(Module):
         self.path.publish(held)
         self._publish_viz(held)
 
+    def _floor_prior(self) -> float | None:
+        """Where tf puts the ground under the base, when it can say."""
+        with self._lock:
+            base_z = self._base_z
+        if base_z is None or self._base_height is None:
+            return None
+        return base_z - self._base_height
+
+    def _anchor(self, pts: np.ndarray, pose: tuple[float, float, float]) -> np.ndarray:
+        """Cloud re-zeroed on the floor under the robot, ground slab dropped.
+
+        THE TF PRIOR IS REQUIRED, not optional. A low quantile of the cloud
+        alone is only the floor if the floor is in the cloud; hand it a wall and
+        it anchors to the wall's base and deletes the wall. Without the prior
+        the band stays exactly where it was.
+        """
+        prior = self._floor_prior()
+        if not self.config.floor_anchor or prior is None:
+            self._warn_unanchored()
+            return pts
+        floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
+        if floor is None:
+            return pts
+        return anchor_to_floor(pts, floor, self.config.ground_margin_m)
+
+    def _warn_unanchored(self) -> None:
+        """Say once that the band is not on the floor — silence would hide it."""
+        if self._unanchored_warned or not self.config.floor_anchor:
+            return
+        self._unanchored_warned = True
+        logger.warning(
+            "planning on an unanchored cloud: the body z-band is wherever the "
+            "map's z origin puts it. Set lidar_height (and give tf the mount "
+            "leg) to anchor it to the floor.",
+        )
+
     def _plan_once(
         self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
     ) -> None:
         assert self._episode is not None
+        # The trim corrects the map's z ORIGIN, so it lands before the floor is
+        # measured off that map — which is also where the rust twin applies it
+        # (at extraction). With floor_anchor on it is very nearly inert.
         pts = cloud.points_f32()
         if self.config.cloud_z_offset != 0.0:
             pts = pts + np.array([0.0, 0.0, self.config.cloud_z_offset], dtype=np.float32)
+        pts = self._anchor(pts, pose)
         ref_cloud = RefereeCloud.from_numpy(pts, frame_id=self.config.world_frame)
         try:
             ref = self._episode.plan(ref_cloud, pose, goal)

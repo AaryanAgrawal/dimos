@@ -480,7 +480,11 @@ remapped to `planner_path`; the follower track is `hinted`.
   | `replan_hz` | `5.0` | |
   | `goal_lookahead_m` | `5.0` | |
   | `world_frame` | `"odom"` | |
-  | `cloud_z_offset` | `0.0` | added to cloud z before planning |
+  | `base_frame` | `"base_link"` | tf resolves the sensor-stamped odometry into it |
+  | `floor_anchor` | `True` | re-zero the cloud on the floor under the robot before planning (`adapter/floor.py`) |
+  | `lidar_height` | `0.0` | lidar height above ground; with tf it gives the floor prior, without which anchoring stays off |
+  | `ground_margin_m` | `0.16` | drop returns this close to the estimated floor, so the ground slab cannot wall the robot in |
+  | `cloud_z_offset` | `0.0` | manual trim on the map's z origin, applied at extraction |
   | `max_map_age_s` | `5.0` | the staleness guard |
   | `viz_publish_hz` | `2.0` | rate-cap for `plan_body` |
 

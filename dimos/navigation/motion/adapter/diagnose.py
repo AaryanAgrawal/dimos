@@ -29,7 +29,10 @@ planner_path, path) and runs four passes:
 
     python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
-    python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-offset 0.29
+    python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --no-anchor
+
+The replay anchors the cloud to the floor exactly as the module does, off the
+same tf prior; `--no-anchor` is the band as it was deployed before that landed.
 """
 
 from __future__ import annotations
@@ -44,12 +47,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from dimos.msgs.helpers import resolve_msg_type
+from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
 from dimos.navigation.motion.adapter.planner import carrot_along
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
 from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS, Scenario
 from dimos.navigation.motion.planner.autoresearch.types import PointCloud2 as RefereeCloud
-from dimos.navigation.tf_pose import OdomBasePose
+from dimos.navigation.tf_pose import OdomBasePose, base_height_above_ground
 
 if TYPE_CHECKING:
     from dimos.memory2.store.base import Store
@@ -107,6 +111,9 @@ class Tick:
     pose: tuple[float, float, float]
     goal: tuple[float, float]
     recorded: np.ndarray  # the published plan, xy
+    # Where tf put the ground under the base at this tick: the bound the floor
+    # estimate is held to, exactly as MotionPlanner._floor_prior computes it.
+    floor_prior: float | None = None
 
 
 @dataclass
@@ -141,7 +148,9 @@ def _before(ts: float, stamps: np.ndarray) -> int:
     return int(np.searchsorted(stamps, ts, "right")) - 1
 
 
-def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
+def load_recording(
+    path: str, base_frame: str, lookahead: float, lidar_height: float = 0.0
+) -> Recording:
     """Decode the streams and rebuild each tick's inputs (tf-resolved pose, carrot)."""
     from dimos.memory2.tf import StreamTF
     from dimos.utils.data import get_data
@@ -154,9 +163,16 @@ def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
     maps = [(o.ts, o.data.points_f32()) for o in _stream(store, LOCAL_MAP)]
     odom = [(o.ts, o.data) for o in _stream(store, ODOMETRY)]
     poses: list[tuple[float, float, float] | None] = []
+    priors: list[float | None] = []
+    base_height: float | None = None
     for _, msg in odom:
         p = base.resolve(msg)
         poses.append((p.position.x, p.position.y, p.orientation.euler[2]) if p else None)
+        if lidar_height > 0.0 and base_height is None and msg.child_frame_id != base_frame:
+            leg = base.sensor_to_base(msg.child_frame_id)
+            if leg is not None:
+                base_height = base_height_above_ground(lidar_height, -leg)
+        priors.append(None if p is None or base_height is None else p.position.z - base_height)
     globals_ = [(o.ts, _xy(o.data)) for o in _stream(store, PLANNER_PATH)]
     plans = [(o.ts, _xy(o.data)) for o in _stream(store, PATH)]
 
@@ -178,7 +194,9 @@ def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
         pose = rec.poses[j]
         assert pose is not None
         goal = carrot_along(globals_[k][1], (pose[0], pose[1]), lookahead)
-        rec.ticks.append(Tick(ts=ts, imap=i, pose=pose, goal=goal, recorded=xy))
+        rec.ticks.append(
+            Tick(ts=ts, imap=i, pose=pose, goal=goal, recorded=xy, floor_prior=priors[j])
+        )
     return rec
 
 
@@ -451,25 +469,39 @@ def replay(
     embodiment: str,
     z_offset: float,
     ablate: bool,
+    anchor: bool = True,
+    ground_margin: float = 0.16,
     rr: Any = None,
 ) -> list[dict[str, float]]:
     """Re-plan every recorded tick from its own inputs; optionally ablate one input at a time."""
     ep = episode(planner, embodiment)
     offset = np.array([0.0, 0.0, z_offset], dtype=np.float32)
 
-    def plan(imap: int, pose: tuple[float, float, float], goal: tuple[float, float]) -> np.ndarray:
-        cloud = RefereeCloud.from_numpy(rec.maps[imap][1] + offset, frame_id="odom")
-        return _xy(ep.plan(cloud, pose, goal))
+    def plan(
+        imap: int,
+        pose: tuple[float, float, float],
+        goal: tuple[float, float],
+        prior: float | None = None,
+    ) -> np.ndarray:
+        # The module's own order (adapter/planner.py::_plan_once): the trim
+        # corrects the map's z origin, then the floor is measured off that map.
+        pts = rec.maps[imap][1] + offset
+        if anchor and prior is not None:
+            floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
+            if floor is not None:
+                pts = anchor_to_floor(pts, floor, ground_margin)
+        return _xy(ep.plan(RefereeCloud.from_numpy(pts, frame_id="odom"), pose, goal))
 
     t = rec.ticks[len(rec.ticks) // 2]
-    twice = plan(t.imap, t.pose, t.goal), plan(t.imap, t.pose, t.goal)
+    twice = plan(t.imap, t.pose, t.goal, t.floor_prior), plan(t.imap, t.pose, t.goal, t.floor_prior)
     deterministic = twice[0].shape == twice[1].shape and bool(np.allclose(*twice))
+    anchored = anchor and any(t.floor_prior is not None for t in rec.ticks)
 
     rows: list[dict[str, float]] = []
     started = time.perf_counter()
     previous: np.ndarray | None = None
     for tick in rec.ticks:
-        out = plan(tick.imap, tick.pose, tick.goal)
+        out = plan(tick.imap, tick.pose, tick.goal, tick.floor_prior)
         row = {
             "ts": tick.ts,
             "n_rec": float(len(tick.recorded)),
@@ -501,7 +533,8 @@ def replay(
     rec_hold = np.array([r["n_rec"] < 2 for r in rows])
     rep_hold = np.array([r["n_replay"] < 2 for r in rows])
     both = ~rec_hold & ~rep_hold
-    print(f"\n=== replay ({planner}, z_offset {z_offset:+.2f} m, {len(rows)} ticks) ===")
+    band = "floor-anchored" if anchored else "raw z-band"
+    print(f"\n=== replay ({planner}, {band}, z_offset {z_offset:+.2f} m, {len(rows)} ticks) ===")
     print(
         f"deterministic (same inputs twice): {deterministic}\n"
         f"holds: recorded {int(rec_hold.sum())}, replayed {int(rep_hold.sum())}, agreeing "
@@ -523,14 +556,16 @@ def _ablate(rec: Recording, ep: PlannerEpisode, plan: Any) -> None:
     """Re-plan each tick pair changing ONE input, to attribute the change."""
     rows = []
     for a, b in pairwise(rec.ticks):
-        base = plan(a.imap, a.pose, a.goal)
+        # the floor prior travels with the pose: it is read off the same
+        # odometry message the pose is
+        base = plan(a.imap, a.pose, a.goal, a.floor_prior)
         rows.append(
             {
                 "ts": b.ts,
-                "all": divergence(base, plan(b.imap, b.pose, b.goal)),
-                "cloud": divergence(base, plan(b.imap, a.pose, a.goal)),
-                "pose": divergence(base, plan(a.imap, b.pose, a.goal)),
-                "goal": divergence(base, plan(a.imap, a.pose, b.goal)),
+                "all": divergence(base, plan(b.imap, b.pose, b.goal, b.floor_prior)),
+                "cloud": divergence(base, plan(b.imap, a.pose, a.goal, a.floor_prior)),
+                "pose": divergence(base, plan(a.imap, b.pose, a.goal, b.floor_prior)),
+                "goal": divergence(base, plan(a.imap, a.pose, b.goal, a.floor_prior)),
                 "hold": float(is_hold(base)),
                 "new_map": float(a.imap != b.imap),
             }
@@ -684,6 +719,18 @@ def main() -> None:
     ap.add_argument("--base-frame", default="base_link")
     ap.add_argument("--lookahead", type=float, default=5.0, help="carrot arc along planner_path")
     ap.add_argument("--z-offset", type=float, default=0.0, help="MotionPlanner cloud_z_offset")
+    ap.add_argument(
+        "--lidar-height",
+        type=float,
+        default=0.45,
+        help="lidar height above ground; tf turns it into the floor prior (0 = none)",
+    )
+    ap.add_argument(
+        "--ground-margin", type=float, default=0.16, help="MotionPlanner ground_margin_m"
+    )
+    ap.add_argument(
+        "--no-anchor", action="store_true", help="replay on the raw z-band, as deployed before"
+    )
     ap.add_argument("--no-ablate", action="store_true", help="skip the one-input-at-a-time replay")
     ap.add_argument("--spawn", action="store_true", help="live rerun viewer instead of an rrd")
     ap.add_argument("--out", default="recordings", help="where the rrd and svgs land")
@@ -694,7 +741,7 @@ def main() -> None:
     args = ap.parse_args()
 
     passes = {p.strip() for p in args.only.split(",")}
-    rec = load_recording(args.recording, args.base_frame, args.lookahead)
+    rec = load_recording(args.recording, args.base_frame, args.lookahead, args.lidar_height)
     stem = FsPath(args.out) / f"{FsPath(args.recording).stem}-diagnose"
     stem.parent.mkdir(parents=True, exist_ok=True)
     print(
@@ -713,7 +760,16 @@ def main() -> None:
     churn_rows = churn(rec, args.voxel, rr) if "churn" in passes else []
     plan_rows = plans(rec) if "plans" in passes else []
     if "replay" in passes:
-        replay(rec, args.planner, args.embodiment, args.z_offset, not args.no_ablate, rr)
+        replay(
+            rec,
+            args.planner,
+            args.embodiment,
+            args.z_offset,
+            not args.no_ablate,
+            anchor=not args.no_anchor,
+            ground_margin=args.ground_margin,
+            rr=rr,
+        )
     latency_rows = latency(rec) if "latency" in passes else []
     write_plots(churn_rows, plan_rows, latency_rows, FsPath(args.plots or str(stem)))
     if not args.spawn:

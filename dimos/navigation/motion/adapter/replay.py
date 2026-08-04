@@ -35,6 +35,7 @@ import time
 
 import numpy as np
 
+from dimos.navigation.motion.adapter.floor import estimate_floor
 from dimos.navigation.motion.adapter.follower import path_clearance
 from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
@@ -118,12 +119,13 @@ def main() -> None:
             pts = scans[jj][1].points_f32().astype(np.float64)
             world_pts.append(pts @ _quat_mat(oquat[m]).T + opos[m])
         cloud = np.concatenate(world_pts) if world_pts else np.empty((0, 3))
-        # local floor: low percentile of the neighbourhood; stairs are only
-        # locally planar, which is exactly the planner's operating assumption
-        near = cloud[np.linalg.norm(cloud[:, :2] - pos[:2], axis=1) < 2.5]
-        if len(near) < 100:
+        # local floor, by the same estimator the planner adapter anchors with
+        # (adapter/floor.py) — stairs are only locally planar, which is exactly
+        # the planner's operating assumption
+        estimated = estimate_floor(cloud, (float(pos[0]), float(pos[1])))
+        if estimated is None:
             continue
-        floor = float(np.percentile(near[:, 2], 5))
+        floor = estimated
         shifted = cloud - np.array([0.0, 0.0, floor])
         pose2d = (float(pos[0]), float(pos[1]), yaw)
         # carrot: the robot's own future position, args.carrot of arc ahead

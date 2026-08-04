@@ -27,6 +27,7 @@
 //! route are the same statement to whatever is downstream -- there is no safe
 //! way forward from here.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,7 @@ use tracing::{debug, info, warn};
 use validator::ValidationError;
 
 use crate::emb;
+use crate::floor;
 use crate::msg;
 use crate::tf_pose::OdomBasePose;
 
@@ -66,8 +68,25 @@ pub struct Config {
     /// lidar's, not the robot's. tf resolves it into the body; messages are
     /// dropped until the mount leg arrives.
     pub base_frame: String,
-    /// Added to cloud z before planning, so the planner's body z-band lands
-    /// where the floor actually is when the map's z origin is not ground level.
+    /// Anchor the cloud to the floor under the robot before planning, so the
+    /// planner's body z-band (0.05..0.45 ABOVE THE GROUND) lands where the
+    /// ground actually is. Off leaves the band where the map's z origin puts
+    /// it, which on a LIO stack is base height -- see `floor.rs`.
+    pub floor_anchor: bool,
+    /// Lidar height above the ground while standing. With it, tf gives the base
+    /// height above ground and hence a prior the floor estimate is bounded
+    /// against; 0 estimates off the cloud alone.
+    #[validate(range(min = 0.0))]
+    pub lidar_height: f64,
+    /// Drop returns within this of the estimated floor before the band is
+    /// taken. TWO voxel layers, not one: a floor whose true height sits near a
+    /// voxel boundary quantises into both layers either side of it, and a
+    /// one-voxel margin leaves the upper one standing as a carpet.
+    #[validate(range(min = 0.0))]
+    pub ground_margin_m: f64,
+    /// Manual trim on the map's z ORIGIN, applied at extraction and therefore
+    /// before the floor is measured off it. With `floor_anchor` on it is very
+    /// nearly inert; the anchoring is what makes the band right.
     pub cloud_z_offset: f64,
     /// Hold once the local map is this old, measured from ARRIVAL.
     #[validate(range(exclusive_min = 0.0))]
@@ -97,6 +116,8 @@ struct Shared {
     /// this guards is how long since the mapper was last heard from.
     cloud_at: Option<Instant>,
     pose: Option<(f64, f64, f64)>,
+    /// Where tf puts the ground under the base: the floor estimate's bound.
+    floor_prior: Option<f64>,
     global_xy: Option<Vec<[f64; 2]>>,
 }
 
@@ -128,6 +149,8 @@ pub struct MotionPlanner {
     /// Built on the first odometry message: `Tf` is only handed over at build
     /// time, and the base frame is config the constructor does not see.
     base_pose: Option<OdomBasePose>,
+    /// How far the base sits above the ground, looked up once off the mount leg.
+    base_height: Option<f64>,
     shared: Arc<Mutex<Shared>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -166,10 +189,17 @@ impl MotionPlanner {
         let resolver = self
             .base_pose
             .get_or_insert_with(|| OdomBasePose::new(self.tf.clone(), &self.config.base_frame));
-        let Some(pose) = resolver.resolve(&msg) else {
+        let Some(iso) = resolver.resolve_iso(&msg) else {
             return;
         };
-        self.shared.lock().expect("shared mutex").pose = Some((pose[0], pose[1], pose[2]));
+        if self.base_height.is_none() && self.config.lidar_height > 0.0 {
+            self.base_height =
+                resolver.base_height_above_ground(&msg.child_frame_id, self.config.lidar_height);
+        }
+        let pose = crate::tf_pose::state_of(&iso);
+        let mut s = self.shared.lock().expect("shared mutex");
+        s.pose = Some((pose[0], pose[1], pose[2]));
+        s.floor_prior = self.base_height.map(|h| iso.translation.z - h);
     }
 
     /// MLS emits an empty path when it finds no route: no carrot, so hold the
@@ -294,15 +324,40 @@ impl RateCap {
 ///
 /// Free rather than a method so it can be exercised with no transport, which
 /// is the whole reason the async shell above stays as thin as it is.
+/// The cloud the search sees: floor-anchored when configured, else as it came.
+///
+/// THE TF PRIOR IS REQUIRED, not optional. A low quantile of the cloud alone is
+/// only the floor if the floor is in the cloud; hand it a wall and it will
+/// happily anchor to the wall's base and delete the wall. `floor_prior` is what
+/// says where the ground is supposed to be, so without it the band stays
+/// exactly where it was.
+pub fn anchored_cloud<'a>(
+    config: &Config,
+    points: &'a [[f32; 3]],
+    pose: (f64, f64, f64),
+    floor_prior: Option<f64>,
+) -> Cow<'a, [[f32; 3]]> {
+    if !config.floor_anchor || floor_prior.is_none() {
+        return Cow::Borrowed(points);
+    }
+    match floor::estimate_floor(points, (pose.0, pose.1), floor_prior) {
+        Some(f) => Cow::Owned(floor::anchor_to_floor(points, f, config.ground_margin_m)),
+        None => Cow::Borrowed(points),
+    }
+}
+
 pub fn plan_once(
     config: &Config,
     emb: &Emb,
     points: &[[f32; 3]],
     pose: (f64, f64, f64),
     goal: (f64, f64),
+    floor_prior: Option<f64>,
 ) -> Path {
     let started = Instant::now();
     let t0 = msg::now_secs();
+    let anchored = anchored_cloud(config, points, pose, floor_prior);
+    let points: &[[f32; 3]] = &anchored;
     let cloud: Vec<[f64; 3]> = points
         .iter()
         .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
@@ -346,6 +401,7 @@ struct Snapshot {
     cloud_seq: u64,
     age_s: Option<f64>,
     pose: Option<(f64, f64, f64)>,
+    floor_prior: Option<f64>,
     route: Option<Vec<[f64; 2]>>,
 }
 
@@ -401,7 +457,14 @@ impl Worker {
                     // async workers, which is why the module asks for 2 threads.
                     let produced = tokio::task::block_in_place(|| {
                         let pts = self.points(&cloud, snap.cloud_seq, &mut points)?;
-                        Some(plan_once(&self.config, &self.emb, &pts, pose, goal))
+                        Some(plan_once(
+                            &self.config,
+                            &self.emb,
+                            &pts,
+                            pose,
+                            goal,
+                            snap.floor_prior,
+                        ))
                     });
                     if let Some(produced) = produced {
                         self.publish(&produced, now, &mut viz).await;
@@ -425,6 +488,7 @@ impl Worker {
             cloud_seq: s.cloud_seq,
             age_s: s.cloud_at.map(|t| now.duration_since(t).as_secs_f64()),
             pose: s.pose,
+            floor_prior: s.floor_prior,
             route: s.global_xy.clone(),
         }
     }
@@ -632,6 +696,9 @@ mod tests {
             goal_lookahead_m: 5.0,
             world_frame: "odom".into(),
             base_frame: "base_link".into(),
+            floor_anchor: true,
+            lidar_height: 0.0,
+            ground_margin_m: 0.16,
             cloud_z_offset: 0.0,
             max_map_age_s: 5.0,
             viz_publish_hz: 2.0,
@@ -645,7 +712,7 @@ mod tests {
     #[test]
     fn a_planned_path_carries_monotone_stamps() {
         // open floor: the search runs and the profile prices every segment
-        let produced = plan_once(&config(), &go2(), &[], (0.0, 0.0, 0.0), (3.0, 0.0));
+        let produced = plan_once(&config(), &go2(), &[], (0.0, 0.0, 0.0), (3.0, 0.0), None);
         assert!(produced.poses.len() > 1, "expected a real plan, got a stub");
         assert_eq!(produced.header.frame_id, "odom");
         let ts = msg::path_stamps(&produced);
@@ -682,8 +749,8 @@ mod tests {
             let ts = msg::path_stamps(p);
             ts[ts.len() - 1] - ts[0]
         };
-        let roomy = plan_once(&cfg, &go2(), &gap(1.4), (0.0, 0.0, 0.0), (3.0, 0.0));
-        let tight = plan_once(&cfg, &go2(), &gap(0.45), (0.0, 0.0, 0.0), (3.0, 0.0));
+        let roomy = plan_once(&cfg, &go2(), &gap(1.4), (0.0, 0.0, 0.0), (3.0, 0.0), None);
+        let tight = plan_once(&cfg, &go2(), &gap(0.45), (0.0, 0.0, 0.0), (3.0, 0.0), None);
         assert!(roomy.poses.len() > 1 && tight.poses.len() > 1);
         assert!(
             span(&tight) > span(&roomy),
@@ -705,7 +772,7 @@ mod tests {
             walls.push([t, 1.0, 0.2]);
             t += 0.02;
         }
-        let produced = plan_once(&config(), &go2(), &walls, (0.0, 0.0, 0.0), (4.0, 0.0));
+        let produced = plan_once(&config(), &go2(), &walls, (0.0, 0.0, 0.0), (4.0, 0.0), None);
         assert_eq!(produced.poses.len(), 1, "a refusal is a one-pose stub");
         assert_eq!(produced.poses[0].pose.position.x, 0.0);
         assert_eq!(produced.poses[0].pose.position.y, 0.0);
@@ -725,7 +792,108 @@ mod tests {
             t += 0.02;
         }
         let lifted: Vec<[f32; 3]> = walls.iter().map(|p| [p[0], p[1], p[2] + 2.0]).collect();
-        let produced = plan_once(&config(), &go2(), &lifted, (0.0, 0.0, 0.0), (4.0, 0.0));
+        let produced = plan_once(
+            &config(),
+            &go2(),
+            &lifted,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            None,
+        );
         assert!(produced.poses.len() > 1, "an overhead wall is not a wall");
+    }
+
+    // the floor anchoring
+
+    /// A sealed box on a floor at `floor_z`, the whole thing sunk so the map's
+    /// z origin is base height rather than the ground -- the recording's case.
+    fn room_on_a_floor(floor_z: f32) -> Vec<[f32; 3]> {
+        let mut pts = Vec::new();
+        let mut t = -2.0f32;
+        while t <= 2.0 {
+            let mut u = -2.0f32;
+            while u <= 2.0 {
+                pts.push([t, u, floor_z]); // the floor slab
+                u += 0.08;
+            }
+            // walls, standing 0.10..0.30 m ABOVE that floor -- entirely under
+            // the unanchored 0.05..0.45 band once the floor is at -0.28
+            for k in 1..=3 {
+                let z = floor_z + 0.1 * k as f32;
+                pts.push([-1.0, t, z]);
+                pts.push([1.0, t, z]);
+                pts.push([t, -1.0, z]);
+                pts.push([t, 1.0, z]);
+            }
+            t += 0.02;
+        }
+        pts
+    }
+
+    #[test]
+    fn anchoring_puts_the_band_on_obstacles_the_raw_band_looks_over() {
+        let room = room_on_a_floor(-0.28);
+        // unanchored: the band sits 0.33 m over the floor and sees nothing
+        let blind = plan_once(&config(), &go2(), &room, (0.0, 0.0, 0.0), (4.0, 0.0), None);
+        assert!(
+            blind.poses.len() > 1,
+            "the raw band drove through the walls"
+        );
+        // anchored off the tf prior: the same room is a sealed box
+        let cfg = Config {
+            lidar_height: 0.45,
+            ..config()
+        };
+        let seen = plan_once(
+            &cfg,
+            &go2(),
+            &room,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            Some(-0.24),
+        );
+        assert_eq!(seen.poses.len(), 1, "the walls are still invisible");
+    }
+
+    #[test]
+    fn anchoring_without_a_tf_prior_is_off() {
+        let room = room_on_a_floor(-0.28);
+        let cfg = Config {
+            lidar_height: 0.0,
+            ..config()
+        };
+        let anchored = anchored_cloud(&cfg, &room, (0.0, 0.0, 0.0), None);
+        assert_eq!(anchored.len(), room.len(), "anchored with no prior");
+    }
+
+    #[test]
+    fn anchoring_a_floor_already_at_zero_shifts_nothing() {
+        // a world whose plan poses sit on the ground, which is what the
+        // referee's sim scenarios are: the anchoring must not MOVE anything,
+        // only drop the ground the body is standing on
+        let room = room_on_a_floor(0.0);
+        let cfg = Config {
+            lidar_height: 0.45,
+            ..config()
+        };
+        let anchored = anchored_cloud(&cfg, &room, (0.0, 0.0, 0.0), Some(0.0));
+        let kept: Vec<[f32; 3]> = room
+            .iter()
+            .copied()
+            .filter(|p| p[2] > cfg.ground_margin_m as f32)
+            .collect();
+        assert_eq!(anchored.as_ref(), kept.as_slice());
+    }
+
+    #[test]
+    fn the_anchor_switch_turns_it_off() {
+        let room = room_on_a_floor(-0.28);
+        let cfg = Config {
+            floor_anchor: false,
+            lidar_height: 0.45,
+            ..config()
+        };
+        let anchored = anchored_cloud(&cfg, &room, (0.0, 0.0, 0.0), Some(-0.24));
+        assert_eq!(anchored.len(), room.len());
     }
 }
