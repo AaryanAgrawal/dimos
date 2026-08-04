@@ -446,6 +446,34 @@ def test_spawn_env_carries_zenoh_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env["DIMOS_ZENOH_MODE"] == "client"
 
 
+def test_spawn_env_leaves_discovery_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config, "transport", "zenoh")
+    monkeypatch.setattr(global_config, "zenoh_multicast", True)
+    monkeypatch.setattr(global_config, "zenoh_gossip", True)
+    env = native_module_mod._spawn_env({})
+    assert env["DIMOS_ZENOH_MULTICAST"] == "on"
+    assert env["DIMOS_ZENOH_GOSSIP"] == "on"
+
+
+def test_spawn_env_carries_discovery_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child left gossiping meshes past the router its parent joined."""
+    monkeypatch.setattr(global_config, "transport", "zenoh")
+    monkeypatch.setattr(global_config, "zenoh_multicast", False)
+    monkeypatch.setattr(global_config, "zenoh_gossip", False)
+    env = native_module_mod._spawn_env({})
+    assert env["DIMOS_ZENOH_MULTICAST"] == "off"
+    assert env["DIMOS_ZENOH_GOSSIP"] == "off"
+
+
+def test_spawn_env_omits_discovery_knobs_off_zenoh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config, "transport", "lcm")
+    monkeypatch.delenv("DIMOS_ZENOH_MULTICAST", raising=False)
+    monkeypatch.delenv("DIMOS_ZENOH_GOSSIP", raising=False)
+    env = native_module_mod._spawn_env({})
+    assert "DIMOS_ZENOH_MULTICAST" not in env
+    assert "DIMOS_ZENOH_GOSSIP" not in env
+
+
 def test_spawn_env_omits_zenoh_mode_off_zenoh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(global_config, "transport", "lcm")
     monkeypatch.setattr(global_config, "zenoh_mode", "client")

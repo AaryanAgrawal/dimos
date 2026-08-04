@@ -66,6 +66,14 @@ class GlobalConfig(BaseSettings):
     # link (`--zenoh-interface wlan0`) to scout exactly that one -- how robots on
     # a shared LAN find each other without scouting every interface they own.
     zenoh_interface: str = ""
+    # Whether multicast scouting runs at all -- unlike the two knobs above, which
+    # only decide how far it reaches. Off leaves discovery to gossip and the
+    # explicit connect endpoints, which is what a router deployment wants.
+    zenoh_multicast: bool = True
+    # Gossip discovery: a peer hands back the peers it already knows, turning one
+    # dialled endpoint into the whole mesh. Off means a session sees only what it
+    # dialled itself, so every peer needs a fixed listen port and its own endpoint.
+    zenoh_gossip: bool = True
     # Seconds ZenohService.start() blocks for the configured connect endpoints to
     # link before giving up and continuing. 0 disables the wait.
     zenoh_connect_timeout: float = 1.0

@@ -104,6 +104,19 @@ fn resolve_scouting_interface(iface: Option<&str>, scouting: Option<&str>) -> St
     }
 }
 
+/// Values that turn a discovery knob off. Case-folded: a knob that stayed on
+/// when the environment said `False` would read as a toggle that does nothing.
+const OFF_VALUES: [&str; 4] = ["off", "false", "0", "no"];
+
+/// Whether a discovery knob is on. Only an explicit off value turns it off --
+/// unset, blank and unrecognised keep it on, matching the python defaults.
+fn resolve_enabled(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some(value) if OFF_VALUES.contains(&value)
+    )
+}
+
 /// Session modes zenoh accepts; anything else is a typo in the environment.
 const ZENOH_MODES: [&str; 3] = ["peer", "client", "router"];
 
@@ -157,17 +170,32 @@ impl ZenohTransport {
                 .insert_json5("listen/endpoints", &json5)
                 .map_err(|e| io::Error::other(e.to_string()))?;
         }
-        // Multicast scouting always runs; the interface sets how far it reaches.
-        // Scouting every interface is a liability on robot deployments -- the
-        // scout flood tripped a zenoh Hello EINVAL on the laptop (link-local
-        // locator) and discovery never converged -- so this stays on loopback
-        // unless asked otherwise. Gossip stays on at every scope: it is what
-        // lets a module dialled over one explicit endpoint pick up the peers
-        // behind it, ephemeral listen ports and all.
+        // Multicast scouting runs by default; the interface sets how far it
+        // reaches. Scouting every interface is a liability on robot deployments
+        // -- the scout flood tripped a zenoh Hello EINVAL on the laptop
+        // (link-local locator) and discovery never converged -- so this stays on
+        // loopback unless asked otherwise.
+        config
+            .insert_json5(
+                "scouting/multicast/enabled",
+                &resolve_enabled(std::env::var("DIMOS_ZENOH_MULTICAST").ok().as_deref())
+                    .to_string(),
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
         config
             .insert_json5(
                 "scouting/multicast/interface",
                 &format!("\"{}\"", scouting_interface()),
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        // Gossip stays on by default: it is what lets a module dialled over one
+        // explicit endpoint pick up the peers behind it, ephemeral listen ports
+        // and all. Turning it off is how a router deployment stops its clients
+        // meshing around the router they were meant to funnel through.
+        config
+            .insert_json5(
+                "scouting/gossip/enabled",
+                &resolve_enabled(std::env::var("DIMOS_ZENOH_GOSSIP").ok().as_deref()).to_string(),
             )
             .map_err(|e| io::Error::other(e.to_string()))?;
         // Session mode, mirroring the python session: `client` hands routing to
@@ -283,6 +311,46 @@ mod tests {
             "wlan0"
         );
         assert_eq!(resolve_scouting_interface(Some(" wlan0 "), None), "wlan0");
+    }
+
+    #[test]
+    fn discovery_knobs_are_on_unless_told_otherwise() {
+        assert!(resolve_enabled(None));
+        assert!(resolve_enabled(Some("  ")));
+        assert!(resolve_enabled(Some("on")));
+    }
+
+    #[test]
+    fn discovery_knobs_read_every_spelling_of_off() {
+        assert!(!resolve_enabled(Some("off")));
+        assert!(!resolve_enabled(Some("false")));
+        assert!(!resolve_enabled(Some("0")));
+        assert!(!resolve_enabled(Some("no")));
+        assert!(!resolve_enabled(Some(" False ")));
+    }
+
+    #[test]
+    fn unknown_knob_value_leaves_discovery_on() {
+        // A typo must not silently strip a deployment of its discovery.
+        assert!(resolve_enabled(Some("offf")));
+    }
+
+    #[test]
+    fn zenoh_knows_both_discovery_keys() {
+        // The key names are the whole contract with zenoh: it rejects an unknown
+        // one, which is what keeps a mistyped knob from silently doing nothing.
+        let mut config = ::zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .expect("multicast key");
+        config
+            .insert_json5("scouting/gossip/enabled", "false")
+            .expect("gossip key");
+        assert_eq!(
+            config.get_json("scouting/multicast/enabled").unwrap(),
+            "false"
+        );
+        assert_eq!(config.get_json("scouting/gossip/enabled").unwrap(), "false");
     }
 
     #[test]

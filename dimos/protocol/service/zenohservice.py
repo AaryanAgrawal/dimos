@@ -83,6 +83,18 @@ def _default_scouting_interface() -> str:
     return global_config.zenoh_interface.strip()
 
 
+def _default_multicast() -> bool:
+    from dimos.core.global_config import global_config
+
+    return global_config.zenoh_multicast
+
+
+def _default_gossip() -> bool:
+    from dimos.core.global_config import global_config
+
+    return global_config.zenoh_gossip
+
+
 def _default_connect_timeout() -> float:
     from dimos.core.global_config import global_config
 
@@ -123,6 +135,10 @@ class ZenohConfig(BaseConfig):
     scouting: bool = Field(default_factory=_default_scouting)
     # Named interface to scout on, overriding `scouting`. Empty derives it.
     scouting_interface: str = Field(default_factory=_default_scouting_interface)
+    # Whether multicast scouting runs at all, as opposed to how far it reaches.
+    multicast: bool = Field(default_factory=_default_multicast)
+    # Learn peers from the peers already linked, not only from the dialled ones.
+    gossip: bool = Field(default_factory=_default_gossip)
     # Seconds to block in start() waiting for `connect` endpoints to link.
     connect_timeout: float = Field(default_factory=_default_connect_timeout)
 
@@ -136,6 +152,7 @@ class ZenohConfig(BaseConfig):
         return (
             f"{self.mode}|{json.dumps(sorted(self.connect))}"
             f"|{json.dumps(sorted(self.listen))}|{self.multicast_interface}"
+            f"|{self.multicast}|{self.gossip}"
         )
 
 
@@ -155,17 +172,21 @@ class ZenohSessionPool:
                     zconfig.insert_json5("connect/endpoints", json.dumps(config.connect))
                 if config.listen:
                     zconfig.insert_json5("listen/endpoints", json.dumps(config.listen))
-                # Multicast scouting always runs; the interface sets how far it
-                # reaches. Loopback by default, so sibling worker processes on
+                # Multicast scouting runs by default; the interface sets how far
+                # it reaches. Loopback by default, so sibling worker processes on
                 # this host still discover each other -- cutting scouting
                 # outright leaves them unable to reach one another at all,
-                # since peers don't route each other's traffic. Gossip stays on
-                # at every scope: it is what turns one dialled endpoint into the
+                # since peers don't route each other's traffic. Gossip is on by
+                # default too: it is what turns one dialled endpoint into the
                 # whole mesh, handing back the peers behind it instead of making
-                # every one of them a hand-written endpoint.
+                # every one of them a hand-written endpoint. Both are knobs only
+                # so a router deployment can stop its clients meshing around the
+                # router they were meant to funnel through.
+                zconfig.insert_json5("scouting/multicast/enabled", json.dumps(config.multicast))
                 zconfig.insert_json5(
                     "scouting/multicast/interface", json.dumps(config.multicast_interface)
                 )
+                zconfig.insert_json5("scouting/gossip/enabled", json.dumps(config.gossip))
                 self._sessions[key] = zenoh.open(zconfig)
                 logger.debug(f"Zenoh session opened in {config.mode} mode")
             return self._sessions[key]

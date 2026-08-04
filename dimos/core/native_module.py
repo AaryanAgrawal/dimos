@@ -200,6 +200,11 @@ def _spawn_env(extra_env: dict[str, str]) -> dict[str, str]:
         # it was meant to funnel through, and the wifi link carries the stream
         # twice again.
         env["DIMOS_ZENOH_MODE"] = zenoh_config.mode
+        # Same reason for the discovery knobs: a child left gossiping still
+        # meshes past the router, and one left multicasting still finds peers
+        # the parent deliberately stopped looking for.
+        env["DIMOS_ZENOH_MULTICAST"] = "on" if zenoh_config.multicast else "off"
+        env["DIMOS_ZENOH_GOSSIP"] = "on" if zenoh_config.gossip else "off"
 
     # set Rust logging to match Python level
     env["RUST_LOG"] = _PYTHON_TO_RUST_LEVELS.get(
