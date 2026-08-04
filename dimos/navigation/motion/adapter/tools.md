@@ -18,6 +18,12 @@ uv run maturin develop --uv --release -m dimos/navigation/motion/planner/autores
 python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --spawn
 python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save athens.rrd --every 3
 
+# post-mortem a recording of the live stack: map churn, plan flips, planner
+# replay + input ablation, input ages. Writes an rrd + svgs under recordings/.
+python -m dimos.navigation.motion.adapter.diagnose data/20260805-033007.zenoh.mcap
+python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
+python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-offset 0.25
+
 # tests and types
 python -m pytest dimos/navigation/motion/adapter -q
 python -m mypy dimos/navigation/motion/adapter
