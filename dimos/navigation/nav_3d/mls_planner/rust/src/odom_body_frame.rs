@@ -32,11 +32,6 @@ pub struct Config {
     /// value is `_mount_rotation()` in the go2 zenoh blueprints, and a baked
     /// host has to be handed it, since `--emit-config` emits the default.
     pub mount_rotation: [f64; 4],
-    /// base_link -> sensor translation (xyz, metres, in base_link's own axes).
-    /// LIO reports where the SENSOR is; without this arm the "body" pose is the
-    /// lidar's, which on the Go2 is 0.30 m ahead of the robot and 0.16 m above
-    /// it. Zeros mean the sensor sits on the body origin.
-    pub mount_translation: [f64; 3],
     pub body_frame_id: String,
 }
 
@@ -72,23 +67,11 @@ impl OdomBodyFrame {
         self.mount_inv = Quat::from_xyzw(self.config.mount_rotation).inverse();
     }
 
-    /// Compose the mount out of the orientation and the lever arm out of the
-    /// position. Twist, both covariances, frame and stamp ride through on the
-    /// message itself.
+    /// Compose the mount out of the orientation. Position, twist, both
+    /// covariances, frame and stamp ride through on the message itself.
     async fn on_odometry(&mut self, mut msg: Odometry) {
         let orientation = &mut msg.pose.pose.orientation;
-        let leveled = Quat::from(&*orientation).mul(self.mount_inv);
-        *orientation = leveled.into();
-
-        // p_sensor = p_body + R_body * lever, so subtract the arm rotated by the
-        // BODY's attitude -- the levelled one. Rotating it by the sensor's would
-        // swing the arm through the mount tilt a second time.
-        let offset = leveled.rotate(self.config.mount_translation);
-        let p = &mut msg.pose.pose.position;
-        p.x -= offset[0];
-        p.y -= offset[1];
-        p.z -= offset[2];
-
+        *orientation = Quat::from(&*orientation).mul(self.mount_inv).into();
         msg.child_frame_id = self.config.body_frame_id.clone();
 
         if let Err(e) = self.body_odometry.publish(&msg).await {
@@ -144,27 +127,6 @@ impl Quat {
             z: self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w,
             w: self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z,
         }
-    }
-
-    /// Rotate a vector: `q * v * q.conjugate()` with `v` as a pure quaternion,
-    /// matching `Quaternion.rotate_vector` (Quaternion.py). Conjugate rather
-    /// than inverse, as the python does -- these are unit attitudes, and on a
-    /// unit quaternion the two agree.
-    fn rotate(self, v: [f64; 3]) -> [f64; 3] {
-        let pure = Quat {
-            x: v[0],
-            y: v[1],
-            z: v[2],
-            w: 0.0,
-        };
-        let conj = Quat {
-            x: -self.x,
-            y: -self.y,
-            z: -self.z,
-            w: self.w,
-        };
-        let r = self.mul(pure).mul(conj);
-        [r.x, r.y, r.z]
     }
 
     /// Conjugate over the squared norm (`Quaternion.inverse`,
@@ -290,57 +252,9 @@ mod tests {
         assert_close(q.mul(q.inverse()), [0.0, 0.0, 0.0, 1.0]);
     }
 
-    /// base_link -> mid360_link on the Go2, i.e. CAMERA_XYZ + MID360_XYZ from
-    /// the go2 zenoh connection: 0.30 m ahead of the body and 0.16 m above it.
-    const LEVER: [f64; 3] = [0.29515, -0.00003, 0.16297];
-    /// `BODY.rotate_vector(LEVER)` printed by the python.
-    const OFFSET: [f64; 3] = [
-        0.21459713303331934,
-        0.23136344799234826,
-        0.11870876011049823,
-    ];
-
-    fn assert_close3(got: [f64; 3], want: [f64; 3]) {
-        for k in 0..3 {
-            assert!(
-                (got[k] - want[k]).abs() < 1e-12,
-                "component {k}: got {got:?}, want {want:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rotating_the_lever_arm_matches_the_python() {
-        assert_close3(Quat::from_xyzw(BODY).rotate(LEVER), OFFSET);
-    }
-
-    #[test]
-    fn an_identity_attitude_leaves_the_arm_alone() {
-        assert_close3(Quat::default().rotate(LEVER), LEVER);
-    }
-
-    #[test]
-    fn a_quarter_turn_of_yaw_sends_forward_to_left() {
-        // catches a conjugate/inverse swap, which mirrors the arm instead of
-        // rotating it -- the robot would then be offset the wrong way
-        let yaw90 = Quat {
-            x: 0.0,
-            y: 0.0,
-            z: (std::f64::consts::FRAC_PI_4).sin(),
-            w: (std::f64::consts::FRAC_PI_4).cos(),
-        };
-        assert_close3(yaw90.rotate([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]);
-    }
-
-    #[test]
-    fn a_zero_arm_is_the_old_passthrough_behaviour() {
-        assert_close3(Quat::from_xyzw(BODY).rotate([0.0; 3]), [0.0; 3]);
-    }
-
     fn config(mount_rotation: [f64; 4]) -> Config {
         Config {
             mount_rotation,
-            mount_translation: LEVER,
             body_frame_id: "base_link".into(),
         }
     }

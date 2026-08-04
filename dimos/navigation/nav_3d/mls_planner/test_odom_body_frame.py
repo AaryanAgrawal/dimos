@@ -23,13 +23,9 @@ from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.navigation.nav_3d.mls_planner.odom_body_frame import OdomBodyFrame
 
 
-def _level(mount_rotation, orientation, mount_translation=(0.0, 0.0, 0.0)):
+def _level(mount_rotation, orientation):
     """Run one odometry message through the handler and return the output."""
-    module = OdomBodyFrame(
-        mount_rotation=list(mount_rotation),
-        mount_translation=list(mount_translation),
-        body_frame_id="base_link",
-    )
+    module = OdomBodyFrame(mount_rotation=list(mount_rotation), body_frame_id="base_link")
     try:
         captured = []
         module.body_odometry.subscribe(captured.append)
@@ -62,31 +58,10 @@ def test_preserves_body_yaw_under_mount_tilt():
     assert out.orientation.angle_to(body) < 1e-5
 
 
-def test_relabels_child_frame_and_a_zero_arm_passes_position_through():
+def test_relabels_child_frame_and_passes_position_through():
     out = _level([0.0, 0.0, 0.0, 1.0], Quaternion(0.0, 0.0, 0.0, 1.0))
     assert out.child_frame_id == "base_link"
     assert out.position.to_tuple() == (1.0, 2.0, 3.0)
-
-
-def test_the_lever_arm_moves_the_body_off_the_sensor():
-    """LIO reports the SENSOR's position; the body is that less the mount arm.
-
-    Unlevel this and the planner reasons about a footprint 0.30 m ahead of the
-    robot, which is 70% of a half-length on the Go2 -- it still reaches goals,
-    it just judges every clearance for a body that is not there.
-    """
-    # facing +x, so the arm comes off unrotated and the arithmetic is readable
-    out = _level([0.0, 0.0, 0.0, 1.0], Quaternion(0.0, 0.0, 0.0, 1.0), _LEVER)
-    assert out.position.to_tuple() == pytest.approx(
-        (1.0 - _LEVER[0], 2.0 - _LEVER[1], 3.0 - _LEVER[2]), abs=1e-12
-    )
-
-
-def test_the_arm_swings_with_the_body_not_the_map():
-    """Yawed a quarter turn, the forward arm comes off the body's y, not its x."""
-    yaw90 = Quaternion.from_euler(Vector3(0.0, 0.0, math.pi / 2))
-    out = _level([0.0, 0.0, 0.0, 1.0], yaw90, (1.0, 0.0, 0.0))
-    assert out.position.to_tuple() == pytest.approx((1.0, 2.0 - 1.0, 3.0), abs=1e-12)
 
 
 # The Go2's real mount, MID360_MOUNT_RPY_DEG = (-60, 0, -90), and a body rolled,
@@ -96,11 +71,6 @@ def test_the_arm_swings_with_the_body_not_the_map():
 _MOUNT = (-0.35355339059327373, 0.3535533905932737, -0.6123724356957945, 0.6123724356957946)
 _SENSOR = (-0.5450515607112322, 0.13515397172907628, -0.39632409041884364, 0.7263466221066786)
 _LEVELED = (-0.13432939990042636, 0.019615081741061635, 0.3470173839448213, 0.9279815710081614)
-# base_link -> mid360_link on the Go2: CAMERA_XYZ + MID360_XYZ from the zenoh
-# connection, and _BODY.rotate_vector(_LEVER), both pinned in the rust too.
-_LEVER = (0.29515, -0.00003, 0.16297)
-_BODY = (-0.1343293999004263, 0.01961508174106149, 0.3470173839448213, 0.9279815710081614)
-_OFFSET = (0.21459713303331934, 0.23136344799234826, 0.11870876011049823)
 
 
 def test_go2_mount_vectors_the_rust_port_is_pinned_to():
@@ -110,9 +80,3 @@ def test_go2_mount_vectors_the_rust_port_is_pinned_to():
 
     out = _level(_MOUNT, Quaternion(*_SENSOR))
     assert out.orientation.to_tuple() == pytest.approx(_LEVELED, abs=1e-12)
-
-    # the arm is the sum of the two static mount edges, and is rotated by the
-    # LEVELLED attitude -- rotating it by the sensor's would tilt it twice
-    assert Quaternion(*_BODY).rotate_vector(Vector3(*_LEVER)).to_tuple() == pytest.approx(
-        _OFFSET, abs=1e-12
-    )

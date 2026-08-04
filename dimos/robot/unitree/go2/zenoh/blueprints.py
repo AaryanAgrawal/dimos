@@ -47,7 +47,7 @@ from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
 from dimos.navigation.nav_3d.mls_planner.odom_body_frame import OdomBodyFrame
 from dimos.navigation.nav_3d.mls_planner.viz import planner_visual_override
-from dimos.robot.unitree.go2.zenoh.zenohconnection import CAMERA_XYZ, MID360_XYZ, GO2Zenoh
+from dimos.robot.unitree.go2.zenoh.zenohconnection import GO2Zenoh
 from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.08
@@ -72,19 +72,6 @@ def _mount_rotation() -> list[float]:
     """
     rpy = Vector3(*(math.radians(d) for d in MID360_MOUNT_RPY_DEG))
     return list(Quaternion.from_euler(rpy).to_tuple())
-
-
-def _mount_translation() -> list[float]:
-    """base_link -> mid360_link, the mount's lever arm, in base_link's own axes.
-
-    The two static edges GO2Zenoh publishes, summed — base_link -> front_camera
-    carries no rotation, so they add directly. Point-LIO reports where the
-    SENSOR is, so without subtracting this the "body" pose is the lidar's: 0.30 m
-    ahead of the robot and 0.16 m above it. The height is why an unfixed stack
-    draws its plan in the air; the 0.30 m is the half of it you cannot see, and
-    it skews every clearance judgement front-to-back.
-    """
-    return list((CAMERA_XYZ + MID360_XYZ).to_tuple())
 
 
 def _camera_info_to_pinhole(camera_info: Any) -> Any:
@@ -210,9 +197,7 @@ go2_zenoh_raycaster = autoconnect(
 go2_zenoh_nav = autoconnect(
     go2_zenoh_raycaster,
     _mls_planner,
-    OdomBodyFrame.blueprint(
-        mount_rotation=_mount_rotation(), mount_translation=_mount_translation()
-    ),
+    OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
     GoalRelay.blueprint(),
     BasicPathFollower.blueprint(speed=0.5, heading_gain=0.4, max_angular=0.6).remappings(
         [(BasicPathFollower, "odometry", "body_odometry")]
@@ -263,9 +248,7 @@ _mls_planner_motion = MLSPlannerNative.blueprint(
 # runnable blueprint -- it has no follower and would plan without ever moving.
 _go2_zenoh_motion_base = autoconnect(
     go2_zenoh_raycaster,
-    OdomBodyFrame.blueprint(
-        mount_rotation=_mount_rotation(), mount_translation=_mount_translation()
-    ),
+    OdomBodyFrame.blueprint(mount_rotation=_mount_rotation()),
     GoalRelay.blueprint(),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
     MotionPlanner.blueprint(viz_publish_hz=motion_viz_hz).remappings(
