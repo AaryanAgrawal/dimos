@@ -27,7 +27,6 @@
 //! route are the same statement to whatever is downstream -- there is no safe
 //! way forward from here.
 
-use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -356,28 +355,6 @@ impl RateCap {
 ///
 /// Free rather than a method so it can be exercised with no transport, which
 /// is the whole reason the async shell above stays as thin as it is.
-/// The cloud the search sees: floor-anchored when configured, else as it came.
-///
-/// THE TF PRIOR IS REQUIRED, not optional. A low quantile of the cloud alone is
-/// only the floor if the floor is in the cloud; hand it a wall and it will
-/// happily anchor to the wall's base and delete the wall. `floor_prior` is what
-/// says where the ground is supposed to be, so without it the band stays
-/// exactly where it was.
-pub fn anchored_cloud<'a>(
-    config: &Config,
-    points: &'a [[f32; 3]],
-    pose: (f64, f64, f64),
-    floor_prior: Option<f64>,
-) -> Cow<'a, [[f32; 3]]> {
-    if !config.floor_anchor || floor_prior.is_none() {
-        return Cow::Borrowed(points);
-    }
-    match floor::estimate_floor(points, (pose.0, pose.1), floor_prior) {
-        Some(f) => Cow::Owned(floor::anchor_to_floor(points, f, config.ground_margin_m)),
-        None => Cow::Borrowed(points),
-    }
-}
-
 pub fn plan_once(
     config: &Config,
     emb: &Emb,
@@ -388,7 +365,13 @@ pub fn plan_once(
 ) -> Path {
     let started = Instant::now();
     let t0 = msg::now_secs();
-    let anchored = anchored_cloud(config, points, pose, floor_prior);
+    let anchored = floor::anchored_cloud(
+        points,
+        (pose.0, pose.1),
+        floor_prior,
+        config.floor_anchor,
+        config.ground_margin_m,
+    );
     let points: &[[f32; 3]] = &anchored;
     let cloud: Vec<[f64; 3]> = points
         .iter()
@@ -908,7 +891,13 @@ mod tests {
             lidar_height: 0.0,
             ..config()
         };
-        let anchored = anchored_cloud(&cfg, &room, (0.0, 0.0, 0.0), None);
+        let anchored = floor::anchored_cloud(
+            &room,
+            (0.0, 0.0),
+            None,
+            cfg.floor_anchor,
+            cfg.ground_margin_m,
+        );
         assert_eq!(anchored.len(), room.len(), "anchored with no prior");
     }
 
@@ -922,7 +911,13 @@ mod tests {
             lidar_height: 0.45,
             ..config()
         };
-        let anchored = anchored_cloud(&cfg, &room, (0.0, 0.0, 0.0), Some(0.0));
+        let anchored = floor::anchored_cloud(
+            &room,
+            (0.0, 0.0),
+            Some(0.0),
+            cfg.floor_anchor,
+            cfg.ground_margin_m,
+        );
         let kept: Vec<[f32; 3]> = room
             .iter()
             .copied()
@@ -985,7 +980,13 @@ mod tests {
             lidar_height: 0.45,
             ..config()
         };
-        let anchored = anchored_cloud(&cfg, &room, (0.0, 0.0, 0.0), Some(-0.24));
+        let anchored = floor::anchored_cloud(
+            &room,
+            (0.0, 0.0),
+            Some(-0.24),
+            cfg.floor_anchor,
+            cfg.ground_margin_m,
+        );
         assert_eq!(anchored.len(), room.len());
     }
 }

@@ -20,6 +20,10 @@ to rust); this module owns subscriptions, the control clock, the on-robot
 clearance annotation and goal arrival. Clearance is recomputed from the
 local map per (path, map) pair, the same room hint the control battery's
 judge hands the controller in sim.
+
+The map it measures that hint off is floor-anchored exactly as the planner's
+is (``adapter/floor.py``), because the governor and the planner's stamped
+precision profile have to be talking about the same slice of the world.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
+from dimos.navigation.motion.adapter.floor import FloorAnchor
 from dimos.navigation.motion.control.controller import (
     ControllerConfig,
     TrajectoryController,
@@ -66,7 +71,9 @@ def path_clearance(xy: np.ndarray, points: np.ndarray, half_width: float) -> np.
     """Per-waypoint room hint (m): nearest z-band point minus the half-width.
 
     A speed hint for the controller, not a safety contract. Empty band or
-    empty path = infinite room.
+    empty path = infinite room. THE BAND IS ABSOLUTE, so `points` has to arrive
+    already floor-anchored — this module anchors through `FloorAnchor`, and
+    `replay.py` hands in a cloud it shifted onto its own floor estimate.
     """
     xy = np.asarray(xy, dtype=float).reshape(-1, 2)
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
@@ -132,6 +139,17 @@ class TrajectoryFollowerConfig(ModuleConfig):
     # carries is the lidar's, not the robot's -- 0.30 m ahead and 0.16 m above on
     # this rig. tf resolves it into the body; ticks are dropped until it can.
     base_frame: str = "base_link"
+    # Anchor the local map to the floor under the robot before the room hint is
+    # measured off it, so the band read here is the band the planner planned in
+    # (MotionPlannerConfig carries the same three knobs, adapter/floor.py).
+    floor_anchor: bool = True
+    # Lidar height above the ground while standing. With it, tf gives the base
+    # height above ground and hence a prior the floor estimate is bounded
+    # against; 0 leaves the band where the map's z origin puts it.
+    lidar_height: float = 0.0
+    # Drop returns within this of the estimated floor before the band is taken.
+    # TWO voxel layers, not one — see MotionPlannerConfig.ground_margin_m.
+    ground_margin_m: float = 0.16
     # Seconds between "still not moving, and here is why" lines.
     stall_report_s: float = 3.0
     # A commanded speed at or under this is standing still, whatever the reason.
@@ -161,6 +179,13 @@ class TrajectoryFollower(Module):
         self._cloud: PointCloud2 | None = None
         self._clearance: np.ndarray | None = None
         self._clearance_key: tuple[int, int] | None = None
+        self._floor = FloorAnchor(
+            doing="measuring the room",
+            enabled=self.config.floor_anchor,
+            lidar_height=self.config.lidar_height,
+            ground_margin=self.config.ground_margin_m,
+            base_frame=self.config.base_frame,
+        )
         self._latch = GoalLatch(self.config.goal_tolerance)
         self._track = TRACKS[self.config.track]
         self._half_width = EMBODIMENTS[self.config.embodiment].width / 2.0
@@ -206,6 +231,7 @@ class TrajectoryFollower(Module):
         pose = self._base_pose.resolve(msg)
         if pose is None:
             return
+        self._floor.observe(self._base_pose, msg.child_frame_id, pose.position.z)
         with self._lock:
             self._pose = pose
 
@@ -248,7 +274,7 @@ class TrajectoryFollower(Module):
             self.nav_cmd_vel.publish(Twist())
             self._stall.blocked("a new goal -- the last one is reached and latched")
             return
-        tw = self._controller.update(pose, path, time.monotonic(), self._clearance_for(path))
+        tw = self._controller.update(pose, path, time.monotonic(), self._clearance_for(path, xy))
         self.nav_cmd_vel.publish(tw)
 
         # Standing still with a plan in hand is the ambiguous case, and the two
@@ -269,7 +295,7 @@ class TrajectoryFollower(Module):
         else:
             self._stall.ok(f"driving: |v|={speed:.2f} m/s wz={tw.angular.z:+.2f} rad/s")
 
-    def _clearance_for(self, path: Path) -> np.ndarray | None:
+    def _clearance_for(self, path: Path, xy: tuple[float, float]) -> np.ndarray | None:
         if not self._track.annotate_clearance:
             # the blind track: the law reads the path's own stamps instead
             return None
@@ -283,6 +309,9 @@ class TrajectoryFollower(Module):
         key = (id(path), id(cloud))
         if key != self._clearance_key:
             wp = np.array([[p.position.x, p.position.y] for p in path.poses]).reshape(-1, 2)
-            self._clearance = path_clearance(wp, cloud.points_f32(), self._half_width)
+            # Anchored per (path, map) pair like the hint itself: the floor
+            # under the robot moves far slower than the pair it is cached with.
+            pts = self._floor.anchor(cloud.points_f32(), xy)
+            self._clearance = path_clearance(wp, pts, self._half_width)
             self._clearance_key = key
         return self._clearance

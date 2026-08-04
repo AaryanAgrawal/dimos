@@ -23,6 +23,12 @@
 //! the band and walls the robot in -- so the floor is estimated per tick,
 //! sanity bounded against tf's base height above ground, and the slab itself
 //! is dropped before the band is taken.
+//!
+//! BOTH SIDES OF THE STACK READ THE SAME SLICE: the planner plans on the
+//! anchored cloud and the follower measures its room hint off it, through the
+//! same [`anchored_cloud`].
+
+use std::borrow::Cow;
 
 /// Neighbourhood the floor is read from (m). Wide enough to hold ground in a
 /// cluttered room, narrow enough that a ramp or a stair flight is still
@@ -88,6 +94,30 @@ pub fn anchor_to_floor(points: &[[f32; 3]], floor: f64, margin: f64) -> Vec<[f32
         .map(|p| [p[0], p[1], p[2] - floor])
         .filter(|p| margin <= 0.0 || p[2] > margin)
         .collect()
+}
+
+/// The cloud the body band is taken from: floor-anchored when configured, else
+/// as it came. `FloorAnchor.anchor` in the python twin.
+///
+/// THE TF PRIOR IS REQUIRED, not optional. A low quantile of the cloud alone is
+/// only the floor if the floor is in the cloud; hand it a wall and it will
+/// happily anchor to the wall's base and delete the wall. `prior` is what says
+/// where the ground is supposed to be, so without it the band stays exactly
+/// where it was.
+pub fn anchored_cloud<'a>(
+    points: &'a [[f32; 3]],
+    xy: (f64, f64),
+    prior: Option<f64>,
+    enabled: bool,
+    margin: f64,
+) -> Cow<'a, [[f32; 3]]> {
+    if !enabled || prior.is_none() {
+        return Cow::Borrowed(points);
+    }
+    match estimate_floor(points, xy, prior) {
+        Some(f) => Cow::Owned(anchor_to_floor(points, f, margin)),
+        None => Cow::Borrowed(points),
+    }
 }
 
 /// numpy's linear-interpolation percentile, which the python twin calls.

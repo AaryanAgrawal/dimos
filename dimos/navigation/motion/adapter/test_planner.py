@@ -18,7 +18,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from dimos.navigation.motion.adapter import planner as planner_module
+from dimos.navigation.motion.adapter import floor as floor_module, planner as planner_module
+from dimos.navigation.motion.adapter.floor import FloorAnchor
 from dimos.navigation.motion.adapter.planner import (
     MotionPlanner,
     MotionPlannerConfig,
@@ -176,13 +177,17 @@ def test_a_route_appearing_or_going_away_is_a_change():
 
 
 def _anchoring_planner(**config):
-    """A MotionPlanner with just enough wired up to call _anchor."""
+    """A MotionPlanner with just enough wired up to anchor a cloud."""
     planner = object.__new__(MotionPlanner)
     planner.config = MotionPlannerConfig(**config)
     planner._lock = RLock()
-    planner._base_z = None
-    planner._base_height = None
-    planner._unanchored_warned = False
+    planner._floor = FloorAnchor(
+        doing="planning",
+        enabled=planner.config.floor_anchor,
+        lidar_height=planner.config.lidar_height,
+        ground_margin=planner.config.ground_margin_m,
+        base_frame=planner.config.base_frame,
+    )
     return planner
 
 
@@ -196,8 +201,8 @@ def _room(floor_z: float, n: int = 400) -> np.ndarray:
 
 def test_anchor_moves_the_band_onto_the_floor():
     planner = _anchoring_planner(lidar_height=0.45)
-    planner._base_z, planner._base_height = 0.05, 0.29  # prior: floor at -0.24
-    out = planner._anchor(_room(-0.28), (0.0, 0.0, 0.0))
+    planner._floor.base_z, planner._floor.base_height = 0.05, 0.29  # prior: floor at -0.24
+    out = planner._floor.anchor(_room(-0.28), (0.0, 0.0))
     # the slab is gone and the clutter reads as its true height over the floor
     assert len(out) == 2
     assert abs(float(out[:, 2].min()) - 0.2) < 1e-6
@@ -209,34 +214,34 @@ def test_anchor_without_a_tf_prior_leaves_the_cloud_alone():
     # the cloud; without tf saying where the ground is, the band does not move
     planner = _anchoring_planner()
     pts = _room(-0.28)
-    assert np.array_equal(planner._anchor(pts, (0.0, 0.0, 0.0)), pts)
+    assert np.array_equal(planner._floor.anchor(pts, (0.0, 0.0)), pts)
 
 
 def test_anchor_warns_once_when_it_cannot_anchor(monkeypatch):
     warnings = []
     monkeypatch.setattr(
-        planner_module.logger, "warning", lambda msg, **kw: warnings.append(msg), raising=False
+        floor_module.logger, "warning", lambda msg, **kw: warnings.append(msg), raising=False
     )
     planner = _anchoring_planner()
     for _ in range(3):
-        planner._anchor(_room(-0.28), (0.0, 0.0, 0.0))
+        planner._floor.anchor(_room(-0.28), (0.0, 0.0))
     assert len(warnings) == 1
 
 
 def test_anchor_is_off_when_the_switch_is_off():
     planner = _anchoring_planner(floor_anchor=False, lidar_height=0.45)
-    planner._base_z, planner._base_height = 0.05, 0.29
+    planner._floor.base_z, planner._floor.base_height = 0.05, 0.29
     pts = _room(-0.28)
-    assert np.array_equal(planner._anchor(pts, (0.0, 0.0, 0.0)), pts)
+    assert np.array_equal(planner._floor.anchor(pts, (0.0, 0.0)), pts)
 
 
 def test_anchoring_a_floor_already_at_zero_shifts_nothing():
     # the referee's sim worlds put the plan poses on the ground; anchoring
     # there must not MOVE anything, only drop the ground it is standing on
     planner = _anchoring_planner(lidar_height=0.45)
-    planner._base_z, planner._base_height = 0.29, 0.29  # prior: floor at 0.0
+    planner._floor.base_z, planner._floor.base_height = 0.29, 0.29  # prior: floor at 0.0
     pts = _room(0.0)
-    out = planner._anchor(pts, (0.0, 0.0, 0.0))
+    out = planner._floor.anchor(pts, (0.0, 0.0))
     assert np.array_equal(out, pts[pts[:, 2] > planner.config.ground_margin_m])
 
 
@@ -244,10 +249,10 @@ def test_the_prior_bounds_an_estimate_the_cloud_gets_wrong():
     # a cloud with no floor in it (a wall the robot faces): the low quantile
     # is the wall's base, and the prior is what stops the wall being deleted
     planner = _anchoring_planner(lidar_height=0.45)
-    planner._base_z, planner._base_height = 0.05, 0.29  # prior: floor at -0.24
+    planner._floor.base_z, planner._floor.base_height = 0.05, 0.29  # prior: floor at -0.24
     wall = np.column_stack(
         [np.full(400, 1.0), np.linspace(-1.0, 1.0, 400), np.linspace(0.6, 1.4, 400)]
     ).astype(np.float32)
-    out = planner._anchor(wall, (0.0, 0.0, 0.0))
+    out = planner._floor.anchor(wall, (0.0, 0.0))
     # shifted by the PRIOR (-0.24), not by the wall's own base (0.6)
     assert abs(float(out[:, 2].min()) - (0.6 + 0.24)) < 1e-5

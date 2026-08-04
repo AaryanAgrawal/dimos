@@ -559,6 +559,9 @@ remapped to `planner_path`; the follower track is `hinted`.
   | `control_frequency` | `10.0` | |
   | `goal_tolerance` | `0.20` | |
   | `embodiment` | `"go2"` | half-width = `Emb` width / 2 from the pure crate — same one-place-for-body-dims policy the python states (follower.py:117-124). The python `half_width: float \| None` override does not cross (Option ban); drop it from the native wrapper. |
+  | `floor_anchor` | `True` | re-zero the local map on the floor under the robot before the room hint is measured off it (`adapter/floor.py`) — the same band the planner planned in |
+  | `lidar_height` | `0.0` | lidar height above ground; with tf it gives the floor prior, without which anchoring stays off |
+  | `ground_margin_m` | `0.16` | drop returns this close to the estimated floor, so the ground slab is not read as a wall |
   | `idle_speed` | `0.02` | for the stall log classification only |
   | `max_path_age_s` | `1.0` | **NEW — the guards-table todo.** Chosen default: 1.0 s = five missed 5 Hz replans; the planner is co-located so this guards planner death, not the link. Marked here as a picked default, tune on robot. |
 

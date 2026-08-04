@@ -234,9 +234,16 @@ Two things the numbers here cannot say:
   every tick refuses — the +0.29 failure again, one layer lower. At two it is
   7 %.
 
-Not done, and deliberately: the FOLLOWER's clearance (`adapter/follower.py`)
-still reads the raw `Z_BAND` off the unanchored local map, so its speed governor
-and the planner's stamped profile now measure different slices of the world.
+**The follower is now on the same band.** Its room hint
+(`adapter/follower.py::_clearance_for`) anchors the local map through the same
+`FloorAnchor`, off the same tf prior, before `path_clearance` slices `Z_BAND`
+out of it — so its speed governor and the planner's stamped profile measure one
+world again. Unanchored (no `lidar_height`, no mount leg, or
+`floor_anchor=False`) it degrades to the raw band exactly as the planner does,
+and on a floor already at zero it is a no-op, so the referee's sim scores cannot
+move. This recording cannot score it: the replay is a planner harness and the
+follower's twist is not in the file — every number above is the planner's, and
+re-running `--only replay` after the change reproduces them unchanged.
 
 ## Artifacts
 

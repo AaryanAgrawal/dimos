@@ -47,6 +47,7 @@ use tracing::info;
 use validator::{Validate, ValidationError};
 
 use crate::emb;
+use crate::floor;
 use crate::msg::{self, State};
 use crate::tf_pose::OdomBasePose;
 
@@ -173,6 +174,19 @@ pub struct Config {
     /// lidar's, not the robot's. tf resolves it into the body; messages are
     /// dropped until the mount leg arrives.
     pub base_frame: String,
+    /// Anchor the local map to the floor under the robot before the room hint
+    /// is measured off it, so the band read here is the band the planner
+    /// planned in. The planner carries the same three knobs -- see `floor.rs`.
+    pub floor_anchor: bool,
+    /// Lidar height above the ground while standing. With it, tf gives the base
+    /// height above ground and hence the floor prior; 0 leaves the band where
+    /// the map's z origin puts it.
+    #[validate(range(min = 0.0))]
+    pub lidar_height: f64,
+    /// Drop returns within this of the estimated floor before the band is
+    /// taken. TWO voxel layers, not one -- see the planner's `ground_margin_m`.
+    #[validate(range(min = 0.0))]
+    pub ground_margin_m: f64,
     /// A commanded speed at or under this is standing still, whatever the
     /// reason. Classification for the stall log only; it commands nothing.
     #[validate(range(min = 0.0))]
@@ -259,6 +273,8 @@ pub fn goal_of(path: &Path) -> Option<(f64, f64)> {
 #[derive(Default)]
 struct Shared {
     pose: Option<(f64, f64, f64)>,
+    /// Where tf puts the ground under the base: the floor estimate's bound.
+    floor_prior: Option<f64>,
     path: Option<Arc<Path>>,
     /// ARRIVAL, not `msg.ts`: what this guards is how long since the planner
     /// was last heard from.
@@ -305,6 +321,8 @@ pub struct TrajectoryFollower {
     /// Built on the first odometry message: `Tf` is only handed over at build
     /// time, and the base frame is config the constructor does not see.
     base_pose: Option<OdomBasePose>,
+    /// How far the base sits above the ground, looked up once off the mount leg.
+    base_height: Option<f64>,
     shared: Arc<Mutex<Shared>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -348,10 +366,17 @@ impl TrajectoryFollower {
         let resolver = self
             .base_pose
             .get_or_insert_with(|| OdomBasePose::new(self.tf.clone(), &self.config.base_frame));
-        let Some(pose) = resolver.resolve(&msg) else {
+        let Some(iso) = resolver.resolve_iso(&msg) else {
             return;
         };
-        self.shared.lock().expect("shared mutex").pose = Some((pose[0], pose[1], pose[2]));
+        if self.base_height.is_none() && self.config.lidar_height > 0.0 {
+            self.base_height =
+                resolver.base_height_above_ground(&msg.child_frame_id, self.config.lidar_height);
+        }
+        let pose = crate::tf_pose::state_of(&iso);
+        let mut s = self.shared.lock().expect("shared mutex");
+        s.pose = Some((pose[0], pose[1], pose[2]));
+        s.floor_prior = self.base_height.map(|h| iso.translation.z - h);
     }
 
     async fn on_local_map(&mut self, msg: PointCloud2) {
@@ -464,6 +489,34 @@ fn dialect_band() -> Params {
     }
 }
 
+/// The per-waypoint room hint off the floor-anchored map: the twin of
+/// `follower.py::_clearance_for`'s recompute branch.
+///
+/// THE BAND HAS TO BE THE PLANNER'S BAND. `path_clearance` slices an absolute
+/// 0.05..0.45 m, so measuring it on the raw map on a LIO stack governs the
+/// speed by a slab over the robot's head-room while the plan was priced 0.33 m
+/// lower. Free rather than a method so it can be exercised with no transport.
+pub fn measure_room(
+    config: &Config,
+    points: &[[f32; 3]],
+    pose: (f64, f64, f64),
+    floor_prior: Option<f64>,
+    states: &[State],
+    half_width: f64,
+) -> Vec<f64> {
+    // Anchored per (path, map) pair like the hint itself: the floor under the
+    // robot moves far slower than the pair it is cached with.
+    let anchored = floor::anchored_cloud(
+        points,
+        (pose.0, pose.1),
+        floor_prior,
+        config.floor_anchor,
+        config.ground_margin_m,
+    );
+    let xy: Vec<[f64; 2]> = states.iter().map(|s| [s[0], s[1]]).collect();
+    clearance::path_clearance(&xy, &anchored, half_width)
+}
+
 struct Worker {
     shared: Arc<Mutex<Shared>>,
     config: Config,
@@ -475,6 +528,7 @@ struct Worker {
 
 struct Snapshot {
     pose: Option<(f64, f64, f64)>,
+    floor_prior: Option<f64>,
     path: Option<Arc<Path>>,
     path_seq: u64,
     age_s: Option<f64>,
@@ -553,8 +607,9 @@ impl Worker {
                     let path = snap.path.clone().expect("Drive implies a path");
                     let states = msg::path_states(&path);
                     let ts = msg::path_stamps(&path);
-                    let room =
-                        tokio::task::block_in_place(|| self.room(&snap, &states, &ts, &mut cache));
+                    let room = tokio::task::block_in_place(|| {
+                        self.room(&snap, pose, &states, &ts, &mut cache)
+                    });
                     let t = started.elapsed().as_secs_f64();
                     let (vx, vy, wz) = match self.track {
                         Track::Hinted => law.step(
@@ -579,6 +634,7 @@ impl Worker {
         let mut s = self.shared.lock().expect("shared mutex");
         Snapshot {
             pose: s.pose,
+            floor_prior: s.floor_prior,
             path: s.path.clone(),
             path_seq: s.path_seq,
             age_s: s.path_at.map(|t| now.duration_since(t).as_secs_f64()),
@@ -594,6 +650,7 @@ impl Worker {
     fn room(
         &self,
         snap: &Snapshot,
+        pose: (f64, f64, f64),
         states: &[State],
         ts: &[f64],
         cache: &mut Cache,
@@ -616,8 +673,14 @@ impl Worker {
             }
         }
         let points = self.points(cloud, snap.cloud_seq, cache)?;
-        let xy: Vec<[f64; 2]> = states.iter().map(|s| [s[0], s[1]]).collect();
-        let room = Arc::new(clearance::path_clearance(&xy, &points, self.half_width));
+        let room = Arc::new(measure_room(
+            &self.config,
+            &points,
+            pose,
+            snap.floor_prior,
+            states,
+            self.half_width,
+        ));
         cache.room = Some((key, Arc::clone(&room)));
         Some(room)
     }
@@ -913,6 +976,134 @@ mod tests {
         // tight corridor; None is the honest answer and the law cruises
         let states: Vec<State> = (0..5).map(|k| [k as f64 * 0.2, 0.0, 0.0]).collect();
         assert!(stamps::decode_ceilings(&[0.0; 5], &states, &dialect_band()).is_none());
+    }
+
+    // the room hint's band -- the cases in adapter/test_follower.py
+
+    fn config() -> Config {
+        Config {
+            track: "hinted".to_string(),
+            controller_config: controller_config(),
+            control_frequency: 10.0,
+            goal_tolerance: 0.2,
+            embodiment: "go2".to_string(),
+            base_frame: "base_link".to_string(),
+            floor_anchor: true,
+            lidar_height: 0.45,
+            ground_margin_m: 0.16,
+            idle_speed: 0.02,
+            max_path_age_s: 1.0,
+        }
+    }
+
+    fn half_width() -> f64 {
+        emb::half_width(&emb::by_tag("go2").expect("go2"))
+    }
+
+    /// A floor slab at `floor_z` with a post 0.20..0.30 m above it, at x=1.
+    ///
+    /// Sunk far enough that the post is entirely UNDER the raw 0.05..0.45 band
+    /// -- the recording's case, where the map's z origin is base height.
+    fn room_with_a_post(floor_z: f32) -> Vec<[f32; 3]> {
+        let mut pts: Vec<[f32; 3]> = (0..400)
+            .map(|i| {
+                let a = i as f32 / 400.0 * std::f32::consts::TAU;
+                [2.0 * a.cos(), 2.0 * a.sin(), floor_z]
+            })
+            .collect();
+        for k in 0..5 {
+            pts.push([1.0, 0.0, floor_z + 0.20 + 0.025 * k as f32]);
+        }
+        pts
+    }
+
+    fn waypoints() -> Vec<State> {
+        vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]
+    }
+
+    /// The room hint the raw band gives, which is what anchoring has to change
+    /// -- and what it must degrade to when it cannot anchor.
+    fn raw_room(points: &[[f32; 3]]) -> Vec<f64> {
+        let xy: Vec<[f64; 2]> = waypoints().iter().map(|s| [s[0], s[1]]).collect();
+        clearance::path_clearance(&xy, points, half_width())
+    }
+
+    #[test]
+    fn the_room_hint_is_measured_on_the_floor_anchored_map() {
+        let room = room_with_a_post(-0.28);
+        // unanchored, the post sits under the band and reads as infinite room
+        // -- the governor would drive at full speed into what the planner
+        // routed round
+        let hw = half_width();
+        let blind = measure_room(&config(), &room, (0.0, 0.0, 0.0), None, &waypoints(), hw);
+        assert!(blind.iter().all(|d| d.is_infinite()), "{blind:?}");
+        // anchored off the tf prior: the post is where the planner sees it
+        let seen = measure_room(
+            &config(),
+            &room,
+            (0.0, 0.0, 0.0),
+            Some(-0.24),
+            &waypoints(),
+            hw,
+        );
+        assert!((seen[0] - (1.0 - hw)).abs() < 1e-6, "{seen:?}");
+        assert!((seen[1] - (0.5 - hw)).abs() < 1e-6, "{seen:?}");
+    }
+
+    #[test]
+    fn an_unanchored_room_hint_is_the_raw_band() {
+        // no tf prior: the follower degrades to the band as it was, exactly as
+        // the planner does, rather than anchoring to whatever the low quantile
+        // of the cloud happens to be
+        let room = room_with_a_post(-0.28);
+        let cfg = Config {
+            lidar_height: 0.0,
+            ..config()
+        };
+        let got = measure_room(
+            &cfg,
+            &room,
+            (0.0, 0.0, 0.0),
+            None,
+            &waypoints(),
+            half_width(),
+        );
+        assert_eq!(got, raw_room(&room));
+    }
+
+    #[test]
+    fn the_anchor_switch_turns_the_room_hint_back_to_the_raw_band() {
+        let room = room_with_a_post(-0.28);
+        let cfg = Config {
+            floor_anchor: false,
+            ..config()
+        };
+        let got = measure_room(
+            &cfg,
+            &room,
+            (0.0, 0.0, 0.0),
+            Some(-0.24),
+            &waypoints(),
+            half_width(),
+        );
+        assert_eq!(got, raw_room(&room));
+    }
+
+    #[test]
+    fn a_room_hint_on_a_floor_already_at_zero_is_the_raw_band() {
+        // the referee's sim worlds put the plan poses on the ground; anchoring
+        // there only drops the ground the body is standing on, which was never
+        // in the band, so the hint the judge hands the controller cannot move
+        let room = room_with_a_post(0.0);
+        let got = measure_room(
+            &config(),
+            &room,
+            (0.0, 0.0, 0.0),
+            Some(0.0),
+            &waypoints(),
+            half_width(),
+        );
+        assert_eq!(got, raw_room(&room));
     }
 
     #[test]

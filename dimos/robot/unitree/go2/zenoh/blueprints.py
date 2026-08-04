@@ -269,9 +269,11 @@ _go2_zenoh_motion_base = autoconnect(
 
 # hinted: the follower is handed the per-waypoint clearance array recomputed from the
 # raycaster's local map, which on this stack is live -- so this is the honest default.
+# It gets the planner's lidar_height for the same reason the planner does: the room hint
+# has to be measured off the slice the plan was priced in, not off the raw band.
 go2_zenoh_motion = autoconnect(
     _go2_zenoh_motion_base,
-    TrajectoryFollower.blueprint(track="hinted"),
+    TrajectoryFollower.blueprint(track="hinted", lidar_height=ROBOT_HEIGHT),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
 
 # blind: the same graph with the clearance hint withheld. The law recovers the required
@@ -279,7 +281,7 @@ go2_zenoh_motion = autoconnect(
 # regime that survives when the local map is stale, empty, or not the follower's to read.
 go2_zenoh_motion_blind = autoconnect(
     _go2_zenoh_motion_base,
-    TrajectoryFollower.blueprint(track="blind"),
+    TrajectoryFollower.blueprint(track="blind", lidar_height=ROBOT_HEIGHT),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
 
 # go2-zenoh-motion-local: go2-zenoh-motion with the time-critical half lifted off

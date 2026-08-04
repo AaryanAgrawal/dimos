@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Where the floor is, so the planner's body band can sit on it.
+"""Where the floor is, so the body band can sit on it.
 
 `planners/target.py` slices the cloud at an ABSOLUTE z of 0.05..0.45 m,
 which is only the body's band if the map's z origin is the ground. On a LIO
@@ -26,7 +26,14 @@ So the floor is estimated per tick from the cloud under the robot, sanity
 bounded against what tf says the base height above ground is, and the slab
 itself is dropped before the band is taken.
 
-The rust twin is `adapter/rust/src/floor.rs`; this is the specification.
+BOTH SIDES OF THE STACK READ THE SAME SLICE. The planner plans on the anchored
+cloud and the follower measures its room hint off it, so `FloorAnchor` is the
+one place either of them anchors: a follower that measured the raw band would
+govern its speed by a different world than the one the plan was priced in.
+
+The rust twin is `adapter/rust/src/floor.rs`; this is the specification. There
+the per-module state below lives in the module struct and the knobs in its
+config, since that is how a rust module holds anything.
 """
 
 from __future__ import annotations
@@ -35,8 +42,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from dimos.navigation.tf_pose import base_height_above_ground
+from dimos.utils.logging_config import setup_logger
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+    from dimos.navigation.tf_pose import OdomBasePose
+
+logger = setup_logger()
 
 # Neighbourhood the floor is read from. Wide enough to hold ground in a
 # cluttered room, narrow enough that a ramp or a stair flight is still locally
@@ -83,3 +97,73 @@ def anchor_to_floor(
     if margin <= 0.0:
         return shifted
     return np.ascontiguousarray(shifted[shifted[:, 2] > np.float32(margin)])
+
+
+class FloorAnchor:
+    """A module's floor: the tf prior it is bounded by, and the anchoring itself."""
+
+    def __init__(
+        self,
+        doing: str,
+        enabled: bool,
+        lidar_height: float,
+        ground_margin: float,
+        base_frame: str,
+    ) -> None:
+        # what the module is doing on the cloud, for the one warning line
+        self.doing = doing
+        self.enabled = enabled
+        self.lidar_height = lidar_height
+        self.ground_margin = ground_margin
+        self.base_frame = base_frame
+        self.base_z: float | None = None
+        self.base_height: float | None = None
+        self._warned = False
+
+    def observe(self, resolver: OdomBasePose, sensor_frame: str, base_z: float) -> None:
+        """Take the base's z every tick, and its height above ground once off the leg."""
+        self.base_z = base_z
+        if self.base_height is not None or self.lidar_height <= 0.0:
+            return
+        # Base-stamped odometry has no mount leg to subtract, so it cannot say
+        # where the ground is; the cloud is then the only source.
+        if sensor_frame == self.base_frame:
+            return
+        leg = resolver.sensor_to_base(sensor_frame)
+        if leg is not None:
+            self.base_height = base_height_above_ground(self.lidar_height, -leg)
+
+    @property
+    def prior(self) -> float | None:
+        """Where tf puts the ground under the base, when it can say."""
+        if self.base_z is None or self.base_height is None:
+            return None
+        return self.base_z - self.base_height
+
+    def anchor(self, pts: NDArray[np.float32], xy: tuple[float, float]) -> NDArray[np.float32]:
+        """Cloud re-zeroed on the floor under the robot, ground slab dropped.
+
+        THE TF PRIOR IS REQUIRED, not optional. A low quantile of the cloud
+        alone is only the floor if the floor is in the cloud; hand it a wall and
+        it anchors to the wall's base and deletes the wall. Without the prior
+        the band stays exactly where it was.
+        """
+        prior = self.prior
+        if not self.enabled or prior is None:
+            self._warn()
+            return pts
+        floor = estimate_floor(pts, xy, prior=prior)
+        if floor is None:
+            return pts
+        return anchor_to_floor(pts, floor, self.ground_margin)
+
+    def _warn(self) -> None:
+        """Say once that the band is not on the floor — silence would hide it."""
+        if self._warned or not self.enabled:
+            return
+        self._warned = True
+        logger.warning(
+            f"{self.doing} on an unanchored cloud: the body z-band is wherever "
+            "the map's z origin puts it. Set lidar_height (and give tf the mount "
+            "leg) to anchor it to the floor."
+        )
