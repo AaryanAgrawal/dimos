@@ -37,10 +37,14 @@ path = "dimos_motion_adapter::planner::MotionPlanner"
 python = "dimos.navigation.motion.adapter.planner_native:MotionPlannerNative"
 threads = 2
 
+# tf rides in the inputs table because bake's graph has no io kind: the baked
+# host only ever consumes tf (GO2Zenoh publishes the mount), so consumer-only is
+# the honest shape. The rust side still claims it through `#[tf]`.
 [package.metadata.dimos.module.motion_planner.inputs]
 local_map = "sensor_msgs.PointCloud2"
 odometry = "nav_msgs.Odometry"
 planner_path = "nav_msgs.Path"
+tf = "tf2_msgs.TFMessage"
 
 [package.metadata.dimos.module.motion_planner.outputs]
 path = "nav_msgs.Path"
@@ -56,6 +60,7 @@ path = "nav_msgs.Path"
 odometry = "nav_msgs.Odometry"
 local_map = "sensor_msgs.PointCloud2"
 stop_movement = "std_msgs.Bool"
+tf = "tf2_msgs.TFMessage"
 
 [package.metadata.dimos.module.trajectory_follower.outputs]
 nav_cmd_vel = "geometry_msgs.Twist"

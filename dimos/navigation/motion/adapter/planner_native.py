@@ -29,10 +29,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from dimos.core.native_module import NativeModule, NativeModuleConfig
-from dimos.core.stream import In, Out
+from dimos.core.stream import IO, In, Out
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 
 
 class MotionPlannerNativeConfig(NativeModuleConfig):
@@ -51,6 +52,7 @@ class MotionPlannerNativeConfig(NativeModuleConfig):
     replan_hz: float = 5.0
     goal_lookahead_m: float = 5.0
     world_frame: str = "odom"
+    base_frame: str = "base_link"
     cloud_z_offset: float = 0.0
     max_map_age_s: float = 5.0
     viz_publish_hz: float = 2.0
@@ -64,6 +66,9 @@ class MotionPlannerNative(NativeModule):
     local_map: In[PointCloud2]
     odometry: In[Odometry]
     planner_path: In[Path]
+    # IO, not In: `#[tf]` both subscribes and publishes, and the rust side
+    # refuses to start unless the topic map matches the ports it claims.
+    tf: IO[TFMessage]
 
     path: Out[Path]
     plan_body: Out[Path]  # the same plan, for the viewer's body boxes

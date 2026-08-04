@@ -36,11 +36,12 @@ from dimos_lcm.std_msgs import Bool  # type: ignore[import-untyped]
 from pydantic import Field
 
 from dimos.core.native_module import NativeModule, NativeModuleConfig
-from dimos.core.stream import In, Out
+from dimos.core.stream import IO, In, Out
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.control.controller import ControllerConfig
 
 
@@ -64,6 +65,7 @@ class TrajectoryFollowerNativeConfig(NativeModuleConfig):
     # Names the body rather than a number, so the half-width the governor reads
     # is the one the planner priced the plan with.
     embodiment: str = "go2"
+    base_frame: str = "base_link"
     idle_speed: float = 0.02
     # Zero the twist once the held path is this old, measured from ARRIVAL. The
     # planner is co-located, so this guards planner death, not the link.
@@ -80,6 +82,9 @@ class TrajectoryFollowerNative(NativeModule):
     odometry: In[Odometry]
     local_map: In[PointCloud2]
     stop_movement: In[Bool]
+    # IO, not In: `#[tf]` both subscribes and publishes, and the rust side
+    # refuses to start unless the topic map matches the ports it claims.
+    tf: IO[TFMessage]
 
     nav_cmd_vel: Out[Twist]
     goal_reached: Out[Bool]

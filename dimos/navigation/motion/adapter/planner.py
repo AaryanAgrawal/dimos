@@ -42,6 +42,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.control import world as world_bridge
 from dimos.navigation.motion.control.profile import encode_precision
@@ -52,6 +53,7 @@ from dimos.navigation.motion.planner.autoresearch.types import (
     Path as RefereePath,
     PointCloud2 as RefereeCloud,
 )
+from dimos.navigation.tf_pose import OdomBasePose
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -101,6 +103,10 @@ def carrot_along(
 class MotionPlannerConfig(ModuleConfig):
     planner: str = "target"  # referee registry name or "module:factory"
     embodiment: str = "go2"
+    # Odometry is stamped at the SENSOR (mid360_link on the go2), so the pose it
+    # carries is the lidar's, not the robot's -- 0.30 m ahead and 0.16 m above on
+    # this rig. tf resolves it into the body; ticks are dropped until it can.
+    base_frame: str = "base_link"
     replan_hz: float = 5.0  # the control battery's reality default
     goal_lookahead_m: float = 5.0  # carrot arc along the global path
     world_frame: str = "odom"
@@ -128,6 +134,7 @@ class MotionPlanner(Module):
     local_map: In[PointCloud2]
     odometry: In[Odometry]
     planner_path: In[Path]
+    tf: In[TFMessage]
 
     path: Out[Path]
     plan_body: Out[Path]  # the same plan, subsampled, for the viewer's body boxes
@@ -139,6 +146,7 @@ class MotionPlanner(Module):
         self._cloud_at: float | None = None
         self._stale = False
         self._pose: tuple[float, float, float] | None = None
+        self._base_pose: OdomBasePose | None = None
         self._global_xy: np.ndarray | None = None
         self._episode: PlannerEpisode | None = None
         self._emb = EMBODIMENTS["go2"]
@@ -175,8 +183,13 @@ class MotionPlanner(Module):
             self._cloud_at = time.monotonic()
 
     def _on_odometry(self, msg: Odometry) -> None:
+        if self._base_pose is None:
+            self._base_pose = OdomBasePose(self.tfbuffer, self.config.base_frame)
+        pose = self._base_pose.resolve(msg)
+        if pose is None:
+            return
         with self._lock:
-            self._pose = (msg.position.x, msg.position.y, msg.orientation.euler[2])
+            self._pose = (pose.position.x, pose.position.y, pose.orientation.euler[2])
 
     def _on_planner_path(self, msg: Path) -> None:
         # MLS emits an empty path when it finds no route: no carrot, hold the

@@ -32,3 +32,4 @@ pub mod emb;
 pub mod follower;
 pub mod msg;
 pub mod planner;
+pub mod tf_pose;

@@ -6,6 +6,14 @@ Implementation spec for the rust native modules the deployment plan
 Part 1 is the procedure every module follows, written once so the four do not
 diverge. Part 2 is one self-contained brief per module.
 
+**Brief 4 is dead.** `odom_body_frame` shipped, then was deleted: the mount is
+a rotation AND a lever arm, and dimos grew real tf support (`navigation/
+tf_pose.py`, `dimos-module/src/tf.rs`) that composes both. The planner and the
+follower now resolve the base pose off tf themselves — see
+`adapter/rust/src/tf_pose.rs`. The brief stays below because Part 1's procedure
+was written against it and the second-module-id-in-one-crate argument is still
+the live guidance.
+
 Ground truth exemplars: `dimos/mapping/ray_tracing/rust/` (module id
 `ray_tracing`, the cleanest) and `dimos/navigation/nav_3d/mls_planner/rust/`
 (`mls_planner`). The machinery: `native/rust/dimos-module/`,
@@ -319,8 +327,8 @@ nobody else uses."*
 How a module agrees with a python producer:
 
 - **Same channel name.** Autoconnect wires ports by name; blueprints remap
-  (`.remappings([(MotionPlanner, "odometry", "body_odometry")])`), and the
-  bake equivalent is `--remap motion_planner.odometry=body_odometry`. The
+  (`.remappings([(MLSPlannerNative, "path", "planner_path")])`), and the
+  bake equivalent is `--remap mls_planner.path=planner_path`. The
   rust module never hardcodes topics: `Builder.topic_for` reads the stdin
   `topics` map (dimos-module/src/module.rs:296-301).
 - **Same `pkg.MsgType` string.** It is part of the key. The metadata table
@@ -430,9 +438,9 @@ encode+decode) and `clearance.rs` (`path_clearance`) already exist in
 `dimos-motion2-tc` and are the shared facilities both adapters call.
 
 The reference wiring these modules must slot into is `go2_zenoh_motion`
-(robot/unitree/go2/zenoh/blueprints.py:246-274): both planner and follower
-read `body_odometry` via remap; MLS's `path` is remapped to `planner_path`;
-the follower track is `hinted`.
+(robot/unitree/go2/zenoh/blueprints.py): both planner and follower read
+`odometry` straight and resolve it into `base_link` off tf; MLS's `path` is
+remapped to `planner_path`; the follower track is `hinted`.
 
 ## Brief 1 — `motion_planner`
 
@@ -447,8 +455,7 @@ the follower track is `hinted`.
   `MotionPlannerNative(NativeModule)` in
   `dimos/navigation/motion/adapter/planner_native.py`, metadata
   `python = "dimos.navigation.motion.adapter.planner_native:MotionPlannerNative"`.
-- **Ports** (field names are port names; the blueprint remap
-  `odometry -> body_odometry` stays a remap, not a rename):
+- **Ports** (field names are port names):
 
   | dir | port | type |
   |---|---|---|
@@ -652,7 +659,7 @@ the follower track is `hinted`.
   do not scale nav; do not "helpfully" forward teleop when nav is stale beyond
   what the cooldown logic already does.
 
-## Brief 4 — `odom_body_frame`
+## Brief 4 — `odom_body_frame` (SUPERSEDED, see the note at the top)
 
 - **Crate**: the existing `dimos/navigation/nav_3d/mls_planner/rust/` — a
   **second module id** in its Cargo.toml (the table is keyed by id; discovery

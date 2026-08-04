@@ -17,7 +17,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, Data, DeriveInput, Field, Fields, Ident, Path, Type};
 
-#[proc_macro_derive(Module, attributes(input, output, config, module))]
+#[proc_macro_derive(Module, attributes(input, output, io, config, tf, module))]
 pub fn derive_module(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(input) {
@@ -174,10 +174,27 @@ fn is_option(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Option"))
 }
 
+const ONE_ATTR_ONLY: &str = "field has multiple module attributes; only one of #[input], \
+                             #[output], #[io], #[config], #[tf] is allowed";
+
+/// What a `#[tf]` port carries, for the Cargo.toml registry cross-check.
+const TF_PAYLOAD_TYPE: &str = "TFMessage";
+
 enum FieldKind {
-    Input { decode: Path, handler: Ident },
-    Output { encode: Path },
+    Input {
+        decode: Path,
+        handler: Ident,
+    },
+    Output {
+        encode: Path,
+    },
+    Io {
+        decode: Path,
+        encode: Path,
+        handler: Ident,
+    },
     Config,
+    Tf,
     State,
 }
 
@@ -288,24 +305,30 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             FieldKind::Output { encode } => {
                 quote!(#name: builder.output(#name_str, #encode))
             }
+            FieldKind::Io { decode, encode, .. } => {
+                quote!(#name: builder.io(#name_str, #decode, #encode))
+            }
             FieldKind::Config => quote!(#name: config),
+            FieldKind::Tf => quote!(#name: builder.tf()),
             FieldKind::State => quote!(#name: ::core::default::Default::default()),
         }
     });
 
-    let input_fields: Vec<&ClassifiedField> = classified
+    // Every port that receives messages gets an arm in the select! loop.
+    let handled_fields: Vec<(&Ident, &Ident)> = classified
         .iter()
-        .filter(|f| matches!(f.kind, FieldKind::Input { .. }))
+        .filter_map(|f| match &f.kind {
+            FieldKind::Input { handler, .. } | FieldKind::Io { handler, .. } => {
+                Some((f.name, handler))
+            }
+            _ => None,
+        })
         .collect();
 
-    let handle_body = if input_fields.is_empty() {
+    let handle_body = if handled_fields.is_empty() {
         quote!(::std::future::pending::<()>().await)
     } else {
-        let handle_arms = input_fields.iter().map(|f| {
-            let FieldKind::Input { handler, .. } = &f.kind else {
-                unreachable!()
-            };
-            let name = f.name;
+        let handle_arms = handled_fields.iter().map(|(name, handler)| {
             quote!(
                 ::core::option::Option::Some(msg) = self.#name.recv() => {
                     self.#handler(msg).await
@@ -390,11 +413,21 @@ fn port_decls(classified: &[ClassifiedField], want_input: bool) -> Vec<PortDecl>
         .filter(|f| match f.kind {
             FieldKind::Input { .. } => want_input,
             FieldKind::Output { .. } => !want_input,
+            // A `#[tf]` field is a port like any other as far as the registry
+            // goes -- bake has to put the topic in the host's map or the module
+            // refuses to start. It lists under `inputs`: the graph has no io
+            // kind, and a host consumes tf far more often than it publishes it.
+            FieldKind::Tf => want_input,
             _ => false,
         })
         .map(|f| PortDecl {
             name: f.name.to_string(),
-            ty: port_payload_type(f.ty).unwrap_or_default(),
+            // `Tf` carries no generic payload; the port is TFMessage by
+            // construction.
+            ty: match f.kind {
+                FieldKind::Tf => TF_PAYLOAD_TYPE.to_string(),
+                _ => port_payload_type(f.ty).unwrap_or_default(),
+            },
         })
         .collect()
 }
@@ -481,10 +514,7 @@ fn classify_field(field: &Field, name: &Ident) -> syn::Result<FieldKind> {
         let path = attr.path();
         if path.is_ident("input") {
             if found.is_some() {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "field has multiple module attributes; only one of #[input], #[output], #[config] is allowed",
-                ));
+                return Err(syn::Error::new_spanned(attr, ONE_ATTR_ONLY));
             }
             let mut decode: Option<Path> = None;
             let mut handler: Option<Ident> = None;
@@ -506,10 +536,7 @@ fn classify_field(field: &Field, name: &Ident) -> syn::Result<FieldKind> {
             found = Some(FieldKind::Input { decode, handler });
         } else if path.is_ident("output") {
             if found.is_some() {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "field has multiple module attributes; only one of #[input], #[output], #[config] is allowed",
-                ));
+                return Err(syn::Error::new_spanned(attr, ONE_ATTR_ONLY));
             }
             let mut encode: Option<Path> = None;
             attr.parse_nested_meta(|meta| {
@@ -526,14 +553,47 @@ fn classify_field(field: &Field, name: &Ident) -> syn::Result<FieldKind> {
                 syn::Error::new_spanned(attr, "#[output] requires `encode = ...`")
             })?;
             found = Some(FieldKind::Output { encode });
+        } else if path.is_ident("io") {
+            if found.is_some() {
+                return Err(syn::Error::new_spanned(attr, ONE_ATTR_ONLY));
+            }
+            let mut decode: Option<Path> = None;
+            let mut encode: Option<Path> = None;
+            let mut handler: Option<Ident> = None;
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("decode") {
+                    decode = Some(meta.value()?.parse()?);
+                } else if meta.path.is_ident("encode") {
+                    encode = Some(meta.value()?.parse()?);
+                } else if meta.path.is_ident("handler") {
+                    handler = Some(meta.value()?.parse()?);
+                } else {
+                    return Err(meta.error(
+                        "unrecognized #[io] argument; expected `decode = ...`, `encode = ...` or `handler = ...`",
+                    ));
+                }
+                Ok(())
+            })?;
+            let decode = decode
+                .ok_or_else(|| syn::Error::new_spanned(attr, "#[io] requires `decode = ...`"))?;
+            let encode = encode
+                .ok_or_else(|| syn::Error::new_spanned(attr, "#[io] requires `encode = ...`"))?;
+            let handler = handler.unwrap_or_else(|| format_ident!("handle_{}", name));
+            found = Some(FieldKind::Io {
+                decode,
+                encode,
+                handler,
+            });
         } else if path.is_ident("config") {
             if found.is_some() {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "field has multiple module attributes; only one of #[input], #[output], #[config] is allowed",
-                ));
+                return Err(syn::Error::new_spanned(attr, ONE_ATTR_ONLY));
             }
             found = Some(FieldKind::Config);
+        } else if path.is_ident("tf") {
+            if found.is_some() {
+                return Err(syn::Error::new_spanned(attr, ONE_ATTR_ONLY));
+            }
+            found = Some(FieldKind::Tf);
         }
     }
 

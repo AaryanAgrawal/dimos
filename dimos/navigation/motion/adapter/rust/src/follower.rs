@@ -33,7 +33,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dimos_module::{native_config, warn_throttled, Input, Module, Output};
+use dimos_module::{native_config, warn_throttled, Input, Module, Output, Tf};
 use dimos_motion2_tc::geom::Params;
 use dimos_motion2_tc::laws::blind::{update as blind_update, BlindParams};
 use dimos_motion2_tc::laws::hinted::{HintedParams, Law as HintedLaw};
@@ -48,6 +48,7 @@ use validator::{Validate, ValidationError};
 
 use crate::emb;
 use crate::msg::{self, State};
+use crate::tf_pose::OdomBasePose;
 
 /// The input regime the follower runs under. `control/tracks.py` is the source
 /// of truth; this is that map, and the only place in this crate that knows
@@ -168,6 +169,10 @@ pub struct Config {
     /// Names the body rather than a number, so `emb.width / 2` is read the same
     /// way the planner read it when it priced the plan.
     pub embodiment: String,
+    /// Odometry is stamped at the SENSOR, so the pose it carries is the
+    /// lidar's, not the robot's. tf resolves it into the body; messages are
+    /// dropped until the mount leg arrives.
+    pub base_frame: String,
     /// A commanded speed at or under this is standing still, whatever the
     /// reason. Classification for the stall log only; it commands nothing.
     #[validate(range(min = 0.0))]
@@ -294,6 +299,12 @@ pub struct TrajectoryFollower {
     #[config]
     config: Config,
 
+    #[tf]
+    tf: Tf,
+
+    /// Built on the first odometry message: `Tf` is only handed over at build
+    /// time, and the base frame is config the constructor does not see.
+    base_pose: Option<OdomBasePose>,
     shared: Arc<Mutex<Shared>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -334,9 +345,13 @@ impl TrajectoryFollower {
     }
 
     async fn on_odometry(&mut self, msg: Odometry) {
-        let p = &msg.pose.pose;
-        self.shared.lock().expect("shared mutex").pose =
-            Some((p.position.x, p.position.y, msg::yaw_of(&p.orientation)));
+        let resolver = self
+            .base_pose
+            .get_or_insert_with(|| OdomBasePose::new(self.tf.clone(), &self.config.base_frame));
+        let Some(pose) = resolver.resolve(&msg) else {
+            return;
+        };
+        self.shared.lock().expect("shared mutex").pose = Some((pose[0], pose[1], pose[2]));
     }
 
     async fn on_local_map(&mut self, msg: PointCloud2) {

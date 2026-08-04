@@ -18,7 +18,6 @@ pub mod edges;
 pub mod mls_planner;
 pub mod module;
 mod nodes;
-pub mod odom_body_frame;
 mod planner;
 mod smoother;
 mod surfaces;

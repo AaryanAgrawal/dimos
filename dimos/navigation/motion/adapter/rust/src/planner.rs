@@ -30,7 +30,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dimos_module::{native_config, warn_throttled, Input, Module, Output};
+use dimos_module::{native_config, warn_throttled, Input, Module, Output, Tf};
 use dimos_motion2_target::planner::{plan, Emb};
 use dimos_motion2_tc::{clearance, stamps};
 use lcm_msgs::nav_msgs::{Odometry, Path};
@@ -40,6 +40,7 @@ use validator::ValidationError;
 
 use crate::emb;
 use crate::msg;
+use crate::tf_pose::OdomBasePose;
 
 /// Mirrors `MotionPlannerConfig` (adapter/planner.py). The python `planner`
 /// registry field deliberately does not cross: this module IS the rust target
@@ -61,6 +62,10 @@ pub struct Config {
     #[validate(range(exclusive_min = 0.0))]
     pub goal_lookahead_m: f64,
     pub world_frame: String,
+    /// Odometry is stamped at the SENSOR, so the pose it carries is the
+    /// lidar's, not the robot's. tf resolves it into the body; messages are
+    /// dropped until the mount leg arrives.
+    pub base_frame: String,
     /// Added to cloud z before planning, so the planner's body z-band lands
     /// where the floor actually is when the map's z origin is not ground level.
     pub cloud_z_offset: f64,
@@ -117,6 +122,12 @@ pub struct MotionPlanner {
     #[config]
     config: Config,
 
+    #[tf]
+    tf: Tf,
+
+    /// Built on the first odometry message: `Tf` is only handed over at build
+    /// time, and the base frame is config the constructor does not see.
+    base_pose: Option<OdomBasePose>,
     shared: Arc<Mutex<Shared>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -152,9 +163,13 @@ impl MotionPlanner {
     }
 
     async fn on_odometry(&mut self, msg: Odometry) {
-        let p = &msg.pose.pose;
-        self.shared.lock().expect("shared mutex").pose =
-            Some((p.position.x, p.position.y, msg::yaw_of(&p.orientation)));
+        let resolver = self
+            .base_pose
+            .get_or_insert_with(|| OdomBasePose::new(self.tf.clone(), &self.config.base_frame));
+        let Some(pose) = resolver.resolve(&msg) else {
+            return;
+        };
+        self.shared.lock().expect("shared mutex").pose = Some((pose[0], pose[1], pose[2]));
     }
 
     /// MLS emits an empty path when it finds no route: no carrot, so hold the
@@ -616,6 +631,7 @@ mod tests {
             replan_hz: 5.0,
             goal_lookahead_m: 5.0,
             world_frame: "odom".into(),
+            base_frame: "base_link".into(),
             cloud_z_offset: 0.0,
             max_map_age_s: 5.0,
             viz_publish_hz: 2.0,

@@ -43,6 +43,7 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.control.controller import (
     ControllerConfig,
@@ -52,6 +53,7 @@ from dimos.navigation.motion.control.controller import (
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.control.tracks import TRACKS
 from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS
+from dimos.navigation.tf_pose import OdomBasePose
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -126,6 +128,10 @@ class TrajectoryFollowerConfig(ModuleConfig):
     # (`to_config_dict` drops None and `#[native_config]` bans Option), and a
     # knob the deployed twin cannot carry is a knob that drifts.
     embodiment: str = "go2"
+    # Odometry is stamped at the SENSOR (mid360_link on the go2), so the pose it
+    # carries is the lidar's, not the robot's -- 0.30 m ahead and 0.16 m above on
+    # this rig. tf resolves it into the body; ticks are dropped until it can.
+    base_frame: str = "base_link"
     # Seconds between "still not moving, and here is why" lines.
     stall_report_s: float = 3.0
     # A commanded speed at or under this is standing still, whatever the reason.
@@ -141,6 +147,7 @@ class TrajectoryFollower(Module):
     odometry: In[Odometry]
     local_map: In[PointCloud2]
     stop_movement: In[Bool]
+    tf: In[TFMessage]
 
     nav_cmd_vel: Out[Twist]
     goal_reached: Out[Bool]
@@ -149,6 +156,7 @@ class TrajectoryFollower(Module):
         super().__init__(**kwargs)
         self._lock = RLock()
         self._pose: PoseStamped | None = None
+        self._base_pose: OdomBasePose | None = None
         self._path: Path | None = None
         self._cloud: PointCloud2 | None = None
         self._clearance: np.ndarray | None = None
@@ -193,8 +201,13 @@ class TrajectoryFollower(Module):
                 self._latch.set_goal((msg.poses[-1].position.x, msg.poses[-1].position.y))
 
     def _on_odometry(self, msg: Odometry) -> None:
+        if self._base_pose is None:
+            self._base_pose = OdomBasePose(self.tfbuffer, self.config.base_frame)
+        pose = self._base_pose.resolve(msg)
+        if pose is None:
+            return
         with self._lock:
-            self._pose = msg.to_pose_stamped()
+            self._pose = pose
 
     def _on_local_map(self, msg: PointCloud2) -> None:
         with self._lock:

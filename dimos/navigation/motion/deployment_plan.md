@@ -12,8 +12,8 @@ laptop                                   robot
 RayTracingVoxelMap  --- local_map ----->  MotionPlanner        (5 Hz)
 MLSPlannerNative    --- planner_path -->  TrajectoryFollower   (10 Hz)
 GoalRelay                                 CmdVelMux
-MovementManager (click half)              OdomBodyFrame
-vis_module                                go2web bridge
+MovementManager (click half)              go2web bridge
+vis_module
                     <-- lidar, odom ----
                     --- tele_cmd_vel -->
 ```
@@ -157,17 +157,26 @@ Both subscribe `tele_cmd_vel`. Teleop originates on the laptop, so the python
 half gets it for free, and `stop_movement` stays co-located with its only
 consumer. Do not route the cancel back from the rust half.
 
-### No tf on the robot
+### tf on the robot
 
-Nothing in the robot-side set needs tf. `OdomBodyFrame` takes a **config
-quaternion** (`mount_rotation`) and composes out the mount rotation — no
-lookup, no subscription. The follower gets its pose straight off the odometry
-message. Everything `GO2Zenoh` adds on top of the bridge — the
-`odom → mid360_link` edge, the static mount tree, camera intrinsics — exists to
-make rerun draw correctly, and stays on the laptop.
+The planner and the follower both need tf. LIO stamps its odometry at the
+SENSOR (`mid360_link`), so the pose it carries is the lidar's, not the robot's
+— 0.30 m ahead of the body and 0.16 m above it on this rig. Both modules
+resolve it through `tf_pose::OdomBasePose`, the twin of
+`dimos/navigation/tf_pose.py`: look the static `mid360_link → base_link` leg up
+once, cache it, compose it onto every message, and DROP messages until the leg
+arrives.
 
-So: **no on-robot equivalent of GO2Zenoh is needed.** The bridge already
-publishes `odometry`; the baked host subscribes it locally.
+The leg comes from `GO2Zenoh`, which stays on the laptop and publishes the
+static mount tree (plus the live `odom → mid360_link` edge) onto tf. So the
+baked host needs a `tf` topic in its map — `Builder::tf()` claims the port, and
+the module refuses to start without it — and a link back to the laptop. It
+still needs **no on-robot equivalent of GO2Zenoh**: the bridge publishes
+`odometry`, the laptop publishes `tf`, and the host subscribes both.
+
+The failure mode is quiet but not dangerous: a host that never sees tf holds
+its pose at `None` and plans nothing, rather than planning off-heading. One
+"dropping odometry" line per outage says so.
 
 (Cleanup while we are here: `ControllerConfig.frame_id` and the
 `TrajectoryController` docstring claim the controller does a live tf lookup of
@@ -209,9 +218,6 @@ through its python wrapper, bake only when you want one binary on the robot.
    even the wrapper classes are missing.
 3. **`movement_manager/rust/`** — the mux, plus splitting the click half off in
    python.
-4. **`odom_body_frame`** — a second module id in the existing mls_planner
-   crate. Cheapest item on the list; the metadata table is keyed by id, so it
-   needs no new crate.
 
 The two existing law crates (`dimos-motion2-target`, `dimos-motion2-tc`) stay
 **pure algorithm**. They are deliberately dependency-light and parity-locked to
@@ -239,14 +245,16 @@ Cross-compilation is already supported: `--builder cross|zigbuild --target
 `--emit-config` builds the standalone stdin blob from **python class
 defaults**, not from blueprint values. For this stack that is not cosmetic:
 
-> `OdomBodyFrameConfig.mount_rotation` defaults to identity. The real value is
-> computed in the blueprint by `_mount_rotation()`. A host baked today runs
-> with **no odometry leveling** — precisely the failure blueprints.py warns
-> about: *"they must agree or nav steers off-heading."*
+> The follower's eleven tuned `controller_config` numbers and the planner's
+> `replan_hz` / `goal_lookahead_m` all come from the blueprint, not from the
+> class. A host baked today runs the class defaults. Silent, and it presents as
+> a controller bug.
 
-Same shape for the follower's eleven tuned `controller_config` numbers and the
-planner's `replan_hz` / `goal_lookahead_m`. Silent, and it presents as a
-controller bug.
+The mount used to be the worst case here — a config quaternion that defaulted
+to identity, i.e. "the sensor is already level", true of no robot that tilts
+its lidar. It is now read off tf instead, so it cannot be defaulted wrong: the
+modules either have the leg or they hold. That removes the sharpest edge but
+not the class of problem.
 
 Either teach bake to read a blueprint, or hand-write the stdin JSON and treat
 it as the deployment artifact — but decide deliberately. `mount_rotation` is
@@ -255,10 +263,10 @@ the test case.
 ### Blueprint-as-arg
 
 The eventual fix, and the reason it is worth doing: the blueprint is the only
-place the tuned wiring and config actually live. The three remappings
-(`MLS.path→planner_path`, `MotionPlanner.odometry→body_odometry`,
-`global_map→global_map_unused`) are exactly the `--remap` flags one would
-otherwise retype, where drift is a silent misconnect.
+place the tuned wiring and config actually live. The remappings
+(`MLS.path→planner_path`, `global_map→global_map_unused`) are exactly the
+`--remap` flags one would otherwise retype, where drift is a silent
+misconnect.
 
 Two design points:
 

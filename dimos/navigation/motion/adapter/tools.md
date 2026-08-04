@@ -29,7 +29,9 @@ planner replans to the carrot at `replan_hz` over the raycaster's `local_map`;
 a refusal is a single-pose stub the follower holds on while MLS reroutes. The
 follower annotates the path with clearance from the local map (the sim judge's
 room hint, computed on-robot) and stops through a goal latch that ignores
-sub-tolerance carrot jitter. Both modules read the leveled `body_odometry`.
+sub-tolerance carrot jitter. Both modules take odometry as LIO stamps it — at
+the sensor — and resolve it into `base_link` off tf (`navigation/tf_pose.py`),
+dropping messages until the mount leg arrives.
 
 The controller stays a pure pose+path -> twist law behind the
 `TrajectoryController` protocol (`control/controller.py`) — that object, not the
