@@ -21,6 +21,7 @@ use ::zenoh::qos::{CongestionControl, Reliability};
 use ::zenoh::sample::Locality;
 use ::zenoh::Session;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 use crate::transport::{Dispatch, Transport};
 
@@ -103,6 +104,17 @@ fn resolve_scouting_interface(iface: Option<&str>, scouting: Option<&str>) -> St
     }
 }
 
+/// Session modes zenoh accepts; anything else is a typo in the environment.
+const ZENOH_MODES: [&str; 3] = ["peer", "client", "router"];
+
+/// Validated session mode, or `None` to leave zenoh's default alone. Unset,
+/// blank and unrecognised all mean "don't touch it" -- python constrains the
+/// knob to a Literal, so a bad value only arrives from a hand-set env var.
+fn resolve_mode(mode: Option<&str>) -> Option<&'static str> {
+    let mode = mode.map(str::trim).filter(|m| !m.is_empty())?;
+    ZENOH_MODES.into_iter().find(|known| *known == mode)
+}
+
 /// Comma-separated locator list (`DIMOS_ZENOH_CONNECT`) as a JSON5 array for
 /// `connect/endpoints`. `None` when no non-empty locator remains.
 fn connect_endpoints_json5(endpoints: &str) -> Option<String> {
@@ -158,6 +170,20 @@ impl ZenohTransport {
                 &format!("\"{}\"", scouting_interface()),
             )
             .map_err(|e| io::Error::other(e.to_string()))?;
+        // Session mode, mirroring the python session: `client` hands routing to
+        // a zenohd instead of meshing peer to peer, so one copy of a heavy
+        // stream crosses the wifi link however many local processes subscribe.
+        // A native module that stayed a peer would mesh around that router.
+        let raw_mode = std::env::var("DIMOS_ZENOH_MODE").unwrap_or_default();
+        match resolve_mode(Some(&raw_mode)) {
+            Some(mode) => config
+                .insert_json5("mode", &format!("\"{mode}\""))
+                .map_err(|e| io::Error::other(e.to_string()))?,
+            None if !raw_mode.trim().is_empty() => {
+                warn!(mode = raw_mode, "ignoring unknown DIMOS_ZENOH_MODE")
+            }
+            None => {}
+        }
         let session = ::zenoh::open(config).await.map_err(to_io)?;
         Ok(Self {
             session,
@@ -257,6 +283,26 @@ mod tests {
             "wlan0"
         );
         assert_eq!(resolve_scouting_interface(Some(" wlan0 "), None), "wlan0");
+    }
+
+    #[test]
+    fn unset_mode_keeps_zenohs_default() {
+        assert_eq!(resolve_mode(None), None);
+        assert_eq!(resolve_mode(Some("  ")), None);
+    }
+
+    #[test]
+    fn known_modes_pass_through_trimmed() {
+        assert_eq!(resolve_mode(Some("client")), Some("client"));
+        assert_eq!(resolve_mode(Some(" peer ")), Some("peer"));
+        assert_eq!(resolve_mode(Some("router")), Some("router"));
+    }
+
+    #[test]
+    fn unknown_mode_is_ignored_rather_than_fatal() {
+        // A typo must not take the module down mid-deployment.
+        assert_eq!(resolve_mode(Some("clientt")), None);
+        assert_eq!(resolve_mode(Some("Client")), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

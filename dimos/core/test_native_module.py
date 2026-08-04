@@ -436,3 +436,19 @@ def test_spawn_env_without_robot_ip_leaves_var_unset(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("DIMOS_ZENOH_CONNECT", raising=False)
     env = native_module_mod._spawn_env({})
     assert "DIMOS_ZENOH_CONNECT" not in env
+
+
+def test_spawn_env_carries_zenoh_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The native child joins in the same session mode as its parent."""
+    monkeypatch.setattr(global_config, "transport", "zenoh")
+    monkeypatch.setattr(global_config, "zenoh_mode", "client")
+    env = native_module_mod._spawn_env({})
+    assert env["DIMOS_ZENOH_MODE"] == "client"
+
+
+def test_spawn_env_omits_zenoh_mode_off_zenoh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(global_config, "transport", "lcm")
+    monkeypatch.setattr(global_config, "zenoh_mode", "client")
+    monkeypatch.delenv("DIMOS_ZENOH_MODE", raising=False)
+    env = native_module_mod._spawn_env({})
+    assert "DIMOS_ZENOH_MODE" not in env

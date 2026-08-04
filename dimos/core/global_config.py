@@ -30,6 +30,7 @@ from dimos.visualization.rerun.constants import (
 )
 
 TransportBackend: TypeAlias = Literal["lcm", "zenoh"]
+ZenohMode: TypeAlias = Literal["peer", "client", "router"]
 
 
 def _get_all_numbers(s: str) -> list[float]:
@@ -68,6 +69,10 @@ class GlobalConfig(BaseSettings):
     # Seconds ZenohService.start() blocks for the configured connect endpoints to
     # link before giving up and continuing. 0 disables the wait.
     zenoh_connect_timeout: float = 1.0
+    # Session mode every zenoh session opens in. `client` routes everything
+    # through a single router instead of gossip-meshing peer to peer -- one copy
+    # of a heavy stream over the wifi link no matter how many local subscribers.
+    zenoh_mode: ZenohMode = "peer"
     viewer: ViewerBackend = "rerun"
     rerun_open: RerunOpenOption = RERUN_OPEN_DEFAULT
     rerun_web: bool = RERUN_ENABLE_WEB

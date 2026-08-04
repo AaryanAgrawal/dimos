@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import Field
 import zenoh
 
+from dimos.core.global_config import ZenohMode
 from dimos.protocol.service.spec import BaseConfig, Service
 from dimos.utils.logging_config import setup_logger
 
@@ -88,6 +89,12 @@ def _default_connect_timeout() -> float:
     return global_config.zenoh_connect_timeout
 
 
+def _default_mode() -> ZenohMode:
+    from dimos.core.global_config import global_config
+
+    return global_config.zenoh_mode
+
+
 def endpoint_addresses(endpoint: str) -> set[str]:
     """Resolve a locator to the ``host:port`` forms a live link may report.
 
@@ -108,7 +115,8 @@ def endpoint_addresses(endpoint: str) -> set[str]:
 
 
 class ZenohConfig(BaseConfig):
-    mode: str = "peer"
+    # `client` hands all routing to a zenohd router; `peer` meshes directly.
+    mode: ZenohMode = Field(default_factory=_default_mode)
     connect: list[str] = Field(default_factory=_default_connect_endpoints)
     listen: list[str] = []
     # Discover peers across the network. Off keeps discovery on loopback.

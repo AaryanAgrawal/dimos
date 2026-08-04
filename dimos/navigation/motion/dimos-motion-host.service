@@ -22,6 +22,12 @@ Environment=DIMOS_ZENOH_LISTEN=tcp/0.0.0.0:7448
 # This LAN filters multicast, so scouting off-box finds nothing and only wastes
 # time. Unset would already keep it on loopback; this is here to say so.
 Environment=DIMOS_ZENOH_INTERFACE=lo
+# Session mode. `client` is the endgame -- a zenohd on the robot every local
+# session dials, so the wifi link carries one copy of a stream however many
+# processes want it -- but it needs that router running first, so this stays
+# peer until it is. Spelled out because the baked host never sees the python
+# knob: systemd is the only thing that sets its environment.
+Environment=DIMOS_ZENOH_MODE=peer
 Environment=RUST_LOG=info
 # The host reads its whole config from one line on stdin and exits if it is
 # missing a key, so the file is the unit is the wiring.

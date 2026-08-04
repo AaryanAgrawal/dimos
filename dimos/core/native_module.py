@@ -193,7 +193,13 @@ def _spawn_env(extra_env: dict[str, str]) -> dict[str, str]:
     # Scouting only pairs two sessions when both bind the same interface, so the
     # child inherits the resolved one rather than picking its own default.
     if global_config.transport == "zenoh":
-        env["DIMOS_ZENOH_INTERFACE"] = ZenohConfig().multicast_interface
+        zenoh_config = ZenohConfig()
+        env["DIMOS_ZENOH_INTERFACE"] = zenoh_config.multicast_interface
+        # A `client` deployment only pays off if the whole process tree joins as
+        # one: a single peer left behind gossip-meshes straight past the router
+        # it was meant to funnel through, and the wifi link carries the stream
+        # twice again.
+        env["DIMOS_ZENOH_MODE"] = zenoh_config.mode
 
     # set Rust logging to match Python level
     env["RUST_LOG"] = _PYTHON_TO_RUST_LEVELS.get(
