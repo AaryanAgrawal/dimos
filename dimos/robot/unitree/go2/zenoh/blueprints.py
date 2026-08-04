@@ -190,6 +190,24 @@ go2_zenoh_nav = autoconnect(
     CmdVelMux.blueprint(),
 ).global_config(transport="zenoh", n_workers=8, robot_model="unitree_go2")
 
+# The motion stack's own raycaster tuning. The percentile-sized emit window BREATHES:
+# it follows what the last ten sweeps happened to see, so on 20260805-033007 its radius
+# swung 2.53 -> 5.88 m, up to 2.36 m in a single frame, and 68 % of all voxel churn the
+# local planner saw was that window moving rather than the world changing. Every
+# collapse deletes thousands of voxels the planner was routing around; every expansion
+# invents them back, and the plan flips. A fixed radius makes the emitted set stable
+# whenever the scene is. 5 m covers the 5 m carrot with room for the search's padding,
+# and is inside the map the sweeps actually fill.
+_motion_raycaster = dict(
+    voxel_size=voxel_size,
+    emit_every=10,
+    global_emit_every=100,
+    min_health=-1,
+    max_health=5,
+    support_min=4,
+    region_radius_m=5.0,
+)
+
 # The motion stack's own MLS tuning: the local planner + follower are the precision
 # layer (embodiment 0.05 floor, clearance-governed speed), so the global graph can be
 # permissive where _mls_planner has to be the safety margin for BasicPathFollower.
@@ -234,6 +252,9 @@ _mls_planner_motion = MLSPlannerNative.blueprint(
 # runnable blueprint -- it has no follower and would plan without ever moving.
 _go2_zenoh_motion_base = autoconnect(
     go2_zenoh_raycaster,
+    # Re-declared with the emitted window PINNED, and autoconnect keeps the
+    # newest duplicate, so this raycaster wins over go2_zenoh_raycaster's.
+    RayTracingVoxelMap.blueprint(**_motion_raycaster),
     GoalRelay.blueprint(lidar_height=ROBOT_HEIGHT),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
     # lidar_height is what lets tf say how far the base sits above the ground,
@@ -312,14 +333,7 @@ go2_zenoh_motion_local = autoconnect(
         rerun_config=_rerun_config({"world/pointlio_map": None, "world/lidar": None}),
     ),
     GO2Zenoh.blueprint(mid360_mount_rpy_deg=MID360_MOUNT_RPY_DEG),
-    RayTracingVoxelMap.blueprint(
-        voxel_size=voxel_size,
-        emit_every=10,
-        global_emit_every=100,
-        min_health=-1,
-        max_health=5,
-        support_min=4,
-    ),
+    RayTracingVoxelMap.blueprint(**_motion_raycaster),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
     GoalRelay.blueprint(lidar_height=ROBOT_HEIGHT),
     MovementManager.blueprint(),

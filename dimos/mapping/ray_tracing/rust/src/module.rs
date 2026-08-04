@@ -131,6 +131,7 @@ impl RayTracingVoxelMap {
                 &self.batch_origins,
                 self.config.region_percentile,
                 margin,
+                self.config.region_radius_m,
             );
             self.batch_points.clear();
             self.batch_origins.clear();
