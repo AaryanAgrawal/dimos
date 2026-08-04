@@ -11,8 +11,8 @@ cannot be reconstructed. That set holds 39 of the 57 holds.
 Reproduce everything below with
 
 ```bash
-python -m dimos.navigation.motion.adapter.diagnose data/20260805-033007.zenoh.mcap
-python -m dimos.navigation.motion.adapter.diagnose data/20260805-033007.zenoh.mcap \
+python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
+python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap \
     --only replay --z-offset 0.29        # the counterfactual in §4
 ```
 

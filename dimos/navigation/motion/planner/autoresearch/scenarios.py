@@ -287,6 +287,31 @@ SCENARIOS = [
 ]
 
 
+def recorded(path: str | FilePath, name: str | None = None, emb: Embodiment = GO2) -> Scenario:
+    """A world recorded on the robot, from a ``recorded_world`` npz.
+
+    The npz already carries the stability-filtered map's body-band footprint as
+    merged rectangles, so this is the same oriented-box truth every other world
+    speaks — only the expectation is withheld: reality is labeled "safe",
+    never "clear" (see simulation/recorded_world.py for the extraction).
+    """
+    d = np.load(FilePath(path))
+    h = float(d["band_height"])
+    boxes = [
+        Box(float(cx), float(cy), float(sx), float(sy), 0.0, h) for cx, cy, sx, sy in d["rects"]
+    ]
+    start = (float(d["start"][0]), float(d["start"][1]), float(d["start"][2]))
+    return Scenario(
+        name=name or str(d["name"]),
+        boxes=boxes,
+        goal=(float(d["goal"][0]), float(d["goal"][1])),
+        start=start,
+        expect="safe",
+        emb=emb,
+        note=f"recorded world, {len(boxes)} band rects",
+    )
+
+
 def straight_plan(start: tuple[float, float, float], goal: tuple[float, float]) -> Path:
     n = max(2, int(math.hypot(goal[0] - start[0], goal[1] - start[1]) / 0.1) + 1)
     xs = np.linspace(start[0], goal[0], n)

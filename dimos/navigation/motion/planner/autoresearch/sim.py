@@ -57,6 +57,7 @@ from .scenarios import (
     Box,
     Scenario,
     generated,
+    recorded,
     se2_path,
     straight_plan,
 )
@@ -651,6 +652,13 @@ def main() -> None:
     )
     ap.add_argument("--seed", default=GEN_SEED, type=int, help="base seed for --gen")
     ap.add_argument(
+        "--recorded",
+        action="append",
+        default=[],
+        metavar="NPZ",
+        help="append a world recorded on the robot (simulation.recorded_world npz)",
+    )
+    ap.add_argument(
         "--planner",
         default="target",
         help='candidate: registry name (target, target-py, gold) or "module:factory"',
@@ -721,8 +729,10 @@ def main() -> None:
             pass  # non-Linux: unpinned, timings advisory
 
     cfg = AvoidanceConfig()
-    pool = SCENARIOS + (
-        generated(args.gen, args.seed, emb=EMBODIMENTS.get(args.emb)) if args.gen else []
+    pool = (
+        SCENARIOS
+        + (generated(args.gen, args.seed, emb=EMBODIMENTS.get(args.emb)) if args.gen else [])
+        + [recorded(p) for p in args.recorded]
     )
     todo = [s for s in pool if args.scenario is None or s.name == args.scenario]
     if not todo:

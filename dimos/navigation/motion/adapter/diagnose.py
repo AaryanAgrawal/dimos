@@ -27,7 +27,7 @@ planner_path, path) and runs four passes:
            attributes each flip to the cloud, the pose, or the carrot
   latency  how old the inputs each tick planned on actually were
 
-    python -m dimos.navigation.motion.adapter.diagnose data/20260805-033007.zenoh.mcap
+    python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-offset 0.29
 """
@@ -144,8 +144,9 @@ def _before(ts: float, stamps: np.ndarray) -> int:
 def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
     """Decode the streams and rebuild each tick's inputs (tf-resolved pose, carrot)."""
     from dimos.memory2.tf import StreamTF
+    from dimos.utils.data import get_data
 
-    store = open_lcm_mcap(path)
+    store = open_lcm_mcap(str(get_data(path)))
     tf = StreamTF.from_store(store, TF)
     if tf is None:
         raise SystemExit(f"{path}: no {TF} stream — cannot resolve the base pose")

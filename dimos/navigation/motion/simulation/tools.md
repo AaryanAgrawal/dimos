@@ -72,6 +72,40 @@ policy = FreePolicy.load("data/ml-trajectory-research/freewalk_mcf.bin")
 walk(policy, command=np.array([0.5, 0.0, 0.0]), seconds=4, view=True)
 ```
 
+**Freeze a real run into a static world** — stability-filtered voxel union of
+the raycaster's `local_map`, plus the floor, the recorded start pose, and the
+recorded global path/goal. Small npz, no recording needed afterwards:
+
+```bash
+python -m dimos.navigation.motion.simulation.recorded_world ml-trajectory-research/20260805-033007.zenoh.mcap --out athens.npz
+```
+
+`--stability 0.5` is the filter: a voxel survives only if it was seen in that
+fraction of the frames spanning its own first-to-last sighting (the recorded
+map flickers ~10% frame to frame). `--voxel 0.08` grid, `--carve 0.10` the
+clearance granted to whatever the robot's body swept — it maps its own legs,
+so without a carve the spawn pose starts inside a wall.
+
+**Eyeball it** — the fitted Go2 standing at the recorded start pose inside the
+recorded room, walls as greedy-merged static boxes, floor plane at the
+estimated floor:
+
+```bash
+python -m dimos.navigation.motion.simulation.recorded_world athens.npz --view
+```
+
+`--max-z 1.5` is how much of the room becomes collision geometry (the ceiling
+is not a wall); `--radius 3` crops to a corridor around the recorded track
+when the geom count gets silly.
+
+**Run it as a world** — the same npz is a referee scenario and a closed-loop
+episode, alongside the curated and generated batteries:
+
+```bash
+python -m dimos.navigation.motion.planner.autoresearch --recorded athens.npz -s athens
+python -m dimos.navigation.motion.control --recorded athens.npz -s athens --view
+```
+
 **Tests and types**:
 
 ```bash

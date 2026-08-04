@@ -35,7 +35,11 @@ from dimos.navigation.motion.control.episode import (
 )
 from dimos.navigation.motion.control.judge import print_row, score_episode, summarize
 from dimos.navigation.motion.control.tracks import TRACKS
-from dimos.navigation.motion.planner.autoresearch.scenarios import SCENARIOS, generated
+from dimos.navigation.motion.planner.autoresearch.scenarios import (
+    SCENARIOS,
+    generated,
+    recorded,
+)
 from dimos.navigation.motion.simulation.policy import FreePolicy
 from dimos.utils.data import get_data
 
@@ -47,6 +51,13 @@ def main() -> None:
     ap.add_argument("-s", "--scenario", help="run a single scenario by name")
     ap.add_argument("--ls", action="store_true", help="list scenario names and exit")
     ap.add_argument("--gen", type=int, default=0, help="add N generated worlds")
+    ap.add_argument(
+        "--recorded",
+        action="append",
+        default=[],
+        metavar="NPZ",
+        help="add a world recorded on the robot (simulation.recorded_world npz)",
+    )
     ap.add_argument("--view", action="store_true", help="live MuJoCo viewer")
     ap.add_argument("--speed", type=float, default=1.0, help="viewer speed factor")
     ap.add_argument("--score", action="store_true", help="judge each episode + summary")
@@ -72,6 +83,7 @@ def main() -> None:
         tagged += [(sc, "gen") for sc in generated(args.gen)]
     if args.ood:
         tagged += [(sc, "ood") for sc in ood_worlds(args.ood)]
+    tagged += [(recorded(p), "recorded") for p in args.recorded]
     if args.ls:
         for sc, group in tagged:
             emb = f" [{sc.emb.tag}]" if sc.emb.tag != "go2" else ""

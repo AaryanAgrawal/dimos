@@ -20,7 +20,7 @@ python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save 
 
 # post-mortem a recording of the live stack: map churn, plan flips, planner
 # replay + input ablation, input ages. Writes an rrd + svgs under recordings/.
-python -m dimos.navigation.motion.adapter.diagnose data/20260805-033007.zenoh.mcap
+python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-offset 0.25
 
