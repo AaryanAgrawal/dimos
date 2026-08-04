@@ -4,6 +4,10 @@
 plans (57 of them single-pose holds), 77 global paths, 3 goals reached. Symptom:
 the robot weaves and stalls in front of an obstacle instead of committing.
 
+Every number below is over the **410 ticks whose inputs are all in the file** —
+the first 18 plans predate the recording's first `planner_path`, so their carrot
+cannot be reconstructed. That set holds 39 of the 57 holds.
+
 Reproduce everything below with
 
 ```bash
