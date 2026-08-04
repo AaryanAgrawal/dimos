@@ -212,6 +212,7 @@ all_modules = {
     "go2-mid360-recorder": "dimos.robot.unitree.go2.go2_mid360_recorder.Go2Mid360Recorder",
     "go2-mid360-static-tf": "dimos.robot.unitree.go2.go2_mid360_static_transforms.Go2Mid360StaticTf",
     "go2-teleop-module": "dimos.teleop.quest.quest_extensions.Go2TeleopModule",
+    "go2-tf": "dimos.robot.unitree.go2.tf.go2_tf.Go2Tf",
     "go2-zenoh": "dimos.robot.unitree.go2.zenoh.zenohconnection.GO2Zenoh",
     "goal-relay": "dimos.navigation.nav_3d.mls_planner.goal_relay.GoalRelay",
     "google-maps-skill-container": "dimos.agents.skills.google_maps_skill_container.GoogleMapsSkillContainer",
