@@ -54,6 +54,13 @@ class Embodiment:
     strafe: float = 1.8
     reverse: float = 1.5
     yaw_w: float = 0.25
+    # Vertical geometry, all measured from the surface the feet stand on. This
+    # is what makes an obstacle model a property of the BODY rather than of the
+    # scene: no floor estimation, the base rides a known height above the
+    # ground (motion/obstacles.py).
+    steppable: float = 0.20  # legs negotiate obstacles below this -- at a cost (later)
+    height: float = 0.45  # above this the body passes underneath; not an obstacle
+    base_height: float = 0.29  # base origin above support; frame plumbing, not semantics
 
     @property
     def half_diag(self) -> float:
@@ -77,5 +84,6 @@ EMBODIMENTS = {
     # payload adds 8 cm in front: longer body, centre 4 cm further forward
     "go2-payload": Embodiment(tag="go2-payload", length=0.93, center_off=0.03, comfort=0.5),
     "slim": Embodiment(tag="slim", length=2.0, width=0.24, comfort=0.3),
-    "diffdrive": Embodiment(tag="diffdrive", strafe=50.0, reverse=3.0),  # cannot crab
+    # cannot crab, and has no legs to step over anything with
+    "diffdrive": Embodiment(tag="diffdrive", strafe=50.0, reverse=3.0, steppable=0.0),
 }
