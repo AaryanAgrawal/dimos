@@ -39,8 +39,8 @@ use tracing::{debug, info, warn};
 use validator::ValidationError;
 
 use crate::emb;
-use crate::floor;
 use crate::msg;
+use crate::obstacles::{self, ObstacleModel};
 use crate::tf_pose::OdomBasePose;
 
 /// Mirrors `MotionPlannerConfig` (adapter/planner.py). The python `planner`
@@ -73,26 +73,11 @@ pub struct Config {
     /// four ticks in five re-solve an unchanged world; the follower tracks the
     /// published path as the robot moves and needs no republish to do it.
     pub replan_on_change: bool,
-    /// Anchor the cloud to the floor under the robot before planning, so the
-    /// planner's body z-band (0.05..0.45 ABOVE THE GROUND) lands where the
-    /// ground actually is. Off leaves the band where the map's z origin puts
-    /// it, which on a LIO stack is base height -- see `floor.rs`.
-    pub floor_anchor: bool,
-    /// Lidar height above the ground while standing. With it, tf gives the base
-    /// height above ground and hence a prior the floor estimate is bounded
-    /// against; 0 estimates off the cloud alone.
-    #[validate(range(min = 0.0))]
-    pub lidar_height: f64,
-    /// Drop returns within this of the estimated floor before the band is
-    /// taken. TWO voxel layers, not one: a floor whose true height sits near a
-    /// voxel boundary quantises into both layers either side of it, and a
-    /// one-voxel margin leaves the upper one standing as a carpet.
-    #[validate(range(min = 0.0))]
-    pub ground_margin_m: f64,
-    /// Manual trim on the map's z ORIGIN, applied at extraction and therefore
-    /// before the floor is measured off it. With `floor_anchor` on it is very
-    /// nearly inert; the anchoring is what makes the band right.
-    pub cloud_z_offset: f64,
+    /// What counts as an obstacle (`obstacles.rs`). "body_band" reads the cloud
+    /// against the surface the feet stand on, which the embodiment knows the
+    /// base's height above; "raw_band" is the absolute 0.05..0.45 slice the
+    /// stack ran before that, kept for replaying recordings made under it.
+    pub obstacle_model: String,
     /// Hold once the local map is this old, measured from ARRIVAL.
     #[validate(range(exclusive_min = 0.0))]
     pub max_map_age_s: f64,
@@ -102,9 +87,14 @@ pub struct Config {
 }
 
 fn validate_embodiment(config: &Config) -> Result<(), ValidationError> {
-    if emb::by_tag(&config.embodiment).is_none() {
+    if emb::by_tag(&config.embodiment).is_none() || emb::vert_by_tag(&config.embodiment).is_none() {
         return Err(ValidationError::new(
             "embodiment must be one of: go2, go2-payload, slim, diffdrive",
+        ));
+    }
+    if !obstacles::MODELS.contains(&config.obstacle_model.as_str()) {
+        return Err(ValidationError::new(
+            "obstacle_model must be one of: raw_band, body_band",
         ));
     }
     Ok(())
@@ -121,8 +111,9 @@ struct Shared {
     /// this guards is how long since the mapper was last heard from.
     cloud_at: Option<Instant>,
     pose: Option<(f64, f64, f64)>,
-    /// Where tf puts the ground under the base: the floor estimate's bound.
-    floor_prior: Option<f64>,
+    /// Where the surface under the robot is, off the BODY rather than off the
+    /// scene: the base rides `Vert::base_height` above it.
+    ground_z: Option<f64>,
     global_xy: Option<Vec<[f64; 2]>>,
     /// Bumped only when the route actually MOVED, not per arrival: MLS
     /// republishes at ~1 Hz and holds still for seconds at a time.
@@ -157,8 +148,6 @@ pub struct MotionPlanner {
     /// Built on the first odometry message: `Tf` is only handed over at build
     /// time, and the base frame is config the constructor does not see.
     base_pose: Option<OdomBasePose>,
-    /// How far the base sits above the ground, looked up once off the mount leg.
-    base_height: Option<f64>,
     shared: Arc<Mutex<Shared>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -167,10 +156,14 @@ impl MotionPlanner {
     async fn spawn_worker(&mut self) {
         // validated before the module was built, so the tag is known
         let emb = emb::by_tag(&self.config.embodiment).expect("validated embodiment tag");
+        let vert = emb::vert_by_tag(&self.config.embodiment).expect("validated embodiment tag");
+        let model = obstacles::load(&self.config.obstacle_model, &vert)
+            .expect("validated obstacle model name");
         let worker = Worker {
             shared: Arc::clone(&self.shared),
             config: self.config.clone(),
             emb,
+            model,
             path: self.path.clone(),
             plan_body: self.plan_body.clone(),
         };
@@ -200,14 +193,13 @@ impl MotionPlanner {
         let Some(iso) = resolver.resolve_iso(&msg) else {
             return;
         };
-        if self.base_height.is_none() && self.config.lidar_height > 0.0 {
-            self.base_height =
-                resolver.base_height_above_ground(&msg.child_frame_id, self.config.lidar_height);
-        }
         let pose = crate::tf_pose::state_of(&iso);
+        let base_height = emb::vert_by_tag(&self.config.embodiment)
+            .expect("validated embodiment tag")
+            .base_height;
         let mut s = self.shared.lock().expect("shared mutex");
         s.pose = Some((pose[0], pose[1], pose[2]));
-        s.floor_prior = self.base_height.map(|h| iso.translation.z - h);
+        s.ground_z = Some(iso.translation.z - base_height);
     }
 
     /// MLS emits an empty path when it finds no route: no carrot, so hold the
@@ -358,21 +350,19 @@ impl RateCap {
 pub fn plan_once(
     config: &Config,
     emb: &Emb,
+    model: &dyn ObstacleModel,
     points: &[[f32; 3]],
     pose: (f64, f64, f64),
     goal: (f64, f64),
-    floor_prior: Option<f64>,
+    ground_z: f64,
 ) -> Path {
     let started = Instant::now();
     let t0 = msg::now_secs();
-    let anchored = floor::anchored_cloud(
-        points,
-        (pose.0, pose.1),
-        floor_prior,
-        config.floor_anchor,
-        config.ground_margin_m,
-    );
-    let points: &[[f32; 3]] = &anchored;
+    // The search gets the obstacles, in the frame the model read them: the
+    // follower's room hint is measured off the very same points, so the
+    // governor and the stamped profile cannot be pricing different worlds.
+    let hard = obstacles::hard_points(model, points, ground_z);
+    let points: &[[f32; 3]] = &hard;
     let cloud: Vec<[f64; 3]> = points
         .iter()
         .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
@@ -406,6 +396,7 @@ struct Worker {
     shared: Arc<Mutex<Shared>>,
     config: Config,
     emb: Emb,
+    model: Box<dyn ObstacleModel>,
     path: Output<Path>,
     plan_body: Output<Path>,
 }
@@ -416,7 +407,7 @@ struct Snapshot {
     cloud_seq: u64,
     age_s: Option<f64>,
     pose: Option<(f64, f64, f64)>,
-    floor_prior: Option<f64>,
+    ground_z: Option<f64>,
     route: Option<Vec<[f64; 2]>>,
     route_seq: u64,
 }
@@ -486,10 +477,11 @@ impl Worker {
                         Some(plan_once(
                             &self.config,
                             &self.emb,
+                            self.model.as_ref(),
                             &pts,
                             pose,
                             goal,
-                            snap.floor_prior,
+                            snap.ground_z.unwrap_or(0.0),
                         ))
                     });
                     if let Some(produced) = produced {
@@ -515,7 +507,7 @@ impl Worker {
             cloud_seq: s.cloud_seq,
             age_s: s.cloud_at.map(|t| now.duration_since(t).as_secs_f64()),
             pose: s.pose,
-            floor_prior: s.floor_prior,
+            ground_z: s.ground_z,
             route: s.global_xy.clone(),
             route_seq: s.route_seq,
         }
@@ -533,7 +525,7 @@ impl Worker {
                 return Some(Arc::clone(pts));
             }
         }
-        match msg::extract_xyz(cloud, self.config.cloud_z_offset as f32) {
+        match msg::extract_xyz(cloud) {
             Ok(pts) => {
                 let pts = Arc::new(pts);
                 *cache = Some((seq, Arc::clone(&pts)));
@@ -725,10 +717,7 @@ mod tests {
             world_frame: "odom".into(),
             base_frame: "base_link".into(),
             replan_on_change: true,
-            floor_anchor: true,
-            lidar_height: 0.0,
-            ground_margin_m: 0.16,
-            cloud_z_offset: 0.0,
+            obstacle_model: "body_band".into(),
             max_map_age_s: 5.0,
             viz_publish_hz: 2.0,
         }
@@ -738,10 +727,28 @@ mod tests {
         emb::by_tag("go2").expect("known tag")
     }
 
+    fn vert() -> emb::Vert {
+        emb::vert_by_tag("go2").expect("known tag")
+    }
+
+    /// The model a config names, for the plan_once calls below.
+    fn model(cfg: &Config) -> Box<dyn ObstacleModel> {
+        obstacles::load(&cfg.obstacle_model, &vert()).expect("known model")
+    }
+
     #[test]
     fn a_planned_path_carries_monotone_stamps() {
         // open floor: the search runs and the profile prices every segment
-        let produced = plan_once(&config(), &go2(), &[], (0.0, 0.0, 0.0), (3.0, 0.0), None);
+        let cfg = config();
+        let produced = plan_once(
+            &cfg,
+            &go2(),
+            model(&cfg).as_ref(),
+            &[],
+            (0.0, 0.0, 0.0),
+            (3.0, 0.0),
+            0.0,
+        );
         assert!(produced.poses.len() > 1, "expected a real plan, got a stub");
         assert_eq!(produced.header.frame_id, "odom");
         let ts = msg::path_stamps(&produced);
@@ -778,8 +785,25 @@ mod tests {
             let ts = msg::path_stamps(p);
             ts[ts.len() - 1] - ts[0]
         };
-        let roomy = plan_once(&cfg, &go2(), &gap(1.4), (0.0, 0.0, 0.0), (3.0, 0.0), None);
-        let tight = plan_once(&cfg, &go2(), &gap(0.45), (0.0, 0.0, 0.0), (3.0, 0.0), None);
+        let m = model(&cfg);
+        let roomy = plan_once(
+            &cfg,
+            &go2(),
+            m.as_ref(),
+            &gap(1.4),
+            (0.0, 0.0, 0.0),
+            (3.0, 0.0),
+            0.0,
+        );
+        let tight = plan_once(
+            &cfg,
+            &go2(),
+            m.as_ref(),
+            &gap(0.45),
+            (0.0, 0.0, 0.0),
+            (3.0, 0.0),
+            0.0,
+        );
         assert!(roomy.poses.len() > 1 && tight.poses.len() > 1);
         assert!(
             span(&tight) > span(&roomy),
@@ -801,15 +825,24 @@ mod tests {
             walls.push([t, 1.0, 0.2]);
             t += 0.02;
         }
-        let produced = plan_once(&config(), &go2(), &walls, (0.0, 0.0, 0.0), (4.0, 0.0), None);
+        let cfg = config();
+        let produced = plan_once(
+            &cfg,
+            &go2(),
+            model(&cfg).as_ref(),
+            &walls,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            0.0,
+        );
         assert_eq!(produced.poses.len(), 1, "a refusal is a one-pose stub");
         assert_eq!(produced.poses[0].pose.position.x, 0.0);
         assert_eq!(produced.poses[0].pose.position.y, 0.0);
     }
 
     #[test]
-    fn the_z_offset_moves_the_cloud_out_of_the_body_band() {
-        // the calibration knob: the same wall, lifted out of the z-band, stops
+    fn a_wall_over_the_body_is_not_a_wall() {
+        // the band has a ceiling: the same wall, lifted over the belly, stops
         // being an obstacle at all
         let mut walls = Vec::new();
         let mut t = -1.0f32;
@@ -821,34 +854,37 @@ mod tests {
             t += 0.02;
         }
         let lifted: Vec<[f32; 3]> = walls.iter().map(|p| [p[0], p[1], p[2] + 2.0]).collect();
+        let cfg = config();
         let produced = plan_once(
-            &config(),
+            &cfg,
             &go2(),
+            model(&cfg).as_ref(),
             &lifted,
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
-            None,
+            0.0,
         );
         assert!(produced.poses.len() > 1, "an overhead wall is not a wall");
     }
 
-    // the floor anchoring
+    // the obstacle model
 
-    /// A sealed box on a floor at `floor_z`, the whole thing sunk so the map's
-    /// z origin is base height rather than the ground -- the recording's case.
-    fn room_on_a_floor(floor_z: f32) -> Vec<[f32; 3]> {
+    /// A sealed box on a ground surface at `ground_z`, the whole thing sunk so
+    /// the map's z origin is base height rather than the ground -- the
+    /// recording's case.
+    fn room_on_a_floor(ground_z: f32) -> Vec<[f32; 3]> {
         let mut pts = Vec::new();
         let mut t = -2.0f32;
         while t <= 2.0 {
             let mut u = -2.0f32;
             while u <= 2.0 {
-                pts.push([t, u, floor_z]); // the floor slab
+                pts.push([t, u, ground_z]); // the ground slab
                 u += 0.08;
             }
-            // walls, standing 0.10..0.30 m ABOVE that floor -- entirely under
-            // the unanchored 0.05..0.45 band once the floor is at -0.28
+            // walls, standing 0.10..0.30 m ABOVE that ground -- entirely under
+            // the absolute 0.05..0.45 band once the ground is at -0.28
             for k in 1..=3 {
-                let z = floor_z + 0.1 * k as f32;
+                let z = ground_z + 0.1 * k as f32;
                 pts.push([-1.0, t, z]);
                 pts.push([1.0, t, z]);
                 pts.push([t, -1.0, z]);
@@ -860,70 +896,73 @@ mod tests {
     }
 
     #[test]
-    fn anchoring_puts_the_band_on_obstacles_the_raw_band_looks_over() {
+    fn the_body_band_sees_obstacles_the_raw_band_looks_over() {
         let room = room_on_a_floor(-0.28);
-        // unanchored: the band sits 0.33 m over the floor and sees nothing
-        let blind = plan_once(&config(), &go2(), &room, (0.0, 0.0, 0.0), (4.0, 0.0), None);
+        // raw_band: the band sits 0.28 m over the ground and sees nothing
+        let raw = Config {
+            obstacle_model: "raw_band".into(),
+            ..config()
+        };
+        let blind = plan_once(
+            &raw,
+            &go2(),
+            model(&raw).as_ref(),
+            &room,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            -0.28,
+        );
         assert!(
             blind.poses.len() > 1,
             "the raw band drove through the walls"
         );
-        // anchored off the tf prior: the same room is a sealed box
+        // body_band off the body's own reference: the same room is a sealed box
         let cfg = Config {
-            lidar_height: 0.45,
+            obstacle_model: "body_band".into(),
             ..config()
         };
         let seen = plan_once(
             &cfg,
             &go2(),
+            model(&cfg).as_ref(),
             &room,
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
-            Some(-0.24),
+            -0.28,
         );
         assert_eq!(seen.poses.len(), 1, "the walls are still invisible");
     }
 
     #[test]
-    fn anchoring_without_a_tf_prior_is_off() {
-        let room = room_on_a_floor(-0.28);
+    fn the_body_band_drops_the_ground_slab_rather_than_walling_the_robot_in() {
+        // the +0.29 counterfactual in the diagnosis: quantisation puts the
+        // ground's own layer just inside a naive band, and every tick refuses
         let cfg = Config {
-            lidar_height: 0.0,
+            obstacle_model: "body_band".into(),
             ..config()
         };
-        let anchored = floor::anchored_cloud(
-            &room,
-            (0.0, 0.0),
-            None,
-            cfg.floor_anchor,
-            cfg.ground_margin_m,
+        let mut slab = Vec::new();
+        let mut t = -2.0f32;
+        while t <= 2.0 {
+            let mut u = -2.0f32;
+            while u <= 2.0 {
+                for k in 0..3 {
+                    slab.push([t, u, -0.28 + 0.04 * k as f32]);
+                }
+                u += 0.08;
+            }
+            t += 0.02;
+        }
+        let produced = plan_once(
+            &cfg,
+            &go2(),
+            model(&cfg).as_ref(),
+            &slab,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            -0.28,
         );
-        assert_eq!(anchored.len(), room.len(), "anchored with no prior");
-    }
-
-    #[test]
-    fn anchoring_a_floor_already_at_zero_shifts_nothing() {
-        // a world whose plan poses sit on the ground, which is what the
-        // referee's sim scenarios are: the anchoring must not MOVE anything,
-        // only drop the ground the body is standing on
-        let room = room_on_a_floor(0.0);
-        let cfg = Config {
-            lidar_height: 0.45,
-            ..config()
-        };
-        let anchored = floor::anchored_cloud(
-            &room,
-            (0.0, 0.0),
-            Some(0.0),
-            cfg.floor_anchor,
-            cfg.ground_margin_m,
-        );
-        let kept: Vec<[f32; 3]> = room
-            .iter()
-            .copied()
-            .filter(|p| p[2] > cfg.ground_margin_m as f32)
-            .collect();
-        assert_eq!(anchored.as_ref(), kept.as_slice());
+        assert!(produced.poses.len() > 1, "the ground read as a wall");
     }
 
     // the replan gate
@@ -970,23 +1009,5 @@ mod tests {
         assert!(route_changed(None, Some(&r)));
         assert!(route_changed(Some(&r), None));
         assert!(!route_changed(None, None));
-    }
-
-    #[test]
-    fn the_anchor_switch_turns_it_off() {
-        let room = room_on_a_floor(-0.28);
-        let cfg = Config {
-            floor_anchor: false,
-            lidar_height: 0.45,
-            ..config()
-        };
-        let anchored = floor::anchored_cloud(
-            &room,
-            (0.0, 0.0),
-            Some(-0.24),
-            cfg.floor_anchor,
-            cfg.ground_margin_m,
-        );
-        assert_eq!(anchored.len(), room.len());
     }
 }

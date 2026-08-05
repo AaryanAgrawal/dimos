@@ -16,9 +16,9 @@
 
 Validation against reality, not a benchmark: mem2 recordings carry real
 Point-LIO clouds (sensor frame) and odometry; this transforms each scan
-through its nearest odometry pose, estimates the LOCAL floor (the planner's
-z-band assumes flat ground — on stairs only the neighbourhood is planar),
-plans toward a carrot taken from the robot's own future track, and logs
+through its nearest odometry pose, estimates the LOCAL floor itself (there is
+no tf and no base pose in these files, and on stairs only the neighbourhood is
+planar), plans toward a carrot taken from the robot's own future track, and logs
 everything to rerun with the same required-precision circles the referee
 draws: radius = clearance hint, red at the floor, yellow governed, green
 full speed.
@@ -36,7 +36,6 @@ import time
 import numpy as np
 
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2 as RefereeCloud
-from dimos.navigation.motion.adapter.floor import estimate_floor
 from dimos.navigation.motion.adapter.follower import path_clearance
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
@@ -45,6 +44,31 @@ from dimos.navigation.motion.scenarios import Scenario
 
 FLOOR_BAND = (0.05, 0.45)  # the planner's z-band over the estimated local floor
 FULL_SPEED_CLEAR = 0.35  # AvoidanceConfig.speed_clearance, circle cap
+FLOOR_RADIUS_M = 2.5  # neighbourhood the floor is read from
+FLOOR_PERCENTILE = 5.0  # low quantile of it: the ground, not what stands on it
+FLOOR_MIN_POINTS = 100  # fewer returns than this is noise, not a floor
+
+
+def _estimate_floor(points: np.ndarray, xy: tuple[float, float]) -> float | None:
+    """The floor's z under `xy`, or None when the cloud cannot say.
+
+    THE STACK NO LONGER DOES THIS -- the deployed adapter references the cloud
+    to the body (`motion/obstacles.py`), because a scene estimate is exactly
+    what kept getting the band wrong. This copy stays local to the replay for
+    two reasons the robot does not have: these recordings are raw Point-LIO
+    with no tf and sensor-stamped odometry, so there is no base pose to
+    reference anything to; and the dataset is a stair flight, where the LOCAL
+    floor under the robot is deliberately the quantity wanted.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if not len(pts):
+        return None
+    near = pts[
+        np.linalg.norm(pts[:, :2] - np.asarray(xy, dtype=np.float64), axis=1) < FLOOR_RADIUS_M
+    ]
+    if len(near) < FLOOR_MIN_POINTS:
+        return None
+    return float(np.percentile(near[:, 2], FLOOR_PERCENTILE))
 
 
 def _quat_mat(q: np.ndarray) -> np.ndarray:
@@ -120,10 +144,9 @@ def main() -> None:
             pts = scans[jj][1].points_f32().astype(np.float64)
             world_pts.append(pts @ _quat_mat(oquat[m]).T + opos[m])
         cloud = np.concatenate(world_pts) if world_pts else np.empty((0, 3))
-        # local floor, by the same estimator the planner adapter anchors with
-        # (adapter/floor.py) — stairs are only locally planar, which is exactly
-        # the planner's operating assumption
-        estimated = estimate_floor(cloud, (float(pos[0]), float(pos[1])))
+        # local floor: stairs are only locally planar, which is exactly the
+        # planner's operating assumption
+        estimated = _estimate_floor(cloud, (float(pos[0]), float(pos[1])))
         if estimated is None:
             continue
         floor = estimated

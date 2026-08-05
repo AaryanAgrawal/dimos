@@ -29,12 +29,12 @@ planner_path, path) and runs four passes:
 
     python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
-    python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --no-anchor
+    python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --model raw_band
 
-The replay anchors the cloud to the floor exactly as the module does, off the
-same tf prior -- unless the recording says otherwise: the replay sniffs which
-band the DEPLOYED module actually ran (whose holds agree with the recorded
-plans) and follows it. `--no-anchor` forces the raw band.
+The replay reads obstacles through `motion/obstacles.py`, the same models the
+module runs -- and by default it SNIFFS which one the deployed module actually
+ran, replaying a tick subsample under each and keeping the one whose holds
+agree with the recorded plans. `--model` names one instead.
 """
 
 from __future__ import annotations
@@ -50,15 +50,14 @@ import numpy as np
 
 from dimos.msgs.helpers import resolve_msg_type
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2 as RefereeCloud
-from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
 from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.obstacles import OBSTACLE_MODELS, hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.base import load as load_planner
-from dimos.navigation.motion.planner.planners.target import band_mask
 from dimos.navigation.motion.scenarios import Scenario
-from dimos.navigation.tf_pose import OdomBasePose, base_height_above_ground
+from dimos.navigation.tf_pose import OdomBasePose
 
 if TYPE_CHECKING:
     from dimos.memory2.store.base import Store
@@ -116,9 +115,6 @@ class Tick:
     pose: tuple[float, ...]  # x, y, yaw, base z
     goal: tuple[float, float]
     recorded: np.ndarray  # the published plan, xy
-    # Where tf put the ground under the base at this tick: the bound the floor
-    # estimate is held to, exactly as MotionPlanner._floor_prior computes it.
-    floor_prior: float | None = None
     # Bumped when the global route MOVED, so (imap, route_seq) is the pair
     # MotionPlanner's replan gate keys on.
     route_seq: int = 0
@@ -166,9 +162,7 @@ def _before(ts: float, stamps: np.ndarray) -> int:
     return int(np.searchsorted(stamps, ts, "right")) - 1
 
 
-def load_recording(
-    path: str, base_frame: str, lookahead: float, lidar_height: float = 0.0
-) -> Recording:
+def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
     """Decode the streams and rebuild each tick's inputs (tf-resolved pose, carrot)."""
     from dimos.memory2.tf import StreamTF
     from dimos.utils.data import get_data
@@ -181,18 +175,11 @@ def load_recording(
     maps = [(o.ts, o.data.points_f32()) for o in _stream(store, LOCAL_MAP)]
     odom = [(o.ts, o.data) for o in _stream(store, ODOMETRY)]
     poses: list[tuple[float, ...] | None] = []
-    priors: list[float | None] = []
-    base_height: float | None = None
     for _, msg in odom:
         p = base.resolve(msg)
         poses.append(
             (p.position.x, p.position.y, p.orientation.euler[2], p.position.z) if p else None
         )
-        if lidar_height > 0.0 and base_height is None and msg.child_frame_id != base_frame:
-            leg = base.sensor_to_base(msg.child_frame_id)
-            if leg is not None:
-                base_height = base_height_above_ground(lidar_height, -leg)
-        priors.append(None if p is None or base_height is None else p.position.z - base_height)
     globals_ = [(o.ts, _xy(o.data)) for o in _stream(store, PLANNER_PATH)]
     raw_plans = _stream(store, PATH)
     plans = [(o.ts, _xyy(o.data)) for o in raw_plans]
@@ -231,7 +218,6 @@ def load_recording(
                 pose=pose,
                 goal=goal,
                 recorded=xy,
-                floor_prior=priors[j],
                 route_seq=route_seq[k],
                 stamped_clear=stamped[n],
             )
@@ -580,35 +566,35 @@ def replay(
     embodiment: str,
     z_offset: float,
     ablate: bool,
-    anchor: bool | None = None,
-    ground_margin: float = 0.16,
+    model: str | None = None,
     gate: bool = False,
     rr: Any = None,
 ) -> list[dict[str, float]]:
     """Re-plan every recorded tick from its own inputs; optionally ablate one input at a time."""
     ep = episode(planner, embodiment)
+    emb = EMBODIMENTS[embodiment]
     ticks = gated_ticks(rec.ticks) if gate else rec.ticks
     offset = np.array([0.0, 0.0, z_offset], dtype=np.float32)
     # what plan() last handed the episode, so the renderer can mark the very
     # cloud the search saw instead of re-deriving one
-    seen: dict[str, Any] = {"pts": None, "floor": 0.0}
+    seen: dict[str, Any] = {"pts": None, "shift": 0.0}
+
+    def ground_of(pose: tuple[float, ...]) -> float:
+        """Where the surface under the robot is, off the body: base z - base_height."""
+        return (pose[3] if len(pose) > 3 else 0.0) - emb.base_height
 
     def plan(
         imap: int,
         pose: tuple[float, ...],
         goal: tuple[float, float],
-        prior: float | None = None,
+        model: Any,
     ) -> np.ndarray:
         # The module's own order (adapter/planner.py::_plan_once): the trim
-        # corrects the map's z origin, then the floor is measured off that map.
-        pts = rec.maps[imap][1] + offset
-        seen["floor"] = 0.0
-        if prior is not None:
-            floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
-            if floor is not None:
-                pts = anchor_to_floor(pts, floor, ground_margin)
-                seen["floor"] = floor
+        # corrects the map's z origin, then the model reads the result.
+        ground_z = ground_of(pose)
+        pts = hard_points(model, rec.maps[imap][1] + offset, ground_z)
         seen["pts"] = pts
+        seen["shift"] = ground_z if model.body_referenced else 0.0
         planned = ep.plan(
             RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
         )
@@ -616,40 +602,35 @@ def replay(
             [[q.position.x, q.position.y, q.orientation.euler.yaw] for q in planned.poses]
         ).reshape(-1, 3)
 
-    t = ticks[len(ticks) // 2]
-    twice = plan(t.imap, t.pose, t.goal, t.floor_prior), plan(t.imap, t.pose, t.goal, t.floor_prior)
-    deterministic = twice[0].shape == twice[1].shape and bool(np.allclose(*twice))
-
-    # Which band did the DEPLOYED module run? Anchoring degrades to the raw
-    # band in the field when tf/lidar_height are not in place, so sniff: the
-    # band whose holds agree with the recorded plans is the band the robot
-    # used. `anchor` None = auto; --no-anchor forces raw.
-    use_anchor = anchor
-    if use_anchor is None:
+    # Which model did the DEPLOYED module run? A recording predates whatever is
+    # current, so sniff it rather than assume: the model whose holds agree with
+    # the recorded plans is the one the robot used. `model` None = auto.
+    if model is None:
         sample = ticks[:: max(1, len(ticks) // 40)]
-        agree_a = agree_r = 0
-        for t in sample:
-            held = is_hold(t.recorded)
-            agree_a += is_hold(plan(t.imap, t.pose, t.goal, t.floor_prior)) == held
-            agree_r += is_hold(plan(t.imap, t.pose, t.goal, None)) == held
-        use_anchor = agree_a >= agree_r
+        agree = {}
+        for name in OBSTACLE_MODELS:
+            candidate = load_model(name, emb)
+            agree[name] = sum(
+                is_hold(plan(t.imap, t.pose, t.goal, candidate)) == is_hold(t.recorded)
+                for t in sample
+            )
+        model = max(agree, key=lambda k: (agree[k], k == "body_band"))
         print(
-            f"config sniff: anchored holds agree {agree_a}/{len(sample)}, raw "
-            f"{agree_r}/{len(sample)} -> replaying {'anchored' if use_anchor else 'RAW band'}"
-            + ("" if use_anchor else " (the robot ran without floor anchoring)")
+            "config sniff: holds agree "
+            + ", ".join(f"{n} {a}/{len(sample)}" for n, a in sorted(agree.items()))
+            + f" -> replaying {model}"
         )
+    band = load_model(model, emb)
 
-    def prior_of(t: Tick) -> float | None:
-        return t.floor_prior if use_anchor else None
-
-    anchored = bool(use_anchor) and any(t.floor_prior is not None for t in rec.ticks)
+    t = ticks[len(ticks) // 2]
+    twice = plan(t.imap, t.pose, t.goal, band), plan(t.imap, t.pose, t.goal, band)
+    deterministic = twice[0].shape == twice[1].shape and bool(np.allclose(*twice))
 
     rows: list[dict[str, float]] = []
     started = time.perf_counter()
     previous: np.ndarray | None = None
-    emb = EMBODIMENTS[embodiment]
     for tick in ticks:
-        out = plan(tick.imap, tick.pose, tick.goal, prior_of(tick))
+        out = plan(tick.imap, tick.pose, tick.goal, band)
         row = {
             "ts": tick.ts,
             "n_rec": float(len(tick.recorded)),
@@ -664,13 +645,13 @@ def replay(
         if rr is not None:
             rr.set_time("time", timestamp=tick.ts)
             rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
-            # the planner's own obstacle slice (band_mask) of the very cloud
-            # plan() handed it, holds included -- shifted back onto the map
-            obs = seen["pts"][band_mask(seen["pts"])]
+            # the winning model's hard set -- the very cloud plan() handed the
+            # search, holds included -- shifted back onto the map
+            obs = seen["pts"]
             rr.log(
                 "world/obstacles",
                 rr.Points3D(
-                    np.column_stack([obs[:, :2], obs[:, 2] + seen["floor"]]),
+                    np.column_stack([obs[:, :2], obs[:, 2] + seen["shift"]]),
                     radii=0.022,
                     colors=[[255, 120, 0]],
                 ),
@@ -723,10 +704,9 @@ def replay(
     rec_hold = np.array([r["n_rec"] < 2 for r in rows])
     rep_hold = np.array([r["n_replay"] < 2 for r in rows])
     both = ~rec_hold & ~rep_hold
-    band = "floor-anchored" if anchored else "raw z-band"
     cadence = "gated on input arrival" if gate else "every recorded tick"
     print(
-        f"\n=== replay ({planner}, {band}, {cadence}, "
+        f"\n=== replay ({planner}, {model}, {cadence}, "
         f"z_offset {z_offset:+.2f} m, {len(rows)} ticks) ==="
     )
     print(
@@ -742,24 +722,24 @@ def replay(
         f"plan wall time {1e3 * wall / len(rows):.1f} ms/tick"
     )
     if ablate:
-        _ablate(ticks, plan, prior_of)
+        _ablate(ticks, plan, band)
     return rows
 
 
-def _ablate(ticks: list[Tick], plan: Any, prior_of: Any) -> None:
+def _ablate(ticks: list[Tick], plan: Any, band: Any) -> None:
     """Re-plan each tick pair changing ONE input, to attribute the change."""
     rows = []
     for a, b in pairwise(ticks):
-        # the floor prior travels with the pose: it is read off the same
+        # the ground reference travels with the pose: it is read off the same
         # odometry message the pose is
-        base = plan(a.imap, a.pose, a.goal, prior_of(a))
+        base = plan(a.imap, a.pose, a.goal, band)
         rows.append(
             {
                 "ts": b.ts,
-                "all": divergence(base, plan(b.imap, b.pose, b.goal, prior_of(b))),
-                "cloud": divergence(base, plan(b.imap, a.pose, a.goal, prior_of(a))),
-                "pose": divergence(base, plan(a.imap, b.pose, a.goal, prior_of(b))),
-                "goal": divergence(base, plan(a.imap, a.pose, b.goal, prior_of(a))),
+                "all": divergence(base, plan(b.imap, b.pose, b.goal, band)),
+                "cloud": divergence(base, plan(b.imap, a.pose, a.goal, band)),
+                "pose": divergence(base, plan(a.imap, b.pose, a.goal, band)),
+                "goal": divergence(base, plan(a.imap, a.pose, b.goal, band)),
                 "hold": float(is_hold(base)),
                 "new_map": float(a.imap != b.imap),
             }
@@ -912,18 +892,22 @@ def main() -> None:
     ap.add_argument("--embodiment", default="go2")
     ap.add_argument("--base-frame", default="base_link")
     ap.add_argument("--lookahead", type=float, default=5.0, help="carrot arc along planner_path")
-    ap.add_argument("--z-offset", type=float, default=0.0, help="MotionPlanner cloud_z_offset")
     ap.add_argument(
-        "--lidar-height",
+        "--z-offset",
         type=float,
-        default=0.45,
-        help="lidar height above ground; tf turns it into the floor prior (0 = none)",
+        default=0.0,
+        help="trim the recorded map's z origin (counterfactual)",
     )
     ap.add_argument(
-        "--ground-margin", type=float, default=0.16, help="MotionPlanner ground_margin_m"
+        "--model",
+        default="auto",
+        choices=["auto", *OBSTACLE_MODELS],
+        help="obstacle model to replay under; auto sniffs which one the robot ran",
     )
     ap.add_argument(
-        "--no-anchor", action="store_true", help="force the raw z-band (default: sniff)"
+        "--no-anchor",
+        action="store_true",
+        help=argparse.SUPPRESS,  # deprecated alias for --model raw_band
     )
     ap.add_argument(
         "--gate", action="store_true", help="replay only the ticks a replan gate would keep"
@@ -938,7 +922,8 @@ def main() -> None:
     args = ap.parse_args()
 
     passes = {p.strip() for p in args.only.split(",")}
-    rec = load_recording(args.recording, args.base_frame, args.lookahead, args.lidar_height)
+    model = "raw_band" if args.no_anchor else (None if args.model == "auto" else args.model)
+    rec = load_recording(args.recording, args.base_frame, args.lookahead)
     stem = FsPath(args.out) / f"{FsPath(args.recording).stem}-diagnose"
     stem.parent.mkdir(parents=True, exist_ok=True)
     print(
@@ -1010,8 +995,7 @@ def main() -> None:
             args.embodiment,
             args.z_offset,
             not args.no_ablate,
-            anchor=False if args.no_anchor else None,
-            ground_margin=args.ground_margin,
+            model=model,
             gate=args.gate,
             rr=rr,
         )

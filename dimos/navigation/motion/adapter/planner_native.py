@@ -54,10 +54,7 @@ class MotionPlannerNativeConfig(NativeModuleConfig):
     world_frame: str = "odom"
     base_frame: str = "base_link"
     replan_on_change: bool = True
-    floor_anchor: bool = True
-    lidar_height: float = 0.0
-    ground_margin_m: float = 0.16
-    cloud_z_offset: float = 0.0
+    obstacle_model: str = "body_band"
     max_map_age_s: float = 5.0
     viz_publish_hz: float = 2.0
 

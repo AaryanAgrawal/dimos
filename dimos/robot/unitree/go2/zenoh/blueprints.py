@@ -257,23 +257,23 @@ _go2_zenoh_motion_base = autoconnect(
     RayTracingVoxelMap.blueprint(**_motion_raycaster),
     GoalRelay.blueprint(lidar_height=ROBOT_HEIGHT),
     _mls_planner_motion.remappings([(MLSPlannerNative, "path", "planner_path")]),
-    # lidar_height is what lets tf say how far the base sits above the ground,
-    # and the local planner needs that: its body z-band is 0.05..0.45 ABOVE THE
-    # FLOOR, while the map's z origin is base height. Without it the band reads
-    # a slab over the robot's head-room -- blind to the bottom of every
-    # obstacle, steering off table tops (adapter/floor.py).
-    MotionPlanner.blueprint(viz_publish_hz=motion_viz_hz, lidar_height=ROBOT_HEIGHT),
+    # The obstacle band rides the BODY (obstacle_model="body_band", the
+    # default): the base sits a known height above the surface its feet stand
+    # on, so the cloud referenced to that surface says what the planner can
+    # hit. Nothing about the map's z origin -- which on a LIO stack is base
+    # height -- has to be guessed (motion/obstacles.py).
+    MotionPlanner.blueprint(viz_publish_hz=motion_viz_hz),
     MovementManager.blueprint(),
     CmdVelMux.blueprint(),
 )
 
 # hinted: the follower is handed the per-waypoint clearance array recomputed from the
 # raycaster's local map, which on this stack is live -- so this is the honest default.
-# It gets the planner's lidar_height for the same reason the planner does: the room hint
-# has to be measured off the slice the plan was priced in, not off the raw band.
+# It reads that map through the planner's obstacle model (the shared default), because
+# the room hint has to be measured off the slice the plan was priced in.
 go2_zenoh_motion = autoconnect(
     _go2_zenoh_motion_base,
-    TrajectoryFollower.blueprint(track="hinted", lidar_height=ROBOT_HEIGHT),
+    TrajectoryFollower.blueprint(track="hinted"),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
 
 # blind: the same graph with the clearance hint withheld. The law recovers the required
@@ -281,7 +281,7 @@ go2_zenoh_motion = autoconnect(
 # regime that survives when the local map is stale, empty, or not the follower's to read.
 go2_zenoh_motion_blind = autoconnect(
     _go2_zenoh_motion_base,
-    TrajectoryFollower.blueprint(track="blind", lidar_height=ROBOT_HEIGHT),
+    TrajectoryFollower.blueprint(track="blind"),
 ).global_config(transport="zenoh", n_workers=9, robot_model="unitree_go2")
 
 # go2-zenoh-motion-local: go2-zenoh-motion with the time-critical half lifted off

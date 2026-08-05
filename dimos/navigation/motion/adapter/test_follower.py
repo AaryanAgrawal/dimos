@@ -21,7 +21,6 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.navigation.motion.adapter.floor import FloorAnchor
 from dimos.navigation.motion.adapter.follower import (
     GoalLatch,
     TrajectoryFollower,
@@ -30,6 +29,7 @@ from dimos.navigation.motion.adapter.follower import (
 )
 from dimos.navigation.motion.control.tracks import TRACKS
 from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.obstacles import hard_points, load as load_model
 
 
 def test_clearance_is_band_distance_minus_half_width():
@@ -68,7 +68,7 @@ def test_goal_latch_ignores_sub_tolerance_goal_moves():
     assert not latch.reached
 
 
-# --- the room hint's band (adapter/floor.py anchors it; this is the wiring)
+# --- the room hint's band (motion/obstacles.py is the rule; this is the wiring)
 
 
 def _room_follower(**config):
@@ -77,16 +77,11 @@ def _room_follower(**config):
     follower.config = TrajectoryFollowerConfig(**config)
     follower._lock = RLock()
     follower._track = TRACKS[follower.config.track]
-    follower._half_width = EMBODIMENTS[follower.config.embodiment].width / 2.0
+    follower._emb = EMBODIMENTS[follower.config.embodiment]
+    follower._model = load_model(follower.config.obstacle_model, follower._emb)
+    follower._half_width = follower._emb.width / 2.0
     follower._clearance = None
     follower._clearance_key = None
-    follower._floor = FloorAnchor(
-        doing="measuring the room",
-        enabled=follower.config.floor_anchor,
-        lidar_height=follower.config.lidar_height,
-        ground_margin=follower.config.ground_margin_m,
-        base_frame=follower.config.base_frame,
-    )
     return follower
 
 
@@ -102,6 +97,11 @@ def _room_with_a_post(floor_z: float, n: int = 400) -> PointCloud2:
     return PointCloud2.from_numpy(np.concatenate([slab, post]).astype(np.float32), frame_id="odom")
 
 
+def _base_at(z: float) -> PoseStamped:
+    """The tf-resolved base pose; the ground sits emb.base_height under it."""
+    return PoseStamped(ts=0.0, frame_id="odom", position=Vector3(0.0, 0.0, z))
+
+
 def _straight_path() -> Path:
     return Path(
         ts=0.0,
@@ -113,60 +113,46 @@ def _straight_path() -> Path:
     )
 
 
-def test_the_room_hint_is_measured_on_the_floor_anchored_map():
-    follower = _room_follower(lidar_height=0.45)
+def test_the_room_hint_is_measured_against_the_body_reference():
+    follower = _room_follower()
     follower._cloud = _room_with_a_post(-0.28)
-    # unanchored, the post sits under the band and reads as infinite room —
-    # the governor would drive at full speed into what the planner routed round
-    blind = follower._clearance_for(_straight_path(), (0.0, 0.0))
-    assert np.all(np.isinf(blind))
-    # anchored off the tf prior: the post is where the planner sees it
-    follower._floor.base_z, follower._floor.base_height = 0.05, 0.29  # prior: floor at -0.24
-    follower._clearance_key = None
-    hint = follower._clearance_for(_straight_path(), (0.0, 0.0))
+    # the base rides 0.29 m over the ground, so the post is where the planner
+    # sees it: 0.20..0.30 m up, well inside the band
+    hint = follower._clearance_for(_straight_path(), _base_at(0.01))
     hw = follower._half_width
     assert abs(float(hint[0]) - (1.0 - hw)) < 1e-6
     assert abs(float(hint[1]) - (0.5 - hw)) < 1e-6
 
 
-def test_an_unanchored_room_hint_is_the_raw_band():
-    # no tf prior: the follower degrades to the band as it was, exactly as the
-    # planner does, rather than anchoring to whatever the low quantile is
+def test_the_raw_band_model_reads_the_map_origin_instead():
+    # the legacy model: on a LIO stack the post sits under the absolute band
+    # and reads as infinite room, which is what the robot actually ran
+    follower = _room_follower(obstacle_model="raw_band")
+    follower._cloud = _room_with_a_post(-0.28)
+    blind = follower._clearance_for(_straight_path(), _base_at(0.01))
+    assert np.all(np.isinf(blind))
+
+
+def test_the_room_hint_is_the_model_hard_set_not_the_whole_map():
+    # the governor has to measure the very points the search routed around
     follower = _room_follower()
     follower._cloud = _room_with_a_post(-0.28)
-    path = _straight_path()
     want = path_clearance(
         np.array([[0.0, 0.0], [0.5, 0.0]]),
-        follower._cloud.points_f32(),
+        hard_points(follower._model, follower._cloud.points_f32(), -0.28),
         follower._half_width,
     )
-    assert np.array_equal(follower._clearance_for(path, (0.0, 0.0)), want)
+    assert np.array_equal(follower._clearance_for(_straight_path(), _base_at(0.01)), want)
 
 
-def test_the_anchor_switch_turns_the_room_hint_back_to_the_raw_band():
-    follower = _room_follower(floor_anchor=False, lidar_height=0.45)
-    follower._floor.base_z, follower._floor.base_height = 0.05, 0.29
-    follower._cloud = _room_with_a_post(-0.28)
-    path = _straight_path()
-    want = path_clearance(
-        np.array([[0.0, 0.0], [0.5, 0.0]]),
-        follower._cloud.points_f32(),
-        follower._half_width,
-    )
-    assert np.array_equal(follower._clearance_for(path, (0.0, 0.0)), want)
-
-
-def test_a_room_hint_on_a_floor_already_at_zero_is_the_raw_band():
-    # the referee's sim worlds put the plan poses on the ground; anchoring
-    # there only drops the ground the body is standing on, which was never in
-    # the band, so the hint the judge hands the controller cannot move
-    follower = _room_follower(lidar_height=0.45)
-    follower._floor.base_z, follower._floor.base_height = 0.29, 0.29  # prior: floor at 0.0
+def test_a_room_hint_on_a_ground_already_at_zero_is_the_raw_band():
+    # the referee's sim worlds put the plan poses on the ground, so the two
+    # models agree there and the hint the judge hands the controller cannot move
+    follower = _room_follower()
     follower._cloud = _room_with_a_post(0.0)
-    path = _straight_path()
     want = path_clearance(
         np.array([[0.0, 0.0], [0.5, 0.0]]),
         follower._cloud.points_f32(),
         follower._half_width,
     )
-    assert np.array_equal(follower._clearance_for(path, (0.0, 0.0)), want)
+    assert np.array_equal(follower._clearance_for(_straight_path(), _base_at(0.29)), want)

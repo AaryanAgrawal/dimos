@@ -176,11 +176,11 @@ impl std::fmt::Display for ExtractError {
 
 /// The cloud as f32 xyz triples, non-finite points dropped.
 ///
-/// f32 and not f64 on purpose: the python reads `cloud.points_f32()`, applies
-/// `cloud_z_offset` in f32, and only then widens for `plan()`. Both the
-/// planner's SDF and the room hint therefore see the same rounded numbers, and
-/// a port that widened first would disagree with them in the last bits.
-pub fn extract_xyz(msg: &PointCloud2, z_offset: f32) -> Result<Vec<[f32; 3]>, ExtractError> {
+/// f32 and not f64 on purpose: the python reads `cloud.points_f32()`,
+/// references it to the body in f32, and only then widens for `plan()`. Both
+/// the planner's SDF and the room hint therefore see the same rounded numbers,
+/// and a port that widened first would disagree in the last bits.
+pub fn extract_xyz(msg: &PointCloud2) -> Result<Vec<[f32; 3]>, ExtractError> {
     let mut offsets: [Option<usize>; 3] = [None; 3];
     for f in &msg.fields {
         if f.datatype != PointField::FLOAT32 as u8 {
@@ -223,7 +223,7 @@ pub fn extract_xyz(msg: &PointCloud2, z_offset: f32) -> Result<Vec<[f32; 3]>, Ex
         let y = read_f32_le(&msg.data, base + yo);
         let z = read_f32_le(&msg.data, base + zo);
         if x.is_finite() && y.is_finite() && z.is_finite() {
-            out.push([x, y, z + z_offset]);
+            out.push([x, y, z]);
         }
     }
     Ok(out)
@@ -322,24 +322,24 @@ mod tests {
     }
 
     #[test]
-    fn extract_drops_non_finite_points_and_applies_the_z_offset() {
+    fn extract_drops_non_finite_points_and_moves_nothing() {
         let cloud = cloud_of(&[[1.0, 2.0, 0.3], [f32::NAN, 0.0, 0.0], [0.0, 0.0, 0.0]]);
-        let pts = extract_xyz(&cloud, 0.5).expect("well-formed cloud");
-        assert_eq!(pts, vec![[1.0, 2.0, 0.8], [0.0, 0.0, 0.5]]);
+        let pts = extract_xyz(&cloud).expect("well-formed cloud");
+        assert_eq!(pts, vec![[1.0, 2.0, 0.3], [0.0, 0.0, 0.0]]);
     }
 
     #[test]
     fn extract_refuses_a_cloud_it_cannot_read() {
         let mut cloud = cloud_of(&[[0.0, 0.0, 0.0]]);
         cloud.fields.remove(2); // no z
-        assert!(extract_xyz(&cloud, 0.0).is_err());
+        assert!(extract_xyz(&cloud).is_err());
 
         let mut cloud = cloud_of(&[[0.0, 0.0, 0.0]]);
         cloud.is_bigendian = true;
-        assert!(extract_xyz(&cloud, 0.0).is_err());
+        assert!(extract_xyz(&cloud).is_err());
 
         let mut cloud = cloud_of(&[[0.0, 0.0, 0.0]]);
         cloud.width = 99; // claims more points than the buffer holds
-        assert!(extract_xyz(&cloud, 0.0).is_err());
+        assert!(extract_xyz(&cloud).is_err());
     }
 }

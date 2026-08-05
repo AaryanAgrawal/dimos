@@ -66,11 +66,9 @@ class TrajectoryFollowerNativeConfig(NativeModuleConfig):
     # is the one the planner priced the plan with.
     embodiment: str = "go2"
     base_frame: str = "base_link"
-    # The same three the planner carries: the room hint has to be measured off
-    # the slice the plan was priced in (adapter/floor.py).
-    floor_anchor: bool = True
-    lidar_height: float = 0.0
-    ground_margin_m: float = 0.16
+    # The planner's model, because the room hint has to be measured off the
+    # slice the plan was priced in (motion/obstacles.py).
+    obstacle_model: str = "body_band"
     idle_speed: float = 0.02
     # Zero the twist once the held path is this old, measured from ARRIVAL. The
     # planner is co-located, so this guards planner death, not the link.

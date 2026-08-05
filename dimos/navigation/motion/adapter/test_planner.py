@@ -19,8 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from dimos.msgs.nav_msgs.Path import Path as RefereePath
-from dimos.navigation.motion.adapter import floor as floor_module, planner as planner_module
-from dimos.navigation.motion.adapter.floor import FloorAnchor
+from dimos.navigation.motion.adapter import planner as planner_module
 from dimos.navigation.motion.adapter.planner import (
     MotionPlanner,
     MotionPlannerConfig,
@@ -28,6 +27,8 @@ from dimos.navigation.motion.adapter.planner import (
     to_nav_path,
 )
 from dimos.navigation.motion.control.laws.seed import PursuitController
+from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.obstacles import hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.gold import pose_stamped
 
 
@@ -173,21 +174,16 @@ def test_a_route_appearing_or_going_away_is_a_change():
     assert not planner_module.route_changed(None, None)
 
 
-# --- the floor anchoring (adapter/floor.py is the estimator; this is the wiring)
+# --- the obstacle model (motion/obstacles.py is the rule; this is the wiring)
 
 
-def _anchoring_planner(**config):
-    """A MotionPlanner with just enough wired up to anchor a cloud."""
+def _model_planner(**config):
+    """A MotionPlanner with just enough wired up to select obstacles."""
     planner = object.__new__(MotionPlanner)
     planner.config = MotionPlannerConfig(**config)
     planner._lock = RLock()
-    planner._floor = FloorAnchor(
-        doing="planning",
-        enabled=planner.config.floor_anchor,
-        lidar_height=planner.config.lidar_height,
-        ground_margin=planner.config.ground_margin_m,
-        base_frame=planner.config.base_frame,
-    )
+    planner._emb = EMBODIMENTS[planner.config.embodiment]
+    planner._model = load_model(planner.config.obstacle_model, planner._emb)
     return planner
 
 
@@ -199,60 +195,39 @@ def _room(floor_z: float, n: int = 400) -> np.ndarray:
     return np.concatenate([slab, clutter]).astype(np.float32)
 
 
-def test_anchor_moves_the_band_onto_the_floor():
-    planner = _anchoring_planner(lidar_height=0.45)
-    planner._floor.base_z, planner._floor.base_height = 0.05, 0.29  # prior: floor at -0.24
-    out = planner._floor.anchor(_room(-0.28), (0.0, 0.0))
-    # the slab is gone and the clutter reads as its true height over the floor
+def test_the_band_rides_the_body_not_the_map_origin():
+    planner = _model_planner()
+    # base at +0.01, so the surface the feet stand on is at -0.28
+    out = hard_points(planner._model, _room(-0.28), ground_z=-0.28)
+    # the slab is gone and the clutter reads as its true height over the ground
     assert len(out) == 2
     assert abs(float(out[:, 2].min()) - 0.2) < 1e-6
     assert abs(float(out[:, 2].max()) - 0.4) < 1e-6
 
 
-def test_anchor_without_a_tf_prior_leaves_the_cloud_alone():
-    # a low quantile of the cloud alone is only the floor if the floor is in
-    # the cloud; without tf saying where the ground is, the band does not move
-    planner = _anchoring_planner()
+def test_the_default_model_is_the_body_band():
+    planner = _model_planner()
+    assert planner.config.obstacle_model == "body_band"
+    assert planner._model.body_referenced
+
+
+def test_the_raw_band_model_ignores_the_body_reference():
+    # the legacy model, for replaying recordings the deployed stack made
+    # before the body was the reference: the map's z origin is the band's
+    planner = _model_planner(obstacle_model="raw_band")
     pts = _room(-0.28)
-    assert np.array_equal(planner._floor.anchor(pts, (0.0, 0.0)), pts)
+    assert not planner._model.body_referenced
+    out = hard_points(planner._model, pts, ground_z=-0.28)
+    # the band stays at absolute 0.05..0.45: the 0.2 m clutter is under it and
+    # invisible, only the 0.4 m one survives, and neither z has moved
+    assert len(out) == 1
+    assert abs(float(out[0][2]) - 0.12) < 1e-6
 
 
-def test_anchor_warns_once_when_it_cannot_anchor(monkeypatch):
-    warnings = []
-    monkeypatch.setattr(
-        floor_module.logger, "warning", lambda msg, **kw: warnings.append(msg), raising=False
-    )
-    planner = _anchoring_planner()
-    for _ in range(3):
-        planner._floor.anchor(_room(-0.28), (0.0, 0.0))
-    assert len(warnings) == 1
-
-
-def test_anchor_is_off_when_the_switch_is_off():
-    planner = _anchoring_planner(floor_anchor=False, lidar_height=0.45)
-    planner._floor.base_z, planner._floor.base_height = 0.05, 0.29
-    pts = _room(-0.28)
-    assert np.array_equal(planner._floor.anchor(pts, (0.0, 0.0)), pts)
-
-
-def test_anchoring_a_floor_already_at_zero_shifts_nothing():
-    # the referee's sim worlds put the plan poses on the ground; anchoring
-    # there must not MOVE anything, only drop the ground it is standing on
-    planner = _anchoring_planner(lidar_height=0.45)
-    planner._floor.base_z, planner._floor.base_height = 0.29, 0.29  # prior: floor at 0.0
+def test_a_ground_already_at_zero_selects_the_same_band():
+    # the referee's sim worlds put the plan poses on the ground, so the two
+    # models agree there and the judge's scores cannot move
+    planner = _model_planner()
+    raw = _model_planner(obstacle_model="raw_band")
     pts = _room(0.0)
-    out = planner._floor.anchor(pts, (0.0, 0.0))
-    assert np.array_equal(out, pts[pts[:, 2] > planner.config.ground_margin_m])
-
-
-def test_the_prior_bounds_an_estimate_the_cloud_gets_wrong():
-    # a cloud with no floor in it (a wall the robot faces): the low quantile
-    # is the wall's base, and the prior is what stops the wall being deleted
-    planner = _anchoring_planner(lidar_height=0.45)
-    planner._floor.base_z, planner._floor.base_height = 0.05, 0.29  # prior: floor at -0.24
-    wall = np.column_stack(
-        [np.full(400, 1.0), np.linspace(-1.0, 1.0, 400), np.linspace(0.6, 1.4, 400)]
-    ).astype(np.float32)
-    out = planner._floor.anchor(wall, (0.0, 0.0))
-    # shifted by the PRIOR (-0.24), not by the wall's own base (0.6)
-    assert abs(float(out[:, 2].min()) - (0.6 + 0.24)) < 1e-5
+    assert np.array_equal(hard_points(planner._model, pts, 0.0), hard_points(raw._model, pts, 0.0))

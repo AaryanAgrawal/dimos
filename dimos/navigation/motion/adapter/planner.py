@@ -44,11 +44,11 @@ from dimos.msgs.nav_msgs.Path import Path, Path as RefereePath
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, PointCloud2 as RefereeCloud
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
-from dimos.navigation.motion.adapter.floor import FloorAnchor
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.control.referee import world as world_bridge
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.obstacles import ObstacleModel, hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.base import PlannerEpisode, load
 from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.tf_pose import OdomBasePose
@@ -128,26 +128,11 @@ class MotionPlannerConfig(ModuleConfig):
     replan_hz: float = 5.0  # the control battery's reality default
     goal_lookahead_m: float = 5.0  # carrot arc along the global path
     world_frame: str = "odom"
-    # Anchor the cloud to the floor under the robot before planning, so the
-    # planner's body z-band (0.05..0.45 ABOVE THE GROUND) lands where the
-    # ground actually is. Off leaves the band where the map's z origin puts it,
-    # which on a LIO stack is base height — see adapter/floor.py.
-    floor_anchor: bool = True
-    # Lidar height above the ground while standing. With it, tf gives the base
-    # height above ground and hence a prior the floor estimate is bounded
-    # against; 0 estimates off the cloud alone. Same knob GoalRelay carries.
-    lidar_height: float = 0.0
-    # Drop returns within this of the estimated floor before the band is taken.
-    # TWO voxel layers, not one: a floor whose true height sits near a voxel
-    # boundary quantises into both layers either side of it, and a one-voxel
-    # margin leaves the upper one standing as a carpet the search cannot cross.
-    # Measured on 20260805-033007: at 0.08 the robot is inside the band on
-    # every tick, at 0.16 on 7 % of them.
-    ground_margin_m: float = 0.16
-    # Manual trim on the map's z ORIGIN, so it lands before the floor is
-    # measured off that map. With floor_anchor on it is very nearly inert; the
-    # anchoring above is what makes the band right.
-    cloud_z_offset: float = 0.0
+    # What counts as an obstacle (motion/obstacles.py). "body_band" reads the
+    # cloud against the surface the feet stand on, which the embodiment knows
+    # the base's height above; "raw_band" is the absolute 0.05..0.45 slice the
+    # stack ran before that, kept for replaying recordings made under it.
+    obstacle_model: str = "body_band"
     # Hold once the local map is this old. The mapper can live across a link,
     # and a dropped link must not leave us replanning on a frozen world at
     # cruise speed — an old map is survivable, an unbounded one is not.
@@ -184,17 +169,14 @@ class MotionPlanner(Module):
         self._route_seq = 0
         self._planned: tuple[int, int] | None = None
         self._pose: tuple[float, float, float] | None = None
-        self._floor = FloorAnchor(
-            doing="planning",
-            enabled=self.config.floor_anchor,
-            lidar_height=self.config.lidar_height,
-            ground_margin=self.config.ground_margin_m,
-            base_frame=self.config.base_frame,
-        )
+        # Where the surface under the robot is, off the body rather than off
+        # the scene: the base rides emb.base_height above it.
+        self._ground_z: float | None = None
         self._base_pose: OdomBasePose | None = None
         self._global_xy: np.ndarray | None = None
         self._episode: PlannerEpisode | None = None
-        self._emb = EMBODIMENTS["go2"]
+        self._emb = EMBODIMENTS[self.config.embodiment]
+        self._model: ObstacleModel = load_model(self.config.obstacle_model, self._emb)
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._stall = StallReporter("MotionPlanner", self.config.stall_report_s)
@@ -203,8 +185,7 @@ class MotionPlanner(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        sc = Scenario("live", [], goal=(0.0, 0.0), emb=EMBODIMENTS[self.config.embodiment])
-        self._emb = sc.emb
+        sc = Scenario("live", [], goal=(0.0, 0.0), emb=self._emb)
         self._episode = load(self.config.planner)(sc, AvoidanceConfig())
         self._episode.reset()
         self.register_disposable(Disposable(self.local_map.subscribe(self._on_local_map)))
@@ -234,9 +215,9 @@ class MotionPlanner(Module):
         pose = self._base_pose.resolve(msg)
         if pose is None:
             return
-        self._floor.observe(self._base_pose, msg.child_frame_id, pose.position.z)
         with self._lock:
             self._pose = (pose.position.x, pose.position.y, pose.orientation.euler[2])
+            self._ground_z = pose.position.z - self._emb.base_height
 
     def _on_planner_path(self, msg: Path) -> None:
         # MLS emits an empty path when it finds no route: no carrot, hold the
@@ -259,7 +240,7 @@ class MotionPlanner(Module):
             started = time.perf_counter()
             with self._lock:
                 cloud, pose, global_xy = self._cloud, self._pose, self._global_xy
-                cloud_at = self._cloud_at
+                cloud_at, ground_z = self._cloud_at, self._ground_z
                 inputs = (self._cloud_seq, self._route_seq)
             age = None if cloud_at is None else time.monotonic() - cloud_at
             # Why a tick did nothing, in the planner's own words. Silence here
@@ -284,7 +265,9 @@ class MotionPlanner(Module):
                     logger.info("local_map is live again, resuming planning")
                 if self._due(inputs):
                     goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
-                    if self._plan_once(cloud, pose, goal):
+                    # a pose implies a ground reference: both come off the same
+                    # tf-resolved base, so this cannot be None here
+                    if self._plan_once(cloud, pose, goal, 0.0 if ground_z is None else ground_z):
                         self._planned = inputs
             elapsed = time.perf_counter() - started
             self._stop_event.wait(max(0.0, period - elapsed))
@@ -316,17 +299,18 @@ class MotionPlanner(Module):
         self._publish_viz(held)
 
     def _plan_once(
-        self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
+        self,
+        cloud: PointCloud2,
+        pose: tuple[float, float, float],
+        goal: tuple[float, float],
+        ground_z: float,
     ) -> bool:
         """Plan and publish. False when the search raised and nothing went out."""
         assert self._episode is not None
-        # The trim corrects the map's z ORIGIN, so it lands before the floor is
-        # measured off that map — which is also where the rust twin applies it
-        # (at extraction). With floor_anchor on it is very nearly inert.
-        pts = cloud.points_f32()
-        if self.config.cloud_z_offset != 0.0:
-            pts = pts + np.array([0.0, 0.0, self.config.cloud_z_offset], dtype=np.float32)
-        pts = self._floor.anchor(pts, (pose[0], pose[1]))
+        # The search gets the obstacles, in the frame the model read them: the
+        # follower's room hint is measured off the very same points, so the
+        # governor and the stamped profile cannot be pricing different worlds.
+        pts = hard_points(self._model, cloud.points_f32(), ground_z)
         ref_cloud = RefereeCloud.from_numpy(pts, frame_id=self.config.world_frame)
         try:
             ref = self._episode.plan(ref_cloud, pose, goal)
