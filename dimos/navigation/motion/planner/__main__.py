@@ -19,16 +19,17 @@
     python -m dimos.navigation.motion.planner --score --planner ml.candidate:make
 
 Every candidate — the production crate, an autoresearch lab's, a learned one —
-is a ``--planner`` name resolved by :mod:`~...planner.referee.planners.base`,
-and all of them are judged by the same referee. ``referee/__main__.py`` is the
-same CLI from inside the copyable unit, which is what exported labs run as
-``python -m referee``.
+is a ``--planner`` name resolved by :mod:`~...planner.planners.base`, and all
+of them are judged by the same referee. This is the entry point labs use too,
+against a dimos checkout; ``referee/__main__.py`` is the same CLI from inside
+the referee package and survives only for the retired vendored export.
 
-The BLAS pinning below is repeated in both entry points on purpose: it only
-works if it happens before numpy is first imported, so whichever module is
-`-m`'d has to do it itself. avoid_ms is time.process_time(), which sums CPU
-across all threads, and OpenBLAS's spinning pool otherwise bills its spin time
-to the candidate (measured: identical-code score spread 0.334 -> 0.0069).
+The BLAS pinning below happens before anything else is imported, and has to:
+it only takes effect before numpy is first loaded. avoid_ms is
+time.process_time(), which sums CPU across all threads, and OpenBLAS's spinning
+pool otherwise bills its spin time to the candidate (measured on an idle
+machine: identical-code score spread 0.334 -> 0.0069; under load the spread is
+far worse, so speed comparisons want a quiet box).
 """
 
 import os

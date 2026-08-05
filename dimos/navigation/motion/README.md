@@ -54,7 +54,6 @@ autoresearch lab's and a learned one are comparable by construction.
 The domain both sides share sits above them, in exactly one copy:
 
 ```
-types.py        Vector3/Quaternion/Pose/Path/PointCloud2 — the hot-path types
 geometry.py     CollisionShape, AvoidanceConfig, DistanceField, clearance
 embodiment.py   Embodiment, GO2, EMBODIMENTS — the body table
 scenarios.py    Box, Scenario, the worlds, se2_search — the shared benchmark
@@ -68,10 +67,13 @@ planner/                             control/
   research/ml/    learned candidate    research/ml/    learned candidate
 ```
 
-`types.py` is not ceremony and not a `dimos.msgs` replica to be deleted: it is
-~70x cheaper to construct, and `episode.plan()` builds a whole `Path` inside
-the referee's `time.process_time()` window against a 20 ms budget. Measured,
-not stylistic — see the note at the top of the module before replacing it.
+Messages are stock `dimos.msgs`. There used to be a `types.py` here holding a
+faster copy of `Vector3`/`Quaternion`/`Pose`/`Path`, because the real ones cost
+107 µs per `PoseStamped` — `episode.plan()` builds a 55-207 pose `Path` inside
+the referee's `process_time` window against a 20 ms budget, so the copy was
+load-bearing, not stylistic. Once `dimos.msgs` stopped routing `__init__`
+through `plum` (0.42–1.79 µs now) the copy lost its reason and was deleted.
+Worth knowing before anyone adds dispatch back to a message constructor.
 
 | dir           | what                                                                                                    | docs                                                             |
 |---------------|---------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|

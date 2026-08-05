@@ -5,12 +5,15 @@ SE(2) gold oracle, and a judge that scores candidate plans against exact truth.
 The candidate it was built around is the Rust crate one level up
 (`planner/rust/`, pyo3 module `dimos_motion2_target`).
 
-The package depends on **numpy + scipy + pydantic only** (rerun optionally,
-for `--view`). All internal imports are relative, so copying this directory
-anywhere yields a working referee — that is the basis of the lab export
-([`../research/auto/export/`](../research/auto/export/)), which packages the
-benchmark for evo autoresearch loops. Keep both properties when editing here:
-they are what makes a lab possible.
+It used to depend on numpy + scipy + pydantic only, with relative imports
+throughout, so that the directory could be copied anywhere and still run —
+that was the basis of the vendored lab export. Both properties are gone on
+purpose: the domain it shares with production and with `control/referee/` now
+lives once at `motion/{geometry,embodiment,scenarios}.py`, and this package
+speaks `dimos.msgs` like the rest of the repo.
+
+Labs get their referee from a dimos checkout instead — see
+[`../research/auto/README.md`](../research/auto/README.md).
 
 ## Quick start (in-repo)
 
@@ -73,9 +76,13 @@ caches warm.
 
 ## Provenance
 
-`geometry.py` is vendored from `dimos/navigation/motion/obstacle.py` @
-`d7c1b7c88` (the referee epoch scores are pinned to), and `types.py`
-replicates the used slice of `dimos.msgs` op-for-op. Both were verified
-bit-exact against the source battery (56 worlds, gold + target planners).
-If the robot-side scoring math in `obstacle.py` changes, re-vendor
-deliberately and re-baseline.
+Scores are pinned to the referee epoch `d7c1b7c88`, when `motion/geometry.py`
+was a vendored slice of `motion/obstacle.py` and `types.py` replicated the used
+slice of `dimos.msgs` op-for-op. Both copies are gone: `obstacle.py` no longer
+exists and `geometry.py` is the source, and `types.py` was deleted once
+`dimos.msgs` stopped paying plum's dispatch cost.
+
+Neither deletion moved a score — verified against the full battery, gold 0.9585
+and consistency 0.9388 with zero diffs on every deterministic per-world field,
+which is the evidence the "op-for-op" claim was true. The epoch still means what
+it meant: change this math and every lab re-baselines.

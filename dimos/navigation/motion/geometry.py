@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Body-collision geometry the referee scores with.
+"""Body-collision geometry: how a body relates to the obstacles around it.
 
-VENDORED from ``dimos/navigation/motion/obstacle.py`` at commit
-d7c1b7c88 (the referee epoch this benchmark's scores are pinned to) —
-only the pure-geometry slice the judge needs, with ``dimos.msgs`` types
-swapped for :mod:`.types`. The math is verbatim; scores produced through
-this module are compared bit-exactly against that commit.
+Shared domain, not benchmark. The deployed adapter reads ``AvoidanceConfig``
+to configure a live robot and both referees score against ``clearance`` here,
+so this is one implementation with several callers rather than a copy.
 
-If ``obstacle.py``'s scoring functions ever change on the robot side,
-re-vendor deliberately and re-baseline — silently diverging copies of
-the scoring math are worse than either copy.
+It began as a vendored slice of ``dimos/navigation/motion/obstacle.py`` @
+``d7c1b7c88``, the epoch the referee's scores are pinned to. That file is gone
+and this is now the source of truth -- there is nothing left to re-vendor from.
+The math is still the math those scores were built on: changing it re-baselines
+every lab, so change it deliberately.
 """
 
 from __future__ import annotations
