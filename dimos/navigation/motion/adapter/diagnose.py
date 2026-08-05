@@ -129,7 +129,7 @@ class Recording:
     odom_xy: np.ndarray  # sensor position, which is what the raycaster crops around
     poses: list[tuple[float, ...] | None]  # base_link (x, y, yaw, z)
     globals: list[tuple[float, np.ndarray]]  # planner_path: ts, xy
-    plans: list[tuple[float, np.ndarray]]  # path: ts, xy
+    plans: list[tuple[float, np.ndarray]]  # path: ts, (x, y, yaw)
     ticks: list[Tick] = field(default_factory=list)
 
     @property
@@ -139,6 +139,13 @@ class Recording:
 
 def _xy(msg: Any) -> np.ndarray:
     return np.array([[p.position.x, p.position.y] for p in msg.poses]).reshape(-1, 2)
+
+
+def _xyy(msg: Any) -> np.ndarray:
+    """Plan poses as (x, y, yaw) -- the yaw is real, in-place turns carry it."""
+    return np.array(
+        [[p.position.x, p.position.y, p.orientation.euler[2]] for p in msg.poses]
+    ).reshape(-1, 3)
 
 
 def _stream(store: Store, name: str) -> list[Any]:
@@ -179,7 +186,7 @@ def load_recording(
                 base_height = base_height_above_ground(lidar_height, -leg)
         priors.append(None if p is None or base_height is None else p.position.z - base_height)
     globals_ = [(o.ts, _xy(o.data)) for o in _stream(store, PLANNER_PATH)]
-    plans = [(o.ts, _xy(o.data)) for o in _stream(store, PATH)]
+    plans = [(o.ts, _xyy(o.data)) for o in _stream(store, PATH)]
 
     rec = Recording(
         path=path,
@@ -233,6 +240,7 @@ def gated_ticks(ticks: list[Tick]) -> list[Tick]:
 
 def resample(xy: np.ndarray, step: float = 0.1) -> np.ndarray:
     """Path resampled at even arc length, so two plans compare point for point."""
+    xy = xy[:, :2] if xy.ndim == 2 else xy
     if len(xy) < 2:
         return xy.reshape(-1, 2)
     arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
@@ -243,6 +251,7 @@ def resample(xy: np.ndarray, step: float = 0.1) -> np.ndarray:
 
 
 def arclen(xy: np.ndarray) -> float:
+    xy = xy[:, :2] if xy.ndim == 2 else xy
     return float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum()) if len(xy) > 1 else 0.0
 
 
@@ -396,11 +405,11 @@ def churn(rec: Recording, voxel: float, rr: Any = None) -> list[dict[str, float]
             rr.log("world/map", rr.Points3D(b.points[::4], radii=0.01, colors=[[90, 90, 105]]))
             rr.log(
                 "world/appeared",
-                rr.Points3D(voxel_centers(appear, voxel), radii=0.03, colors=[[60, 220, 60]]),
+                rr.Points3D(voxel_centers(appear, voxel), radii=0.015, colors=[[60, 220, 60]]),
             )
             rr.log(
                 "world/disappeared",
-                rr.Points3D(voxel_centers(gone, voxel), radii=0.03, colors=[[230, 50, 50]]),
+                rr.Points3D(voxel_centers(gone, voxel), radii=0.015, colors=[[230, 50, 50]]),
             )
 
     def col(key: str) -> np.ndarray:
@@ -484,18 +493,29 @@ def plans(rec: Recording) -> list[dict[str, float]]:
 # ------------------------------------------------------------------- replay --
 
 
-def _plan_bodies(rr: Any, xy: np.ndarray, base_z: float, emb: Any, color: list[int]) -> Any:
-    """Wireframe body boxes along a plan, one every ~0.4 m of arc, yawed with it."""
-    seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
-    arc = np.concatenate([[0.0], np.cumsum(seg)])
+def _plan_bodies(rr: Any, plan: np.ndarray, base_z: float, emb: Any, color: list[int]) -> Any:
+    """Wireframe body boxes along a plan, one every ~0.4 m of arc or 30 deg of yaw.
+
+    A third column is the pose's own yaw (in-place turns show); with only xy the
+    yaw is derived from the segment direction.
+    """
+    xy = plan[:, :2]
+    yaw = plan[:, 2] if plan.shape[1] >= 3 else None
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
     keep = [0]
     for i in range(1, len(xy)):
-        if arc[i] - arc[keep[-1]] >= 0.4:
+        turned = yaw is not None and abs(yaw[i] - yaw[keep[-1]]) >= np.radians(30)
+        if arc[i] - arc[keep[-1]] >= 0.4 or turned:
             keep.append(i)
     yaws = []
     for i in keep:
+        if yaw is not None:
+            yaws.append(float(yaw[i]))
+            continue
         d = xy[min(i + 1, len(xy) - 1)] - xy[max(i - 1, 0)]
-        yaws.append(float(np.arctan2(d[1], d[0])) if np.linalg.norm(d) > 1e-9 else 0.0)
+        yaws.append(
+            float(np.arctan2(d[1], d[0])) if np.linalg.norm(d) > 1e-9 else yaws[-1] if yaws else 0.0
+        )
     return rr.Boxes3D(
         centers=[[float(xy[i][0]), float(xy[i][1]), base_z] for i in keep],
         half_sizes=[[emb.length / 2, emb.width / 2, 0.2]] * len(keep),
@@ -540,11 +560,12 @@ def replay(
             floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
             if floor is not None:
                 pts = anchor_to_floor(pts, floor, ground_margin)
-        return _xy(
-            ep.plan(
-                RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
-            )
+        planned = ep.plan(
+            RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
         )
+        return np.array(
+            [[q.position.x, q.position.y, q.orientation.euler.yaw] for q in planned.poses]
+        ).reshape(-1, 3)
 
     t = ticks[len(ticks) // 2]
     twice = plan(t.imap, t.pose, t.goal, t.floor_prior), plan(t.imap, t.pose, t.goal, t.floor_prior)
@@ -574,12 +595,12 @@ def replay(
         if rr is not None and len(out) > 1:
             base_z = tick.pose[3] if len(tick.pose) > 3 else 0.0
             z = np.full(len(out), 0.02)
-            rr.log("world/replay", rr.LineStrips3D([np.column_stack([out, z])], radii=0.012))
+            rr.log("world/replay", rr.LineStrips3D([np.column_stack([out[:, :2], z])], radii=0.012))
             rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [255, 255, 255, 60]))
             rr.log(
                 "world/recorded",
                 rr.LineStrips3D(
-                    [np.column_stack([tick.recorded, np.full(len(tick.recorded), 0.03)])],
+                    [np.column_stack([tick.recorded[:, :2], np.full(len(tick.recorded), 0.03)])],
                     colors=[[100, 160, 255]],
                     radii=0.012,
                 ),
