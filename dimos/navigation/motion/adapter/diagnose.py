@@ -49,6 +49,7 @@ import numpy as np
 from dimos.msgs.helpers import resolve_msg_type
 from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
 from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
+from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.referee.planners.base import load as load_planner
 from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS, Scenario
@@ -117,6 +118,9 @@ class Tick:
     # Bumped when the global route MOVED, so (imap, route_seq) is the pair
     # MotionPlanner's replan gate keys on.
     route_seq: int = 0
+    # Per-waypoint clearance decoded from the plan's own stamps -- the precision
+    # the planner asked for, not anything recomputed offline.
+    stamped_clear: np.ndarray | None = None
 
 
 @dataclass
@@ -186,7 +190,12 @@ def load_recording(
                 base_height = base_height_above_ground(lidar_height, -leg)
         priors.append(None if p is None or base_height is None else p.position.z - base_height)
     globals_ = [(o.ts, _xy(o.data)) for o in _stream(store, PLANNER_PATH)]
-    plans = [(o.ts, _xyy(o.data)) for o in _stream(store, PATH)]
+    raw_plans = _stream(store, PATH)
+    plans = [(o.ts, _xyy(o.data)) for o in raw_plans]
+    stamped: list[np.ndarray | None] = []
+    for o in raw_plans:
+        ceilings = decode_ceilings(o.data)
+        stamped.append(ceilings_to_clearance(ceilings) if ceilings is not None else None)
 
     rec = Recording(
         path=path,
@@ -204,7 +213,7 @@ def load_recording(
     route_seq = [0]
     for a, b in pairwise(globals_):
         route_seq.append(route_seq[-1] + int(route_changed(a[1], b[1])))
-    for ts, xy in plans:
+    for n, (ts, xy) in enumerate(plans):
         i, j, k = _before(ts, map_ts), _before(ts, rec.odom_ts), _before(ts, global_ts)
         if min(i, j, k) < 0 or rec.poses[j] is None or not len(globals_[k][1]):
             continue
@@ -220,6 +229,7 @@ def load_recording(
                 recorded=xy,
                 floor_prior=priors[j],
                 route_seq=route_seq[k],
+                stamped_clear=stamped[n],
             )
         )
     return rec
@@ -524,6 +534,35 @@ def _plan_bodies(rr: Any, plan: np.ndarray, base_z: float, emb: Any, color: list
     )
 
 
+FULL_SPEED_CLEAR = 0.35  # AvoidanceConfig.speed_clearance: above this, no governing
+
+
+def _precision_circles(rr: Any, plan: np.ndarray, clear: np.ndarray, z: float, emb: Any) -> Any:
+    """Requested-precision circles from the plan's own stamps, replay.py's palette.
+
+    Radius = decoded clearance (capped at full speed); red at the precision
+    floor, yellow governed, green full speed.
+    """
+    xy = plan[:, :2]
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
+    idx = np.unique(np.searchsorted(arc, np.arange(0.0, arc[-1] + 1e-9, 0.35)))
+    a = np.linspace(0.0, 2 * np.pi, 33)
+    circles, cols = [], []
+    for i in idx:
+        i = min(int(i), len(xy) - 1, len(clear) - 1)
+        r = float(min(max(clear[i], 0.02), FULL_SPEED_CLEAR))
+        circles.append(
+            np.column_stack([xy[i][0] + r * np.cos(a), xy[i][1] + r * np.sin(a), np.full(33, z)])
+        )
+        if clear[i] <= emb.precision:
+            cols.append([255, 60, 60])
+        elif clear[i] < FULL_SPEED_CLEAR:
+            cols.append([255, 220, 60])
+        else:
+            cols.append([80, 220, 80])
+    return rr.LineStrips3D(circles, colors=cols, radii=0.004)
+
+
 def episode(planner: str, embodiment: str) -> PlannerEpisode:
     scenario = Scenario("diagnose", [], goal=(0.0, 0.0), emb=EMBODIMENTS[embodiment])
     ep = load_planner(planner)(scenario, AvoidanceConfig())
@@ -614,6 +653,11 @@ def replay(
                 "world/requested/bodies",
                 _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 60]),
             )
+            if tick.stamped_clear is not None:
+                rr.log(
+                    "world/requested/precision",
+                    _precision_circles(rr, tick.recorded, tick.stamped_clear, 0.04, emb),
+                )
     wall = time.perf_counter() - started
 
     d = np.array([r["div"] for r in rows])
