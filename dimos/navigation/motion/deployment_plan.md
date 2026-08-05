@@ -252,7 +252,24 @@ std, no cross target):
     sudo pacman -S rustup            # replaces the 'rust' package
     rustup default stable
     rustup target add aarch64-unknown-linux-gnu
-    pipx install cargo-zigbuild      # bundles the zig linker
+    pipx install cargo-zigbuild
+    pipx inject cargo-zigbuild ziglang   # zig is NOT bundled; without this the
+                                         # link step dies with "Failed to find zig"
+
+Two environment traps, both hit and solved on 2026-08-05:
+
+- zig must be findable on PATH: pipx puts it inside the venv
+  (`~/.local/share/pipx/venvs/cargo-zigbuild/lib/*/site-packages/ziglang/zig`)
+  without exposing a bin — symlink it somewhere on PATH.
+- a `cargo` niceness shim in `~/.local/bin` (nice/ionice wrapper) canonicalizes
+  the rustup proxy down to the raw `rustup` binary, which then fails with
+  "Usage: rustup <+toolchain>". Front the PATH with a dir containing a plain
+  `cargo -> /usr/bin/cargo` symlink for the bake, or fix the shim to exec by
+  path without readlink -f.
+
+The clean end state is the nix dev shell providing rust + the aarch64 std +
+cargo-zigbuild itself (today it provides no rust at all; the toolchain leaks
+in from the host) — until then the above is the working host-side setup.
 
 Then:
 
