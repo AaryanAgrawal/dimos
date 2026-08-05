@@ -240,6 +240,36 @@ separate blueprint that declares the robot's topics as external.
 Cross-compilation is already supported: `--builder cross|zigbuild --target
 <triple>`.
 
+### Baking the motion host (the working recipe)
+
+The host runs **on the robot itself**, same machine as the go2web bridge —
+that is why it dials the bridge over loopback and listens on its own port
+(see the deployment comment in `go2/zenoh/blueprints.py`).
+
+One-time toolchain on an Arch dev box (the plain `rust` package has host-only
+std, no cross target):
+
+    sudo pacman -S rustup            # replaces the 'rust' package
+    rustup default stable
+    rustup target add aarch64-unknown-linux-gnu
+    pipx install cargo-zigbuild      # bundles the zig linker
+
+Then:
+
+    dimos bake motion_planner trajectory_follower cmd_vel_mux \
+        -o motion-host --builder zigbuild --target aarch64-unknown-linux-gnu.2.31
+
+The `.2.31` suffix pins the glibc floor the binary links against — check the
+robot's (`ldd --version` on it) and pin at or below. Artifact lands at
+`target/dimos-bake/motion-host`; copy to the robot, run under
+`dimos-motion-host.service` with the zenoh env from the blueprint comment
+(`DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447` to reach the bridge, a fixed
+`DIMOS_ZENOH_LISTEN` port of its own so the laptop can dial it).
+
+A plain `--target aarch64-unknown-linux-gnu` without zigbuild fails on this
+setup with `can't find crate for core` — that is the missing cross std, not a
+bake bug.
+
 ### Config is the sharp edge
 
 `--emit-config` builds the standalone stdin blob from **python class
