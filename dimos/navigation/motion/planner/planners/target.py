@@ -26,9 +26,11 @@ from typing import Any
 
 import numpy as np
 
-from ..geometry import AvoidanceConfig
-from ..scenarios import Embodiment, Scenario, se2_search
-from ..types import Path, PointCloud2
+from dimos.navigation.motion.embodiment import Embodiment
+from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.scenarios import Scenario, se2_search
+from dimos.navigation.motion.types import Path, PointCloud2
+
 from .gold import densify_states, pose_stamped
 
 Z_BAND = (0.05, 0.45)  # cloud slice that can touch the body

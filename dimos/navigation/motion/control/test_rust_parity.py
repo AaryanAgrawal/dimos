@@ -275,7 +275,7 @@ def test_registry_and_build_hint() -> None:
 def test_corridor_reaches_goal_rust() -> None:
     """Closed-loop smoke: the extension drives a real episode to the goal."""
     from dimos.navigation.motion.control.referee.episode import EpisodeConfig, run_episode
-    from dimos.navigation.motion.planner.referee.scenarios import SCENARIOS
+    from dimos.navigation.motion.scenarios import SCENARIOS
     from dimos.navigation.motion.simulation.policy import FreePolicy
     from dimos.utils.data import get_data
 

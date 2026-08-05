@@ -164,7 +164,7 @@ def motion_visual_override(
     Pass the same ``viz_publish_hz`` and ``embodiment`` given to
     ``MotionPlanner.blueprint(...)``.
     """
-    from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS
+    from dimos.navigation.motion.embodiment import EMBODIMENTS
 
     emb = EMBODIMENTS[embodiment]
     on = viz_publish_hz > 0.0

@@ -37,7 +37,7 @@ import numpy as np
 
 from dimos.navigation.motion.control.referee.episode import EpisodeResult
 from dimos.navigation.motion.control.tracks import track_of
-from dimos.navigation.motion.planner.referee.scenarios import Scenario
+from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
 # The cruise target and the pace weight are per track and travel together --

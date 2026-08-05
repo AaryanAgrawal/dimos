@@ -28,7 +28,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from ..types import Path, PointCloud2
+    from dimos.navigation.motion.types import Path, PointCloud2
 
 
 class PlannerEpisode(Protocol):

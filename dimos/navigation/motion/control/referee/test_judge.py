@@ -23,8 +23,8 @@ from dimos.navigation.motion.control.referee.judge import (
     score_episode,
     summarize,
 )
-from dimos.navigation.motion.planner.referee.scenarios import Box, Scenario
-from dimos.navigation.motion.planner.referee.types import (
+from dimos.navigation.motion.scenarios import Box, Scenario
+from dimos.navigation.motion.types import (
     Path as RefereePath,
     PoseStamped as RefereePose,
 )

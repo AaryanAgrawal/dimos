@@ -44,12 +44,8 @@ from dimos.navigation.motion.control.referee.episode import (
     run_episode,
 )
 from dimos.navigation.motion.control.referee.judge import score_episode
-from dimos.navigation.motion.planner.referee.scenarios import (
-    GO2,
-    GenRules,
-    Scenario,
-    generated,
-)
+from dimos.navigation.motion.embodiment import GO2
+from dimos.navigation.motion.scenarios import GenRules, Scenario, generated
 
 # Held-out generator: disjoint seed base, harder placement rules. go2-only —
 # the physical robot in the sim is always the go2; judging its body against

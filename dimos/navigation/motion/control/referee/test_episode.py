@@ -24,7 +24,7 @@ import pytest
 from dimos.navigation.motion.control.laws.seed import PursuitController
 from dimos.navigation.motion.control.referee.episode import EpisodeConfig, run_episode
 from dimos.navigation.motion.control.referee.judge import score_episode
-from dimos.navigation.motion.planner.referee.scenarios import SCENARIOS
+from dimos.navigation.motion.scenarios import SCENARIOS
 from dimos.navigation.motion.simulation.policy import FreePolicy
 from dimos.utils.data import get_data
 

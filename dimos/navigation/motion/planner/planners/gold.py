@@ -28,9 +28,9 @@ from typing import Any
 
 import numpy as np
 
-from ..geometry import AvoidanceConfig
-from ..scenarios import Scenario, se2_path
-from ..types import Path, PointCloud2, PoseStamped, Quaternion, Vector3
+from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.scenarios import Scenario, se2_path
+from dimos.navigation.motion.types import Path, PointCloud2, PoseStamped, Quaternion, Vector3
 
 
 class GoldEpisode:

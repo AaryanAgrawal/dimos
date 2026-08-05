@@ -29,15 +29,11 @@ from __future__ import annotations
 
 import pytest
 
-from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.referee.scenarios import (
-    EMBODIMENTS,
-    SCENARIOS,
-    Scenario,
-    generate,
-)
+from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.referee.score import score_world
 from dimos.navigation.motion.planner.referee.sim import Verdict, judge
+from dimos.navigation.motion.scenarios import SCENARIOS, Scenario, generate
 
 GEN_SEEDS = [0, 28, 30]
 WORLD_IDS = [sc.name for sc in SCENARIOS] + [f"gen{s:03d}" for s in GEN_SEEDS]

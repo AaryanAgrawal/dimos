@@ -34,7 +34,8 @@ from typing import Any
 
 import numpy as np
 
-from .geometry import (
+from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.geometry import (
     GO2_BODY,
     NEAR_FIELD_M,
     SCORE_STRIDE_M,
@@ -48,9 +49,8 @@ from .geometry import (
     station_poses,
     turn_mask,
 )
-from .planners.base import load
-from .scenarios import (
-    EMBODIMENTS,
+from dimos.navigation.motion.planner.planners.base import load
+from dimos.navigation.motion.scenarios import (
     GEN_COUNT,
     GEN_SEED,
     SCENARIOS,
@@ -61,8 +61,9 @@ from .scenarios import (
     se2_path,
     straight_plan,
 )
+from dimos.navigation.motion.types import Path, PointCloud2, Pose, SolidPrimitive
+
 from .score import score_world, summarize
-from .types import Path, PointCloud2, Pose, SolidPrimitive
 
 # Planner's view: local_map-like sampling. Truth: dense, planner never sees it.
 CLOUD_STEP = 0.05

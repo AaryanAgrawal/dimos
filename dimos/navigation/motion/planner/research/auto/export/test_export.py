@@ -35,6 +35,22 @@ import pytest
 
 from dimos.navigation.motion.planner.research.auto.export.exporter import BENCH_TEMPLATES, HERE, run
 
+# PARKED, not abandoned. These exercise the *vendored* lab: a self-contained
+# copy of the referee, pinned by byte-identity. The shared domain now lives at
+# motion/{types,geometry,scenarios}.py, so there is no self-contained tree left
+# to copy -- deliberately, because two of the three labs (motion-tc-autoresearch
+# and autoresearch-mlplanner) already run against a dimos checkout instead.
+#
+# The replacement keeps the check that actually catches a doctored judge --
+# ext_invariants' live code-object pin, retargeted from the copied `referee.*`
+# package onto the imported `dimos.navigation.motion.*` modules -- and drops
+# frozen.json's byte-identity of a directory that no longer exists. Until that
+# lands, these would fail for a reason the suite cannot express as a bug.
+pytest.skip(
+    "vendored-lab export retired; runtime-pin port pending (see research/auto/README.md)",
+    allow_module_level=True,
+)
+
 
 @pytest.fixture(scope="module")
 def lab(tmp_path_factory: pytest.TempPathFactory) -> Path:

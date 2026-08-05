@@ -29,7 +29,7 @@ from dimos.navigation.motion.adapter.follower import (
     path_clearance,
 )
 from dimos.navigation.motion.control.tracks import TRACKS
-from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS
+from dimos.navigation.motion.embodiment import EMBODIMENTS
 
 
 def test_clearance_is_band_distance_minus_half_width():

@@ -20,12 +20,12 @@ import pytest
 
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.control.referee import world
-from dimos.navigation.motion.planner.referee.scenarios import SCENARIOS, Scenario
-from dimos.navigation.motion.planner.referee.types import (
+from dimos.navigation.motion.scenarios import SCENARIOS, Scenario
+from dimos.navigation.motion.simulation.evaluate import FITTED_PHYSICS
+from dimos.navigation.motion.types import (
     Path as RefereePath,
     PoseStamped as RefereePose,
 )
-from dimos.navigation.motion.simulation.evaluate import FITTED_PHYSICS
 
 CORRIDOR = next(s for s in SCENARIOS if s.name == "corridor")
 DOOR_SIDE = next(s for s in SCENARIOS if s.name == "door_side")

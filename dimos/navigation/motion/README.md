@@ -51,15 +51,27 @@ that picks a candidate, a **referee** that scores it, and **research/** where
 candidates come from. One referee per side means the shipped law, an
 autoresearch lab's and a learned one are comparable by construction.
 
+The domain both sides share sits above them, in exactly one copy:
+
 ```
+types.py        Vector3/Quaternion/Pose/Path/PointCloud2 — the hot-path types
+geometry.py     CollisionShape, AvoidanceConfig, DistanceField, clearance
+embodiment.py   Embodiment, GO2, EMBODIMENTS — the body table
+scenarios.py    Box, Scenario, the worlds, se2_search — the shared benchmark
+
 planner/                             control/
   __main__.py   runner: --planner      __main__.py   runner: --controller
-  referee/      worlds, gold oracle,   controller.py tracks.py profile.py
-                judge, scoring         laws/ rust/   the shipped laws
+  planners/     registry + gold        controller.py tracks.py profile.py
+  referee/      sim, score, judging    laws/ rust/   the shipped laws
   rust/         production crate       referee/      episode runner, judge, battery
-  research/auto/  evo lab + export/    research/auto/  evo lab (motion-tc-autoresearch)
+  research/auto/  evo lab              research/auto/  evo lab (motion-tc-autoresearch)
   research/ml/    learned candidate    research/ml/    learned candidate
 ```
+
+`types.py` is not ceremony and not a `dimos.msgs` replica to be deleted: it is
+~70x cheaper to construct, and `episode.plan()` builds a whole `Path` inside
+the referee's `time.process_time()` window against a 20 ms budget. Measured,
+not stylistic — see the note at the top of the module before replacing it.
 
 | dir           | what                                                                                                    | docs                                                             |
 |---------------|---------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|

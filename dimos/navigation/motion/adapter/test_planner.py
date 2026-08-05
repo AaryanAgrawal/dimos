@@ -27,8 +27,8 @@ from dimos.navigation.motion.adapter.planner import (
     to_nav_path,
 )
 from dimos.navigation.motion.control.laws.seed import PursuitController
-from dimos.navigation.motion.planner.referee.planners.gold import pose_stamped
-from dimos.navigation.motion.planner.referee.types import Path as RefereePath
+from dimos.navigation.motion.planner.planners.gold import pose_stamped
+from dimos.navigation.motion.types import Path as RefereePath
 
 
 def test_to_nav_path_preserves_positions_and_yaw():

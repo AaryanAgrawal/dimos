@@ -37,10 +37,9 @@ from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.control.controller import TrajectoryController
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.control.referee import world
-from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.referee.planners.base import load as load_planner
-from dimos.navigation.motion.planner.referee.scenarios import Scenario
-from dimos.navigation.motion.planner.referee.types import Path as RefereePath
+from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.planners.base import load as load_planner
+from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation.evaluate import (
     FITTED_ACTUATOR_TAU,
     FITTED_COMMAND_DELAY,
@@ -55,6 +54,7 @@ from dimos.navigation.motion.simulation.walk import (
     actuator_step,
     projected_gravity,
 )
+from dimos.navigation.motion.types import Path as RefereePath
 
 # A published path shorter than this is a refusal (referee score.py STALL_ARC).
 STALL_ARC = 0.3

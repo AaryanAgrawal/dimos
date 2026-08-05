@@ -35,7 +35,7 @@ from dimos.navigation.motion.control.referee.episode import (
 )
 from dimos.navigation.motion.control.referee.judge import print_row, score_episode, summarize
 from dimos.navigation.motion.control.tracks import TRACKS
-from dimos.navigation.motion.planner.referee.scenarios import (
+from dimos.navigation.motion.scenarios import (
     SCENARIOS,
     generated,
     recorded,

@@ -12,32 +12,42 @@ standalone lab so the loop can run without write access to its own judge.
 | referee | this repo: `planner/referee/` |
 | candidate seam | `--planner <name>` or any `module:factory` |
 
-## export/
+## export/ — being retired, port in progress
 
-```bash
-python -m dimos.navigation.motion.planner.research.auto.export <dest>
-```
+`export/` builds a **vendored** lab: `planner/referee/` copied wholesale into
+`<dest>/referee/`, pinned by byte-identity, run as `python -m referee`. That
+worked because the referee was a self-contained unit with only relative imports
+and a numpy+scipy+pydantic dependency.
 
-Copies `planner/referee/` into `<dest>/referee/`, seeds `<dest>/candidate/`
-from `planner/rust/`, and writes the bench + gate harness with content hashes
-computed from the exported bytes. Those hashes are the boundary: `check_rules.py`
-verifies the referee copy is byte-identical to what the lab is pinned to,
-`ext_invariants.py` pins the referee's *runtime* (live code-object hashes and
-constant values against `.evo/referee.lock`, so a `sitecustomize.py` cannot
-monkeypatch the judge), and `bench_guard.py` lives outside the worktrees so a
-candidate agent cannot disable the gates that live inside them.
+It no longer is, deliberately. The domain that production and both referees
+share — `motion/{types,geometry,scenarios}.py` — was lifted out of the referee
+so there is exactly one copy of it, which means there is no self-contained
+directory left to vendor. Two of the three labs never used the vendored model
+anyway: `motion-tc-autoresearch` and `autoresearch-mlplanner` both run against
+a dimos checkout, because the control referee genuinely needs MuJoCo, the
+fitted sim and the planner crate.
 
-This is why the labs are separate trees rather than folders in this repo. The
-referee has to be immutable *from the candidate's side*, and a hash pin against
-a vendored copy is what makes that checkable.
+**So the labs converge on the checkout model** (`ops/setup-server` +
+`dimos-snap` + `ops/update`, as the TC lab does today), and `export/`'s copying
+half retires with it. `test_export.py` is skipped at module level until the
+port lands.
 
-## Why the referee is one copyable unit
+What must survive the port, because it is the check that actually catches
+cheating: **`ext_invariants.py`'s runtime pin** — live code-object hashes and
+constant values against `.evo/referee.lock` — retargeted from the copied
+`referee.*` package onto the imported `dimos.navigation.motion.*` modules. A
+byte-identity check on files cannot see a `sitecustomize.py` or a `.pth` file
+monkeypatching the judge inside the interpreter; the runtime pin can. Keep
+`bench_guard.py` too: it lives outside the experiment worktrees, which is what
+stops a candidate agent from disabling the gates that live inside them.
 
-Every import inside `planner/referee/` is relative (`.types`, `..geometry`,
-`.planners.base`) and the package depends on numpy + scipy + pydantic only —
-so the directory works under any name, which is exactly what `python -m referee`
-in an exported lab relies on. Do not split it, and do not let it grow the
-MuJoCo dependency that `control/referee/` needs; that property is the export.
+What is dropped: `frozen.json`'s byte-identity of a copied tree, and
+`test_referee_imports_standalone`. Both describe a vendored layout that no
+longer exists.
+
+The referee stays immutable *from the candidate's side* — that requirement did
+not change. What changed is that it is enforced against an imported module set
+and a re-pulled snapshot rather than against a directory the exporter copied.
 
 ## Provenance
 

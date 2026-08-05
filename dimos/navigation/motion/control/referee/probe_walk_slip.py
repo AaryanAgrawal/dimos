@@ -41,7 +41,8 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.control.controller import ControllerConfig
 from dimos.navigation.motion.control.referee.episode import EpisodeConfig, run_episode
-from dimos.navigation.motion.planner.referee.scenarios import GO2, Scenario
+from dimos.navigation.motion.embodiment import GO2
+from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation.policy import FreePolicy
 from dimos.utils.data import get_data
 

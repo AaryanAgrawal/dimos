@@ -32,7 +32,7 @@ from typing import Any
 
 import numpy as np
 
-from .types import (
+from dimos.navigation.motion.types import (
     BaseConfig,
     Path as PathT,
     PointCloud2,

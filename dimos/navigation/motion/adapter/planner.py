@@ -47,10 +47,11 @@ from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.adapter.floor import FloorAnchor
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.control.referee import world as world_bridge
-from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.referee.planners.base import PlannerEpisode, load
-from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS, Scenario
-from dimos.navigation.motion.planner.referee.types import (
+from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.planners.base import PlannerEpisode, load
+from dimos.navigation.motion.scenarios import Scenario
+from dimos.navigation.motion.types import (
     Path as RefereePath,
     PointCloud2 as RefereeCloud,
 )
