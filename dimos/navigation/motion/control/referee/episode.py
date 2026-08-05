@@ -33,7 +33,7 @@ import numpy as np
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.nav_msgs.Path import Path, Path as RefereePath
 from dimos.navigation.motion.control.controller import TrajectoryController
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.control.referee import world
@@ -54,7 +54,6 @@ from dimos.navigation.motion.simulation.walk import (
     actuator_step,
     projected_gravity,
 )
-from dimos.navigation.motion.types import Path as RefereePath
 
 # A published path shorter than this is a refusal (referee score.py STALL_ARC).
 STALL_ARC = 0.3

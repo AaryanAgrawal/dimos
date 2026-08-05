@@ -32,16 +32,49 @@ from typing import Any
 
 import numpy as np
 
-from dimos.navigation.motion.types import (
-    BaseConfig,
-    Path as PathT,
-    PointCloud2,
-    Pose,
-    PoseStamped,
-    Quaternion,
-    SolidPrimitive,
-    Vector3,
-)
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.Path import Path as PathT
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.protocol.service.spec import BaseConfig
+
+
+class SolidPrimitive:
+    """Box / sphere / cylinder / cone with ROS type codes."""
+
+    BOX = 1
+    SPHERE = 2
+    CYLINDER = 3
+    CONE = 4
+    SPHERE_RADIUS = 0
+
+    _NAMES = {1: "box", 2: "sphere", 3: "cylinder", 4: "cone"}
+
+    def __init__(self, type: int = 0, dimensions: list[float] | None = None) -> None:
+        self.type = type
+        self.dimensions = [float(d) for d in dimensions or []]
+
+    @classmethod
+    def box(cls, x: float, y: float, z: float) -> SolidPrimitive:
+        return cls(cls.BOX, [x, y, z])
+
+    @classmethod
+    def sphere(cls, radius: float) -> SolidPrimitive:
+        return cls(cls.SPHERE, [radius])
+
+    @classmethod
+    def cylinder(cls, height: float, radius: float) -> SolidPrimitive:
+        return cls(cls.CYLINDER, [height, radius])
+
+    @classmethod
+    def cone(cls, height: float, radius: float) -> SolidPrimitive:
+        return cls(cls.CONE, [height, radius])
+
+    def __repr__(self) -> str:
+        dims = ", ".join(f"{d:g}" for d in self.dimensions)
+        return f"SolidPrimitive.{self._NAMES.get(self.type, 'unknown')}({dims})"
 
 
 def angle_diff(a: float, b: float) -> float:
@@ -484,6 +517,7 @@ def _pose_at_arc(path: PathT, arcs: np.ndarray, s: float) -> PoseStamped:
     yaw = float(a.orientation.euler[2])
     yaw = float(_wrap(yaw + t * float(_wrap(float(b.orientation.euler[2]) - yaw))))
     return PoseStamped(
+        ts=0.0,  # referee paths carry no schedule; 0.0 keeps construction deterministic
         frame_id=path.frame_id,
         position=[
             a.position.x + t * (b.position.x - a.position.x),

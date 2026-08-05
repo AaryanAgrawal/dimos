@@ -40,8 +40,8 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
-from dimos.msgs.nav_msgs.Path import Path
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.nav_msgs.Path import Path, Path as RefereePath
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, PointCloud2 as RefereeCloud
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.adapter.floor import FloorAnchor
@@ -51,10 +51,6 @@ from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.planners.base import PlannerEpisode, load
 from dimos.navigation.motion.scenarios import Scenario
-from dimos.navigation.motion.types import (
-    Path as RefereePath,
-    PointCloud2 as RefereeCloud,
-)
 from dimos.navigation.tf_pose import OdomBasePose
 from dimos.utils.logging_config import setup_logger
 

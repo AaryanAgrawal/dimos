@@ -18,14 +18,11 @@ import mujoco
 import numpy as np
 import pytest
 
-from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped as RefereePose
+from dimos.msgs.nav_msgs.Path import Path, Path as RefereePath
 from dimos.navigation.motion.control.referee import world
 from dimos.navigation.motion.scenarios import SCENARIOS, Scenario
 from dimos.navigation.motion.simulation.evaluate import FITTED_PHYSICS
-from dimos.navigation.motion.types import (
-    Path as RefereePath,
-    PoseStamped as RefereePose,
-)
 
 CORRIDOR = next(s for s in SCENARIOS if s.name == "corridor")
 DOOR_SIDE = next(s for s in SCENARIOS if s.name == "door_side")

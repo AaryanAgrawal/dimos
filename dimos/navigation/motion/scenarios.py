@@ -36,8 +36,9 @@ from typing import Any
 
 import numpy as np
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.embodiment import EMBODIMENTS, GO2, Embodiment
-from dimos.navigation.motion.types import Path, PoseStamped
 
 
 @dataclass
@@ -265,9 +266,10 @@ def straight_plan(start: tuple[float, float, float], goal: tuple[float, float]) 
     xs = np.linspace(start[0], goal[0], n)
     ys = np.linspace(start[1], goal[1], n)
     return Path(
+        ts=0.0,
         frame_id="world",
         poses=[
-            PoseStamped(frame_id="world", position=[float(x), float(y), 0.0])
+            PoseStamped(ts=0.0, frame_id="world", position=[float(x), float(y), 0.0])
             for x, y in zip(xs, ys, strict=False)
         ],
     )

@@ -15,6 +15,8 @@
 import numpy as np
 import pytest
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped as RefereePose
+from dimos.msgs.nav_msgs.Path import Path as RefereePath
 from dimos.navigation.motion.control.referee import world
 from dimos.navigation.motion.control.referee.episode import EpisodeConfig, EpisodeResult
 from dimos.navigation.motion.control.referee.judge import (
@@ -24,10 +26,6 @@ from dimos.navigation.motion.control.referee.judge import (
     summarize,
 )
 from dimos.navigation.motion.scenarios import Box, Scenario
-from dimos.navigation.motion.types import (
-    Path as RefereePath,
-    PoseStamped as RefereePose,
-)
 
 CLEAR = Scenario("t_clear", [], goal=(4.0, 0.0))
 REFUSE = Scenario("t_refuse", [], goal=(4.0, 0.0), expect="refuse")

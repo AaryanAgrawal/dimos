@@ -34,6 +34,9 @@ from typing import Any
 
 import numpy as np
 
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import (
     GO2_BODY,
@@ -42,6 +45,7 @@ from dimos.navigation.motion.geometry import (
     AvoidanceConfig,
     CollisionShape,
     DistanceField,
+    SolidPrimitive,
     _path_arcs,
     angle_diff,
     near_field_diff,
@@ -61,7 +65,6 @@ from dimos.navigation.motion.scenarios import (
     se2_path,
     straight_plan,
 )
-from dimos.navigation.motion.types import Path, PointCloud2, Pose, SolidPrimitive
 
 from .score import score_world, summarize
 
@@ -184,7 +187,7 @@ def judge(
         s_idx = min(max(s_idx, 1), len(pxy) - 2)
         tang = pxy[s_idx + 1] - pxy[s_idx - 1]
         spot = (float(pxy[s_idx][0]), float(pxy[s_idx][1]), math.atan2(tang[1], tang[0]))
-        remainder = Path(frame_id=prev_out.frame_id, poses=prev_out.poses[s_idx:])
+        remainder = Path(ts=0.0, frame_id=prev_out.frame_id, poses=prev_out.poses[s_idx:])
         new_out = episode.plan(cloud, spot, sc.goal)
         consist = max(consist, near_field_diff(remainder, new_out, n))
         chain.append((np.array([[p.position.x, p.position.y] for p in new_out.poses]), pxy[s_idx]))

@@ -28,9 +28,13 @@ from typing import Any
 
 import numpy as np
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.scenarios import Scenario, se2_path
-from dimos.navigation.motion.types import Path, PointCloud2, PoseStamped, Quaternion, Vector3
 
 
 class GoldEpisode:
@@ -47,9 +51,11 @@ class GoldEpisode:
         states = se2_path(self._sc.boxes, pose, goal, self._sc.emb)
         if states is None:
             # Sealed: refuse — a single-pose stub, the follower runs out of path.
-            return Path(frame_id="world", poses=[pose_stamped(*pose)])
+            return Path(ts=0.0, frame_id="world", poses=[pose_stamped(*pose)])
         dense = densify_states(states, self._res)
-        return Path(frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in dense])
+        return Path(
+            ts=0.0, frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in dense]
+        )
 
 
 def densify_states(states: np.ndarray, res: float) -> list[np.ndarray]:
@@ -85,6 +91,7 @@ def densify_states(states: np.ndarray, res: float) -> list[np.ndarray]:
 
 def pose_stamped(x: float, y: float, yaw: float) -> PoseStamped:
     return PoseStamped(
+        ts=0.0,  # deterministic: nothing here reads a stamp, and caches get pickled
         frame_id="world",
         position=[float(x), float(y), 0.0],
         orientation=Quaternion.from_euler(Vector3(0.0, 0.0, float(yaw))),

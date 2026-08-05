@@ -32,15 +32,12 @@ import numpy as np
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.nav_msgs.Path import Path, Path as RefereePath
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2 as RefereeCloud
 from dimos.navigation.motion.embodiment import Embodiment
 from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation import model as go2_model
 from dimos.navigation.motion.simulation.evaluate import apply_physics
-from dimos.navigation.motion.types import (
-    Path as RefereePath,
-    PointCloud2 as RefereeCloud,
-)
 
 # Planner's view of the world, identical to the referee (sim.py CLOUD_STEP).
 CLOUD_STEP = 0.05

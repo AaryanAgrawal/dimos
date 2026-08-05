@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from dimos.msgs.nav_msgs.Path import Path as RefereePath
 from dimos.navigation.motion.adapter import floor as floor_module, planner as planner_module
 from dimos.navigation.motion.adapter.floor import FloorAnchor
 from dimos.navigation.motion.adapter.planner import (
@@ -28,7 +29,6 @@ from dimos.navigation.motion.adapter.planner import (
 )
 from dimos.navigation.motion.control.laws.seed import PursuitController
 from dimos.navigation.motion.planner.planners.gold import pose_stamped
-from dimos.navigation.motion.types import Path as RefereePath
 
 
 def test_to_nav_path_preserves_positions_and_yaw():

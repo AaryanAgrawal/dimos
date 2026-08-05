@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from dimos.msgs.helpers import resolve_msg_type
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2 as RefereeCloud
 from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
 from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
@@ -57,7 +58,6 @@ from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.planners.base import load as load_planner
 from dimos.navigation.motion.planner.planners.target import band_mask
 from dimos.navigation.motion.scenarios import Scenario
-from dimos.navigation.motion.types import PointCloud2 as RefereeCloud
 from dimos.navigation.tf_pose import OdomBasePose, base_height_above_ground
 
 if TYPE_CHECKING:

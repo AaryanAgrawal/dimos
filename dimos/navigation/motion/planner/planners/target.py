@@ -26,10 +26,11 @@ from typing import Any
 
 import numpy as np
 
+from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.motion.embodiment import Embodiment
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.scenarios import Scenario, se2_search
-from dimos.navigation.motion.types import Path, PointCloud2
 
 from .gold import densify_states, pose_stamped
 
@@ -81,9 +82,11 @@ class TargetEpisode:
             fgx, fgy, sdf_grid, (x0, y0, x1, y1), pose, goal, self._emb, self._emb.precision
         )
         if states is None:
-            return Path(frame_id="world", poses=[pose_stamped(*pose)])
+            return Path(ts=0.0, frame_id="world", poses=[pose_stamped(*pose)])
         dense = densify_states(states, self._res)
-        return Path(frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in dense])
+        return Path(
+            ts=0.0, frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in dense]
+        )
 
 
 class RustTargetEpisode:
@@ -113,8 +116,8 @@ class RustTargetEpisode:
             self._res,
         )
         if out is None or not len(out):
-            return Path(frame_id="world", poses=[pose_stamped(*pose)])
-        return Path(frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in out])
+            return Path(ts=0.0, frame_id="world", poses=[pose_stamped(*pose)])
+        return Path(ts=0.0, frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in out])
 
 
 def make_py(sc: Scenario, cfg: AvoidanceConfig | None = None, **_: Any) -> TargetEpisode:
