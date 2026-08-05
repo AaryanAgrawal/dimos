@@ -26,11 +26,13 @@ plum, because a call that matched no overload fell through to the LCM base
 import time
 
 from dimos_lcm.geometry_msgs import (
+    Point as LCMPoint,
     Pose as LCMPose,
     PoseWithCovariance as LCMPoseWithCovariance,
     Quaternion as LCMQuaternion,
     Twist as LCMTwist,
     TwistWithCovariance as LCMTwistWithCovariance,
+    Vector3 as LCMVector3,
 )
 from dimos_lcm.sensor_msgs import JointState as LCMJointState, Joy as LCMJoy
 import numpy as np
@@ -236,10 +238,15 @@ def test_pose_from_posestamped_downcasts_to_pose() -> None:
     assert p.position.to_tuple() == (1.0, 2.0, 3.0)
 
 
-def test_pose_from_lcm_keeps_lcm_orientation_defaults() -> None:
-    p = Pose(LCMPose())
-    assert p.position.to_tuple() == (0.0, 0.0, 0.0)
-    assert p.orientation.to_tuple() == (0.0, 0.0, 0.0, 0.0)
+def test_pose_from_lcm() -> None:
+    # Build the sub-messages explicitly: the generated LCM classes share one
+    # mutable default instance across every construction, so LCMPose().position
+    # carries whatever the last writer left there.
+    p = Pose(
+        LCMPose(position=LCMPoint(1.0, 2.0, 3.0), orientation=LCMQuaternion(0.0, 0.0, 0.0, 1.0))
+    )
+    assert p.position.to_tuple() == (1.0, 2.0, 3.0)
+    assert p.orientation.to_tuple() == IDENTITY
 
 
 def test_pose_position_and_orientation_are_wrapper_types() -> None:
@@ -291,8 +298,9 @@ def test_twist_copy_constructor() -> None:
 
 
 def test_twist_from_lcm() -> None:
-    t = Twist(LCMTwist())
-    assert t.linear.to_tuple() == (0.0, 0.0, 0.0)
+    t = Twist(LCMTwist(linear=LCMVector3(1.0, 2.0, 3.0), angular=LCMVector3(4.0, 5.0, 6.0)))
+    assert t.linear.to_tuple() == (1.0, 2.0, 3.0)
+    assert t.angular.to_tuple() == (4.0, 5.0, 6.0)
 
 
 def test_twist_from_twiststamped_downcasts() -> None:
@@ -363,9 +371,12 @@ def test_pwc_copy_constructor_copies_covariance() -> None:
 
 
 def test_pwc_from_lcm() -> None:
-    p = PoseWithCovariance(LCMPoseWithCovariance())
-    assert p.pose.position.to_tuple() == (0.0, 0.0, 0.0)
-    assert np.array_equal(p.covariance, np.zeros(36))
+    lcm_pose = LCMPose(
+        position=LCMPoint(1.0, 2.0, 3.0), orientation=LCMQuaternion(0.0, 0.0, 0.0, 1.0)
+    )
+    p = PoseWithCovariance(LCMPoseWithCovariance(pose=lcm_pose, covariance=list(range(36))))
+    assert p.pose.position.to_tuple() == (1.0, 2.0, 3.0)
+    assert np.array_equal(p.covariance, np.arange(36.0))
 
 
 def test_pwc_from_dict_with_pose_object() -> None:
@@ -419,8 +430,10 @@ def test_twc_copy_constructor() -> None:
 
 
 def test_twc_from_lcm() -> None:
-    t = TwistWithCovariance(LCMTwistWithCovariance())
-    assert t.twist.linear.to_tuple() == (0.0, 0.0, 0.0)
+    lcm_twist = LCMTwist(linear=LCMVector3(1.0, 2.0, 3.0), angular=LCMVector3(4.0, 5.0, 6.0))
+    t = TwistWithCovariance(LCMTwistWithCovariance(twist=lcm_twist, covariance=list(range(36))))
+    assert t.twist.linear.to_tuple() == (1.0, 2.0, 3.0)
+    assert np.array_equal(t.covariance, np.arange(36.0))
 
 
 def test_twc_from_dict() -> None:
@@ -555,6 +568,26 @@ def test_posestamped_is_a_pose() -> None:
     assert isinstance(PoseStamped(), Pose)
 
 
+def test_posestamped_inherits_pose_positional_forms() -> None:
+    """PoseStamped(x, y, z) and the 7-float form come from Pose."""
+    assert PoseStamped(3.2, 1.5, 0.0).position.to_tuple() == (3.2, 1.5, 0.0)
+    seven = PoseStamped(1, 2, 0, 0, 0, 0.1, 1)
+    assert seven.position.to_tuple() == (1.0, 2.0, 0.0)
+    assert seven.orientation.to_tuple() == (0.0, 0.0, 0.1, 1.0)
+
+
+def test_posestamped_inherits_pose_sequence_forms() -> None:
+    ps = PoseStamped([1, 2, 3], [0, 0, 0, 1])
+    assert ps.position.to_tuple() == (1.0, 2.0, 3.0)
+    assert ps.orientation.to_tuple() == IDENTITY
+
+
+def test_twiststamped_inherits_twist_positional_form() -> None:
+    ts = TwistStamped([1, 2, 3], [4, 5, 6])
+    assert ts.linear.to_tuple() == (1.0, 2.0, 3.0)
+    assert ts.angular.to_tuple() == (4.0, 5.0, 6.0)
+
+
 def test_twiststamped_keeps_explicit_ts_and_frame() -> None:
     ts = TwistStamped(ts=5.0, frame_id="base", linear=[1, 2, 3], angular=[4, 5, 6])
     assert (ts.ts, ts.frame_id) == (5.0, "base")
@@ -655,100 +688,126 @@ def test_nonzero_ts_is_always_honoured() -> None:
 
 
 # --------------------------------------------------------------------------
-# LATENT BUGS: calls that matched no plum overload fell through to the LCM
-# base __init__, which stores its arguments verbatim. The result is an object
-# whose fields hold raw lists/scalars instead of Vector3/Quaternion/Pose, and
-# which only blows up later (often in __repr__ or on encode).
+# Forms that used to build a silently-broken object
+#
+# Under plum these calls matched no overload and fell through to the LCM base
+# __init__, which stores its arguments verbatim — leaving fields holding raw
+# scalars/lists instead of Vector3/Quaternion/Pose, to blow up later in
+# __repr__ or on encode. They now either do the obvious thing or raise.
 # --------------------------------------------------------------------------
 
 
-def test_pose_from_scalar_silently_stores_raw_value() -> None:
-    assert Pose(5).position == 5
+def test_pose_from_scalar_is_an_x_only_position() -> None:
+    """Vector3(x) means (x, 0, 0), so Pose(5) is a position, not a raw 5."""
+    assert Pose(5).position.to_tuple() == (5.0, 0.0, 0.0)
 
 
-def test_pose_from_string_silently_stores_raw_value() -> None:
-    assert Pose("x").position == "x"
-
-
-def test_pose_from_two_positionals_silently_stores_raw_values() -> None:
-    p = Pose(1, 2)
-    assert (p.position, p.orientation) == (1, 2)
-
-
-def test_pose_from_three_tuple_of_sequences_silently_stores_the_tuple() -> None:
-    assert Pose(([1, 2, 3], [0, 0, 0, 1], [9])).position == ([1, 2, 3], [0, 0, 0, 1], [9])
-
-
-def test_quaternion_from_partial_positionals_silently_zero_fills_w() -> None:
-    """Three components yield w=0.0 — a zero-rotation-free, invalid quaternion."""
-    assert Quaternion(1, 2, 3).to_tuple() == (1.0, 2.0, 3.0, 0.0)
-    assert Quaternion(1, 2).to_tuple() == (1.0, 2.0, 0.0, 0.0)
-    assert Quaternion(5).to_tuple() == (5.0, 0.0, 0.0, 0.0)
-
-
-def test_quaternion_rejects_field_keywords() -> None:
-    """plum dispatches on positionals only, so an all-keyword call finds no overload."""
+def test_pose_from_string_raises() -> None:
     with pytest.raises(TypeError):
-        Quaternion(x=1, y=2, z=3, w=4)
+        Pose("x")
 
 
-def test_twist_from_single_sequence_silently_stores_raw_value() -> None:
-    assert Twist([1, 2, 3]).linear == [1, 2, 3]
+def test_pose_from_two_numeric_positionals_raises() -> None:
+    """(1, 2) is a position and an orientation, and 2 is not a quaternion."""
+    with pytest.raises(TypeError):
+        Pose(1, 2)
 
 
-def test_twist_from_scalars_silently_stores_raw_values() -> None:
-    t = Twist("x", "y")
-    assert (t.linear, t.angular) == ("x", "y")
+def test_pose_from_three_tuple_of_sequences_raises() -> None:
+    with pytest.raises((TypeError, ValueError)):
+        Pose(([1, 2, 3], [0, 0, 0, 1], [9]))
 
 
-def test_twist_mixed_positional_and_keyword_skips_vector3_conversion() -> None:
+def test_quaternion_partial_positionals_raise() -> None:
+    """A quaternion needs all four components; 3 no longer zero-fills w."""
+    for bad in ((1, 2, 3), (1, 2), (5,)):
+        with pytest.raises((TypeError, ValueError)):
+            Quaternion(*bad)
+
+
+def test_quaternion_accepts_field_keywords() -> None:
+    assert Quaternion(x=1, y=2, z=3, w=4).to_tuple() == (1.0, 2.0, 3.0, 4.0)
+
+
+def test_quaternion_partial_field_keywords_default_to_identity() -> None:
+    assert Quaternion(z=1).to_tuple() == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_quaternion_unknown_keyword_raises() -> None:
+    with pytest.raises(TypeError):
+        Quaternion(bogus=1)
+
+
+def test_twist_from_single_sequence_is_linear_only() -> None:
+    t = Twist([1, 2, 3])
+    assert t.linear.to_tuple() == (1.0, 2.0, 3.0)
+    assert t.angular.to_tuple() == (0.0, 0.0, 0.0)
+
+
+def test_twist_from_scalars_raises() -> None:
+    with pytest.raises(TypeError):
+        Twist("x", "y")
+
+
+def test_twist_mixed_positional_and_keyword_converts_both() -> None:
     t = Twist([1, 2, 3], angular=[4, 5, 6])
-    assert t.linear == [1, 2, 3]
-    assert not isinstance(t.linear, Vector3)
+    assert isinstance(t.linear, Vector3)
+    assert t.linear.to_tuple() == (1.0, 2.0, 3.0)
+    assert t.angular.to_tuple() == (4.0, 5.0, 6.0)
 
 
-def test_twist_ignores_unknown_keywords() -> None:
-    t = Twist(bogus=1)
-    assert t.linear.to_tuple() == (0.0, 0.0, 0.0)
+def test_twist_unknown_keyword_raises() -> None:
+    with pytest.raises(TypeError):
+        Twist(bogus=1)
 
 
-def test_pwc_pair_tuple_silently_stores_the_tuple_as_the_pose() -> None:
-    """The documented (pose, covariance) tuple form never reached its overload."""
+def test_pose_unknown_keyword_raises() -> None:
+    with pytest.raises(TypeError):
+        Pose(bogus=1)
+
+
+def test_pwc_pair_tuple_is_a_pose_and_a_covariance() -> None:
+    """The documented (pose, covariance) tuple form now actually fires."""
     p = PoseWithCovariance((Pose(1, 2, 3), list(range(36))))
-    assert isinstance(p.pose, tuple)
-    assert np.array_equal(p.covariance, np.zeros(36))
+    assert p.pose.position.to_tuple() == (1.0, 2.0, 3.0)
+    assert np.array_equal(p.covariance, np.arange(36.0))
 
 
-def test_pwc_rejects_field_keywords() -> None:
-    with pytest.raises(TypeError):
-        PoseWithCovariance(pose=Pose(1, 2, 3))
+def test_pwc_accepts_field_keywords() -> None:
+    p = PoseWithCovariance(pose=Pose(1, 2, 3), covariance=list(range(36)))
+    assert p.pose.position.to_tuple() == (1.0, 2.0, 3.0)
+    assert np.array_equal(p.covariance, np.arange(36.0))
 
 
-def test_twc_rejects_field_keywords() -> None:
-    with pytest.raises(TypeError):
-        TwistWithCovariance(twist=Twist([1, 2, 3], [4, 5, 6]))
+def test_twc_accepts_field_keywords() -> None:
+    t = TwistWithCovariance(twist=Twist([1, 2, 3], [4, 5, 6]))
+    assert t.twist.linear.to_tuple() == (1.0, 2.0, 3.0)
 
 
-def test_pwc_dict_with_convertable_pose_value_misroutes_to_the_pose_overload() -> None:
-    """A dict whose 'pose' is a plain sequence matches PoseConvertable, so the
-    whole dict is handed to Pose() and dies looking for a 'position' key."""
-    with pytest.raises(KeyError):
-        PoseWithCovariance({"pose": [1, 2, 3], "covariance": list(range(36))})
+def test_twc_pair_tuple_is_a_twist_and_a_covariance() -> None:
+    t = TwistWithCovariance((Twist([1, 2, 3], [4, 5, 6]), list(range(36))))
+    assert t.twist.linear.to_tuple() == (1.0, 2.0, 3.0)
+    assert np.array_equal(t.covariance, np.arange(36.0))
 
 
-def test_jointstate_dict_without_list_values_builds_nothing() -> None:
-    """{'ts': ..., 'frame_id': ...} matches no overload; fields are never set."""
+def test_pwc_dict_pose_may_be_any_pose_convertable() -> None:
+    p = PoseWithCovariance({"pose": [1, 2, 3], "covariance": list(range(36))})
+    assert p.pose.position.to_tuple() == (1.0, 2.0, 3.0)
+    assert np.array_equal(p.covariance, np.arange(36.0))
+
+
+def test_jointstate_dict_carries_ts_and_frame_id() -> None:
     j = JointState({"ts": 5.0, "frame_id": "f"})
-    with pytest.raises(AttributeError):
-        getattr(j, "frame_id")  # noqa: B009
+    assert (j.ts, j.frame_id) == (5.0, "f")
+    assert j.name == []
 
 
-def test_joy_dict_without_list_values_builds_nothing() -> None:
+def test_joy_dict_carries_ts_and_frame_id() -> None:
     j = Joy({"ts": 5.0, "frame_id": "f"})
-    with pytest.raises(AttributeError):
-        getattr(j, "frame_id")  # noqa: B009
+    assert (j.ts, j.frame_id) == (5.0, "f")
+    assert j.axes == []
 
 
-def test_posestamped_from_string_silently_stores_raw_value() -> None:
-    """A str first positional misses ts: float, so it lands in the LCM ctor."""
-    assert PoseStamped("f").position == "f"
+def test_posestamped_string_positional_is_a_timestamp_not_a_position() -> None:
+    """A str first positional is a (bogus) ts; it no longer corrupts the position."""
+    assert PoseStamped("f").position.to_tuple() == (0.0, 0.0, 0.0)

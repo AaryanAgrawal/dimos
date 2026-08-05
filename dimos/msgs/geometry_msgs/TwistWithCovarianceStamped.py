@@ -21,7 +21,6 @@ from dimos_lcm.geometry_msgs import (
     TwistWithCovarianceStamped as LCMTwistWithCovarianceStamped,
 )
 import numpy as np
-from plum import dispatch
 
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistWithCovariance import TwistWithCovariance
@@ -54,14 +53,6 @@ class TwistWithCovarianceStamped(TwistWithCovariance, Timestamped):
     ts: float
     frame_id: str
 
-    @dispatch
-    def __init__(self, ts: float = 0.0, frame_id: str = "", **kwargs) -> None:
-        """Initialize with timestamp and frame_id."""
-        self.frame_id = frame_id
-        self.ts = ts if ts != 0 else time.time()
-        super().__init__(**kwargs)
-
-    @dispatch  # type: ignore[no-redef]
     def __init__(
         self,
         ts: float = 0.0,
@@ -72,10 +63,7 @@ class TwistWithCovarianceStamped(TwistWithCovariance, Timestamped):
         """Initialize with timestamp, frame_id, twist and covariance."""
         self.frame_id = frame_id
         self.ts = ts if ts != 0 else time.time()
-        if twist is None:
-            super().__init__()
-        else:
-            super().__init__(twist, covariance)
+        super().__init__(twist, covariance)
 
     def lcm_encode(self) -> bytes:
         lcm_msg = LCMTwistWithCovarianceStamped()

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 if TYPE_CHECKING:
     import numpy as np
@@ -194,7 +194,7 @@ class Transform(Timestamped):
         else:
             raise TypeError(f"Expected Pose or PoseStamped, got {type(pose).__name__}")
 
-    def to_pose(self, **kwargs: object) -> PoseStamped:
+    def to_pose(self, **kwargs: Any) -> PoseStamped:
         """Create a Transform from a Pose or PoseStamped.
 
         Args:
@@ -207,14 +207,12 @@ class Transform(Timestamped):
         from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped as _PoseStamped
 
         # Handle both Pose and PoseStamped
-        result: PoseStamped = _PoseStamped(
-            **{
-                "position": self.translation,
-                "orientation": self.rotation,
-                "frame_id": self.frame_id,
-            },
-            **kwargs,
-        )
+        fields: dict[str, Any] = {
+            "position": self.translation,
+            "orientation": self.rotation,
+            "frame_id": self.frame_id,
+        }
+        result: PoseStamped = _PoseStamped(**fields, **kwargs)
         return result
 
     @classmethod
