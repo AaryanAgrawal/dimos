@@ -34,13 +34,13 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.control import world
 from dimos.navigation.motion.control.controller import TrajectoryController
 from dimos.navigation.motion.control.profile import encode_precision
-from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
-from dimos.navigation.motion.planner.autoresearch.scenarios import Scenario
-from dimos.navigation.motion.planner.autoresearch.types import Path as RefereePath
+from dimos.navigation.motion.control.referee import world
+from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.referee.planners.base import load as load_planner
+from dimos.navigation.motion.planner.referee.scenarios import Scenario
+from dimos.navigation.motion.planner.referee.types import Path as RefereePath
 from dimos.navigation.motion.simulation.evaluate import (
     FITTED_ACTUATOR_TAU,
     FITTED_COMMAND_DELAY,

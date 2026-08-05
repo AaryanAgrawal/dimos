@@ -70,7 +70,7 @@ goal_reached = "std_msgs.Bool"
 dimos-module = { path = "../../../../../native/rust/dimos-module" }
 # The two pure crates, with their python feature off: a baked host is linked
 # statically and must not drag libpython symbols in through a transitive pyo3.
-dimos-motion2-target = { path = "../../planner/autoresearch/rust", default-features = false }
+dimos-motion2-target = { path = "../../planner/rust", default-features = false }
 dimos-motion2-tc = { path = "../../control/rust", default-features = false }
 lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

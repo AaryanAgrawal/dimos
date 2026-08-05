@@ -33,8 +33,8 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.planner.autoresearch.scenarios import Embodiment, Scenario
-from dimos.navigation.motion.planner.autoresearch.types import (
+from dimos.navigation.motion.planner.referee.scenarios import Embodiment, Scenario
+from dimos.navigation.motion.planner.referee.types import (
     Path as RefereePath,
     PointCloud2 as RefereeCloud,
 )

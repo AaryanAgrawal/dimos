@@ -10,7 +10,7 @@ global path -> carrot -> local planner -> follower -> cmd_vel.
 dimos run go2-zenoh-motion
 
 # the rust planner must be built first
-uv run maturin develop --uv --release -m dimos/navigation/motion/planner/autoresearch/rust/Cargo.toml
+uv run maturin develop --uv --release -m dimos/navigation/motion/planner/rust/Cargo.toml
 
 # replay a real recording through the planner: rerun view with the
 # required-precision circles (radius = clearance hint, red/yellow/green =

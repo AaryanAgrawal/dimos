@@ -6,19 +6,30 @@ MuJoCo env, `control/` executes plans in it and judges the execution.
 go2-zenoh blueprints. Run from the repo root; per-package `tools.md` has the
 full menus.
 
-## planner ([planner/autoresearch/README.md](planner/autoresearch/README.md))
+`planner/` and `control/` are each a runner (`python -m ...planner` /
+`...control`), a `referee/` that scores whatever the runner picked, and
+`research/{auto,ml}` where candidates come from. Any candidate is a
+`module:factory` string, so all of them go through the same judge:
+
+```bash
+python -m dimos.navigation.motion.planner --score --planner gold
+python -m dimos.navigation.motion.control --score --controller seed
+python -m dimos.navigation.motion.control --score --controller my.candidate:make
+```
+
+## planner ([planner/referee/README.md](planner/referee/README.md))
 
 ```bash
 # score the evolved rust planner: curated 16, or the full 56-world battery
-python -m dimos.navigation.motion.planner.autoresearch --score
-python -m dimos.navigation.motion.planner.autoresearch --score --gen 40 --jobs 8
+python -m dimos.navigation.motion.planner --score
+python -m dimos.navigation.motion.planner --score --gen 40 --jobs 8
 
 # watch a plan in rerun (2D referee view: truth, cloud, sweep, gold,
 # required-precision circles along the candidate path)
-python -m dimos.navigation.motion.planner.autoresearch --spawn --score -s corridor_reverse
+python -m dimos.navigation.motion.planner --spawn --score -s corridor_reverse
 
 # rebuild the crate after editing rust/
-uv run maturin develop --uv --release -m dimos/navigation/motion/planner/autoresearch/rust/Cargo.toml
+uv run maturin develop --uv --release -m dimos/navigation/motion/planner/rust/Cargo.toml
 ```
 
 ## simulation ([simulation/tools.md](simulation/tools.md))

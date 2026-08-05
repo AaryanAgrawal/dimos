@@ -49,15 +49,15 @@ import numpy as np
 from dimos.msgs.helpers import resolve_msg_type
 from dimos.navigation.motion.adapter.floor import anchor_to_floor, estimate_floor
 from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
-from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
-from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS, Scenario
-from dimos.navigation.motion.planner.autoresearch.types import PointCloud2 as RefereeCloud
+from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.referee.planners.base import load as load_planner
+from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS, Scenario
+from dimos.navigation.motion.planner.referee.types import PointCloud2 as RefereeCloud
 from dimos.navigation.tf_pose import OdomBasePose, base_height_above_ground
 
 if TYPE_CHECKING:
     from dimos.memory2.store.base import Store
-    from dimos.navigation.motion.planner.autoresearch.planners.base import PlannerEpisode
+    from dimos.navigation.motion.planner.referee.planners.base import PlannerEpisode
 
 # Stream names as the zenoh recorder slugs them (topic -> name, "/" -> "_").
 LOCAL_MAP = "dimos_local_map_sensor_msgs.PointCloud2"

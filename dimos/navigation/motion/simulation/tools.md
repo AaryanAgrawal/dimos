@@ -102,7 +102,7 @@ when the geom count gets silly.
 episode, alongside the curated and generated batteries:
 
 ```bash
-python -m dimos.navigation.motion.planner.autoresearch --recorded athens.npz -s athens
+python -m dimos.navigation.motion.planner --recorded athens.npz -s athens
 python -m dimos.navigation.motion.control --recorded athens.npz -s athens --view
 ```
 

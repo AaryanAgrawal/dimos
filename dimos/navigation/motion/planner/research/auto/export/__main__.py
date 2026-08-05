@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI for the lab exporter: python -m dimos.navigation.motion.planner.autoresearch.export <dest>"""
+"""CLI for the lab exporter: python -m dimos.navigation.motion.planner.research.auto.export <dest>"""
 
 import argparse
 from pathlib import Path

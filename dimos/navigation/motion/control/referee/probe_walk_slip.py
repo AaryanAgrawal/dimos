@@ -24,8 +24,8 @@ differences the executed body pose to recover what the request is actually
 worth in metres per second. Run it whenever the policy blob changes -- the
 constant in the law is a property of that blob, not of the worlds.
 
-    python -m dimos.navigation.motion.control.probe_walk_slip          # magnitude sweep
-    python -m dimos.navigation.motion.control.probe_walk_slip --dirs   # heading + yaw sweep
+    python -m dimos.navigation.motion.control.referee.probe_walk_slip          # magnitude sweep
+    python -m dimos.navigation.motion.control.referee.probe_walk_slip --dirs   # heading + yaw sweep
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.control.controller import ControllerConfig
-from dimos.navigation.motion.control.episode import EpisodeConfig, run_episode
-from dimos.navigation.motion.planner.autoresearch.scenarios import GO2, Scenario
+from dimos.navigation.motion.control.referee.episode import EpisodeConfig, run_episode
+from dimos.navigation.motion.planner.referee.scenarios import GO2, Scenario
 from dimos.navigation.motion.simulation.policy import FreePolicy
 from dimos.utils.data import get_data
 

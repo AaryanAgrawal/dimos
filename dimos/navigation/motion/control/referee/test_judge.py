@@ -15,16 +15,16 @@
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.control import world
-from dimos.navigation.motion.control.episode import EpisodeConfig, EpisodeResult
-from dimos.navigation.motion.control.judge import (
+from dimos.navigation.motion.control.referee import world
+from dimos.navigation.motion.control.referee.episode import EpisodeConfig, EpisodeResult
+from dimos.navigation.motion.control.referee.judge import (
     cross_track,
     executed_clearance,
     score_episode,
     summarize,
 )
-from dimos.navigation.motion.planner.autoresearch.scenarios import Box, Scenario
-from dimos.navigation.motion.planner.autoresearch.types import (
+from dimos.navigation.motion.planner.referee.scenarios import Box, Scenario
+from dimos.navigation.motion.planner.referee.types import (
     Path as RefereePath,
     PoseStamped as RefereePose,
 )
@@ -168,7 +168,7 @@ def test_summarize_counts() -> None:
 
 
 def test_active_cross_track_scores_against_the_plan_of_the_time() -> None:
-    from dimos.navigation.motion.control.judge import active_cross_track
+    from dimos.navigation.motion.control.referee.judge import active_cross_track
 
     r = _result(lateral=0.3)
     # a replan at t=7 that starts at the (drifted) robot: y=0.3
@@ -185,7 +185,7 @@ def test_active_cross_track_scores_against_the_plan_of_the_time() -> None:
 
 
 def test_plan_churn_measures_forced_replans() -> None:
-    from dimos.navigation.motion.control.judge import plan_churn
+    from dimos.navigation.motion.control.referee.judge import plan_churn
 
     r = _result()
     straight = _plan()

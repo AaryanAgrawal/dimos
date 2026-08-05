@@ -19,9 +19,9 @@ import numpy as np
 import pytest
 
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.motion.control import world
-from dimos.navigation.motion.planner.autoresearch.scenarios import SCENARIOS, Scenario
-from dimos.navigation.motion.planner.autoresearch.types import (
+from dimos.navigation.motion.control.referee import world
+from dimos.navigation.motion.planner.referee.scenarios import SCENARIOS, Scenario
+from dimos.navigation.motion.planner.referee.types import (
     Path as RefereePath,
     PoseStamped as RefereePose,
 )

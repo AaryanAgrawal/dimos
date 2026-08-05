@@ -38,13 +38,13 @@ import zlib
 import numpy as np
 
 from dimos.navigation.motion.control.controller import load as load_controller
-from dimos.navigation.motion.control.episode import (
+from dimos.navigation.motion.control.referee.episode import (
     DomainRandomization,
     EpisodeConfig,
     run_episode,
 )
-from dimos.navigation.motion.control.judge import score_episode
-from dimos.navigation.motion.planner.autoresearch.scenarios import (
+from dimos.navigation.motion.control.referee.judge import score_episode
+from dimos.navigation.motion.planner.referee.scenarios import (
     GO2,
     GenRules,
     Scenario,

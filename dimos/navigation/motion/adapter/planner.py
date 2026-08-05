@@ -45,12 +45,12 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.adapter.floor import FloorAnchor
-from dimos.navigation.motion.control import world as world_bridge
 from dimos.navigation.motion.control.profile import encode_precision
-from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.autoresearch.planners.base import PlannerEpisode, load
-from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS, Scenario
-from dimos.navigation.motion.planner.autoresearch.types import (
+from dimos.navigation.motion.control.referee import world as world_bridge
+from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.referee.planners.base import PlannerEpisode, load
+from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS, Scenario
+from dimos.navigation.motion.planner.referee.types import (
     Path as RefereePath,
     PointCloud2 as RefereeCloud,
 )

@@ -14,7 +14,7 @@
 
 """Export a self-contained autoresearch lab from this package.
 
-    python -m dimos.navigation.motion.planner.autoresearch.export <dest>
+    python -m dimos.navigation.motion.planner.research.auto.export <dest>
 
 The output is a standalone research workspace: the referee copied as
 `referee/`, the current rust planner seeded as `candidate/`, the bench/
@@ -42,7 +42,9 @@ import sys
 from . import caches, locks
 
 HERE = Path(__file__).resolve().parent
-PACKAGE = HERE.parent  # dimos/navigation/motion/planner/autoresearch
+PLANNER = HERE.parents[2]  # dimos/navigation/motion/planner
+PACKAGE = PLANNER / "referee"  # the copyable referee unit (relative imports throughout)
+RUST = PLANNER / "rust"  # the production crate, seeded as the lab's candidate/
 
 # Baseline of the seeded candidate, measured on the source package's battery
 # (56 worlds, gen 40 seed 0) at kit-authoring time. gold/consistency are
@@ -58,8 +60,6 @@ BASELINE = {
 }
 
 REFEREE_EXCLUDE = {
-    "export",
-    "rust",
     "__pycache__",
     ".se2_cache.pkl",
     ".gen_cache.pkl",
@@ -150,7 +150,7 @@ def run(
     # -- seed the candidate ------------------------------------------------
     say("seeding candidate/ from rust/")
     shutil.copytree(
-        PACKAGE / "rust", dest / "candidate", ignore=shutil.ignore_patterns("target", "__pycache__")
+        RUST, dest / "candidate", ignore=shutil.ignore_patterns("target", "__pycache__")
     )
 
     # -- harness + docs ----------------------------------------------------

@@ -37,10 +37,10 @@ import numpy as np
 
 from dimos.navigation.motion.adapter.floor import estimate_floor
 from dimos.navigation.motion.adapter.follower import path_clearance
-from dimos.navigation.motion.planner.autoresearch.geometry import AvoidanceConfig
-from dimos.navigation.motion.planner.autoresearch.planners.base import load as load_planner
-from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS, Scenario
-from dimos.navigation.motion.planner.autoresearch.types import PointCloud2 as RefereeCloud
+from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
+from dimos.navigation.motion.planner.referee.planners.base import load as load_planner
+from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS, Scenario
+from dimos.navigation.motion.planner.referee.types import PointCloud2 as RefereeCloud
 
 FLOOR_BAND = (0.05, 0.45)  # the planner's z-band over the estimated local floor
 FULL_SPEED_CLEAR = 0.35  # AvoidanceConfig.speed_clearance, circle cap

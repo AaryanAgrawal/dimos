@@ -242,7 +242,7 @@ _mls_planner_motion = MLSPlannerNative.blueprint(
 # policy in the matched MuJoCo env, NOT against the gait the robot actually runs:
 # `hinted` asks up to 0.95 m/s commanded, and `blind` feeds its twist through a gait-slip
 # inverse keyed to that same blob (~23% over-speed on a different gait). Re-measure with
-# `python -m dimos.navigation.motion.control.probe_walk_slip` against the deployed gait
+# `python -m dimos.navigation.motion.control.referee.probe_walk_slip` against the deployed gait
 # and re-key before trusting either at speed. Until then, dial the ceiling down here
 # rather than in the law -- e.g. controller_config=ControllerConfig(max_speed=0.5).
 #

@@ -371,7 +371,7 @@ What the exemplars do, all runnable with no hardware:
    python script publishing on the mapped keys (the
    `examples/native-modules/rust_ping_pong.py` pattern).
 5. **Parity stays in the pure crates** (`control/test_rust_parity.py`,
-   `planner/autoresearch/rust/tests/invariants.rs`). Module crates do NOT
+   `planner/rust/tests/invariants.rs`). Module crates do NOT
    re-test law/planner numerics — they test wiring, gating, staleness and
    lifecycle. Existing python module tests (`adapter/test_planner.py`,
    `adapter/test_follower.py`, `movement_manager/test_movement_manager.py`,
@@ -454,7 +454,7 @@ remapped to `planner_path`; the follower track is `hinted`.
   `dimos-motion-adapter`, lib `dimos_motion_adapter`). Module id
   `motion_planner`, `[[bin]] name = "motion_planner"`. Depends on
   `dimos-motion2-target` and `dimos-motion2-tc` (both
-  `default-features = false`, path deps `../../planner/autoresearch/rust` and
+  `default-features = false`, path deps `../../planner/rust` and
   `../../control/rust`).
 - **Python reference**: `dimos/navigation/motion/adapter/planner.py`
   (`MotionPlanner` / `MotionPlannerConfig`). The wrapper class to write:

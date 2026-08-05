@@ -57,7 +57,7 @@ from dimos.navigation.motion.control.controller import (
 )
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.control.tracks import TRACKS
-from dimos.navigation.motion.planner.autoresearch.scenarios import EMBODIMENTS
+from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS
 from dimos.navigation.tf_pose import OdomBasePose
 from dimos.utils.logging_config import setup_logger
 
@@ -130,7 +130,7 @@ class TrajectoryFollowerConfig(ModuleConfig):
     # reading a different world than the one that was planned. The referee's
     # control/world.py takes `emb.width / 2`, so this does too -- naming the
     # EMBODIMENT rather than a number, so body dimensions live in exactly one
-    # place (planner/autoresearch/scenarios.py). There is deliberately no
+    # place (planner/referee/scenarios.py). There is deliberately no
     # half_width override: a `float | None` cannot cross into the native module
     # (`to_config_dict` drops None and `#[native_config]` bans Option), and a
     # knob the deployed twin cannot carry is a knob that drifts.

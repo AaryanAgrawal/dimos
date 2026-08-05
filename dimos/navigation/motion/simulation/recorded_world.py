@@ -410,7 +410,7 @@ def scene(
     """
     import mujoco
 
-    from dimos.navigation.motion.control import world
+    from dimos.navigation.motion.control.referee import world
     from dimos.navigation.motion.simulation import model as go2_model
     from dimos.navigation.motion.simulation.evaluate import apply_physics
 

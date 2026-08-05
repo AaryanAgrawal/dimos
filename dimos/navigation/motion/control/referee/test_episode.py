@@ -21,10 +21,10 @@ this file stays small; the battery lives behind the CLI.
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.control.episode import EpisodeConfig, run_episode
-from dimos.navigation.motion.control.judge import score_episode
 from dimos.navigation.motion.control.laws.seed import PursuitController
-from dimos.navigation.motion.planner.autoresearch.scenarios import SCENARIOS
+from dimos.navigation.motion.control.referee.episode import EpisodeConfig, run_episode
+from dimos.navigation.motion.control.referee.judge import score_episode
+from dimos.navigation.motion.planner.referee.scenarios import SCENARIOS
 from dimos.navigation.motion.simulation.policy import FreePolicy
 from dimos.utils.data import get_data
 
@@ -59,7 +59,7 @@ def test_boxed_in_refuses(policy: FreePolicy) -> None:
 
 
 def test_dr_draws_are_seeded_and_in_range() -> None:
-    from dimos.navigation.motion.control.episode import DomainRandomization, EpisodeConfig
+    from dimos.navigation.motion.control.referee.episode import DomainRandomization, EpisodeConfig
 
     dr = DomainRandomization(physics={"damping": (0.1, 0.4)})
     base = EpisodeConfig()
@@ -86,7 +86,7 @@ def test_commands_respect_hardware_slew(policy: FreePolicy) -> None:
 
 def test_corridor_replan_battery_serial(policy: FreePolicy) -> None:
     """Reality mode (5 Hz replanning) through the battery path, one world."""
-    from dimos.navigation.motion.control.battery import group_summaries, run_battery
+    from dimos.navigation.motion.control.referee.battery import group_summaries, run_battery
 
     rows = run_battery(
         [(_scenario("corridor"), "curated")],

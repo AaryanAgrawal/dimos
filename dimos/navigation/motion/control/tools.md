@@ -37,7 +37,7 @@ python -m dimos.navigation.motion.control --score --blind
 python -m dimos.navigation.motion.control --score --blind --controller seed
 
 # what the gait actually delivers (provenance for walk_gain/walk_slip)
-python -m dimos.navigation.motion.control.probe_walk_slip
+python -m dimos.navigation.motion.control.referee.probe_walk_slip
 
 # tests and types
 python -m pytest dimos/navigation/motion/control -q
