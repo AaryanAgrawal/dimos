@@ -61,6 +61,22 @@ it is why everything above compares command-to-command instead:
 python -m dimos.navigation.motion.simulation data/ml-trajectory-research/unitree_himloco01.mcap --view
 ```
 
+**Score a field navigation run** — a `*.zenoh.mcap` + sidecar pair instead of a
+VR session: commands from `cmd_vel`, ground truth from Point-LIO resolved to
+`base_link`. Reports twist-tracking error binned by how aggressive the command
+was, which is what says whether the fitted physics covers a regime:
+
+```bash
+python -m dimos.navigation.motion.simulation.field data/ml-trajectory-research/20260806-063428.zenoh.mcap --policy data/ml-trajectory-research/freewalk_mcf.bin --fitted
+```
+
+`--from 6.9 --to 9.0` bounds what gets reported (seconds in, or a UTC
+`HH:MM:SS`) while the rollout still starts where the robot was standing —
+`--sidecar` names the pair's other half when it is not the matching `*.mcap`,
+`--view --ghost` watches it against the LIO track, `--lag 0` disables the
+measured LIO clock correction (leave it on: it is 170 ms on this pair, and
+skipping it manufactures a quarter-metre of path error during a fast spin).
+
 **Drive it by hand** — constant command instead of a recording:
 
 ```python

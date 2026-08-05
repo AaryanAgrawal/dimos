@@ -24,6 +24,10 @@ python -m dimos.navigation.motion.simulation.search data/ml-trajectory-research/
 Swap in `unitree_v11_gait_height01.mcap` + `v11_final.bin` for the
 gait-height net (46-obs, commandable body height).
 
+`field.py` scores the same sim against a *field* run — a `cmd_vel` + Point-LIO
+recording pair off the robot, no tracker — and bins the tracking error by
+maneuver regime, which is what answers "does the fit cover this?".
+
 `recorded_world.py` freezes a real navigation run's map into a static world —
 a stability-filtered voxel union, greedy-merged into collision boxes for this
 scene and into band rectangles the referee reads as scenario obstacles. See
