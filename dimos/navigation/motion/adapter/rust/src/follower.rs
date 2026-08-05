@@ -182,6 +182,8 @@ pub struct Config {
     #[validate(range(min = 0.0))]
     pub idle_speed: f64,
     /// Zero the twist once the held path is this old, measured from ARRIVAL.
+    /// Sized to the replan gate: plans arrive per map (~1 Hz, gaps to ~1.3 s),
+    /// so anything under ~2 s stutters the walk on healthy cadence.
     #[validate(range(exclusive_min = 0.0))]
     pub max_path_age_s: f64,
 }
@@ -975,7 +977,7 @@ mod tests {
             base_frame: "base_link".to_string(),
             obstacle_model: "body_band".into(),
             idle_speed: 0.02,
-            max_path_age_s: 1.0,
+            max_path_age_s: 2.5,
         }
     }
 

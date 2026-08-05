@@ -73,7 +73,9 @@ class TrajectoryFollowerNativeConfig(NativeModuleConfig):
     # Zero the twist once the held path is this old, measured from ARRIVAL. The
     # planner is co-located, so this guards planner death, not the link.
     # 1.0 s = five missed 5 Hz replans. Picked, not measured -- tune on robot.
-    max_path_age_s: float = 1.0
+    # Must clear the replan gate's cadence: plans arrive per MAP (~1 Hz, gaps
+    # to ~1.3 s observed), so a 1.0 ceiling zeroes the twist mid-stride.
+    max_path_age_s: float = 2.5
 
 
 class TrajectoryFollowerNative(NativeModule):
