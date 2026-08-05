@@ -484,6 +484,26 @@ def plans(rec: Recording) -> list[dict[str, float]]:
 # ------------------------------------------------------------------- replay --
 
 
+def _plan_bodies(rr: Any, xy: np.ndarray, base_z: float, emb: Any, color: list[int]) -> Any:
+    """Wireframe body boxes along a plan, one every ~0.4 m of arc, yawed with it."""
+    seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    arc = np.concatenate([[0.0], np.cumsum(seg)])
+    keep = [0]
+    for i in range(1, len(xy)):
+        if arc[i] - arc[keep[-1]] >= 0.4:
+            keep.append(i)
+    yaws = []
+    for i in keep:
+        d = xy[min(i + 1, len(xy) - 1)] - xy[max(i - 1, 0)]
+        yaws.append(float(np.arctan2(d[1], d[0])) if np.linalg.norm(d) > 1e-9 else 0.0)
+    return rr.Boxes3D(
+        centers=[[float(xy[i][0]), float(xy[i][1]), base_z] for i in keep],
+        half_sizes=[[emb.length / 2, emb.width / 2, 0.2]] * len(keep),
+        rotation_axis_angles=[rr.RotationAxisAngle(axis=(0, 0, 1), radians=y) for y in yaws],
+        colors=[color] * len(keep),
+    )
+
+
 def episode(planner: str, embodiment: str) -> PlannerEpisode:
     scenario = Scenario("diagnose", [], goal=(0.0, 0.0), emb=EMBODIMENTS[embodiment])
     ep = load_planner(planner)(scenario, AvoidanceConfig())
@@ -534,6 +554,7 @@ def replay(
     rows: list[dict[str, float]] = []
     started = time.perf_counter()
     previous: np.ndarray | None = None
+    emb = EMBODIMENTS[embodiment]
     for tick in ticks:
         out = plan(tick.imap, tick.pose, tick.goal, tick.floor_prior)
         row = {
@@ -551,8 +572,10 @@ def replay(
             rr.set_time("time", timestamp=tick.ts)
             rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
         if rr is not None and len(out) > 1:
+            base_z = tick.pose[3] if len(tick.pose) > 3 else 0.0
             z = np.full(len(out), 0.02)
             rr.log("world/replay", rr.LineStrips3D([np.column_stack([out, z])], radii=0.012))
+            rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [255, 255, 255, 60]))
             rr.log(
                 "world/recorded",
                 rr.LineStrips3D(
@@ -560,6 +583,10 @@ def replay(
                     colors=[[100, 160, 255]],
                     radii=0.012,
                 ),
+            )
+            rr.log(
+                "world/recorded/bodies",
+                _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 60]),
             )
     wall = time.perf_counter() - started
 
