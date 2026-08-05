@@ -24,6 +24,14 @@ python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/202608
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-offset 0.25
 
+# view the rrd it wrote (or use --spawn above to stream live)
+rerun recordings/<rec>-diagnose.rrd
+# in the 3D view: world/map grey cloud (1:4 subsampled), world/appeared green /
+# world/disappeared red voxels per frame (full resolution), world/robot the
+# base_link box (oriented, rides through holds), world/carrot the goal dot,
+# world/recorded blue = the plan the robot published, world/replay = the same
+# tick re-planned offline. A frozen box + carrot with no replay line = a hold.
+
 # tests and types
 python -m pytest dimos/navigation/motion/adapter -q
 python -m mypy dimos/navigation/motion/adapter

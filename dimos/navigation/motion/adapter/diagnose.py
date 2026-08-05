@@ -108,7 +108,7 @@ class Tick:
 
     ts: float
     imap: int  # index into Recording.maps
-    pose: tuple[float, float, float]
+    pose: tuple[float, ...]  # x, y, yaw, base z
     goal: tuple[float, float]
     recorded: np.ndarray  # the published plan, xy
     # Where tf put the ground under the base at this tick: the bound the floor
@@ -127,7 +127,7 @@ class Recording:
     maps: list[tuple[float, np.ndarray]]  # local_map: ts, points (n, 3)
     odom_ts: np.ndarray
     odom_xy: np.ndarray  # sensor position, which is what the raycaster crops around
-    poses: list[tuple[float, float, float] | None]  # base_link (x, y, yaw)
+    poses: list[tuple[float, ...] | None]  # base_link (x, y, yaw, z)
     globals: list[tuple[float, np.ndarray]]  # planner_path: ts, xy
     plans: list[tuple[float, np.ndarray]]  # path: ts, xy
     ticks: list[Tick] = field(default_factory=list)
@@ -165,12 +165,14 @@ def load_recording(
     base = OdomBasePose(tf, base_frame)
     maps = [(o.ts, o.data.points_f32()) for o in _stream(store, LOCAL_MAP)]
     odom = [(o.ts, o.data) for o in _stream(store, ODOMETRY)]
-    poses: list[tuple[float, float, float] | None] = []
+    poses: list[tuple[float, ...] | None] = []
     priors: list[float | None] = []
     base_height: float | None = None
     for _, msg in odom:
         p = base.resolve(msg)
-        poses.append((p.position.x, p.position.y, p.orientation.euler[2]) if p else None)
+        poses.append(
+            (p.position.x, p.position.y, p.orientation.euler[2], p.position.z) if p else None
+        )
         if lidar_height > 0.0 and base_height is None and msg.child_frame_id != base_frame:
             leg = base.sensor_to_base(msg.child_frame_id)
             if leg is not None:
@@ -507,7 +509,7 @@ def replay(
 
     def plan(
         imap: int,
-        pose: tuple[float, float, float],
+        pose: tuple[float, ...],
         goal: tuple[float, float],
         prior: float | None = None,
     ) -> np.ndarray:
@@ -518,7 +520,11 @@ def replay(
             floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
             if floor is not None:
                 pts = anchor_to_floor(pts, floor, ground_margin)
-        return _xy(ep.plan(RefereeCloud.from_numpy(pts, frame_id="odom"), pose, goal))
+        return _xy(
+            ep.plan(
+                RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
+            )
+        )
 
     t = ticks[len(ticks) // 2]
     twice = plan(t.imap, t.pose, t.goal, t.floor_prior), plan(t.imap, t.pose, t.goal, t.floor_prior)
@@ -541,8 +547,10 @@ def replay(
         }
         rows.append(row)
         previous = out
-        if rr is not None and len(out) > 1:
+        if rr is not None:
             rr.set_time("time", timestamp=tick.ts)
+            rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
+        if rr is not None and len(out) > 1:
             z = np.full(len(out), 0.02)
             rr.log("world/replay", rr.LineStrips3D([np.column_stack([out, z])], radii=0.012))
             rr.log(
@@ -553,8 +561,6 @@ def replay(
                     radii=0.012,
                 ),
             )
-            rr.log("world/robot", rr.Points3D([[*tick.pose[:2], 0.0]], radii=0.09))
-            rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
     wall = time.perf_counter() - started
 
     d = np.array([r["div"] for r in rows])
@@ -791,6 +797,26 @@ def main() -> None:
     rr.init("motion-diagnose", spawn=args.spawn)
     if not args.spawn:
         rr.save(rrd)
+
+    # the base_link box at full odometry rate (30 Hz), whatever passes run --
+    # plan ticks are ~1 Hz under the replan gate, far too coarse to watch
+    emb = EMBODIMENTS[args.embodiment]
+    rr.log(
+        "world/robot",
+        rr.Boxes3D(half_sizes=[[emb.length / 2, emb.width / 2, 0.2]], colors=[[0, 255, 127]]),
+        static=True,
+    )
+    for ots, pose in zip(rec.odom_ts, rec.poses, strict=True):
+        if pose is None:
+            continue
+        rr.set_time("time", timestamp=float(ots))
+        rr.log(
+            "world/robot",
+            rr.Transform3D(
+                translation=[pose[0], pose[1], pose[3] if len(pose) > 3 else 0.0],
+                rotation=rr.RotationAxisAngle(axis=(0, 0, 1), radians=pose[2]),
+            ),
+        )
 
     churn_rows = churn(rec, args.voxel, rr) if "churn" in passes else []
     plan_rows = plans(rec) if "plans" in passes else []
