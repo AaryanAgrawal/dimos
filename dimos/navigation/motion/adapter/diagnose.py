@@ -859,6 +859,8 @@ def main() -> None:
         rr.Boxes3D(half_sizes=[[emb.length / 2, emb.width / 2, 0.2]], colors=[[0, 255, 127]]),
         static=True,
     )
+    last_body: tuple[float, ...] | None = None
+    n_bodies = 0
     for ots, pose in zip(rec.odom_ts, rec.poses, strict=True):
         if pose is None:
             continue
@@ -870,6 +872,22 @@ def main() -> None:
                 rotation=rr.RotationAxisAngle(axis=(0, 0, 1), radians=pose[2]),
             ),
         )
+        # breadcrumb bodies: a wireframe stays behind at each pose the body
+        # actually swept, appearing at the moment it was there
+        moved = last_body is None or np.hypot(pose[0] - last_body[0], pose[1] - last_body[1]) >= 0.3
+        turned = last_body is not None and abs(pose[2] - last_body[2]) >= np.radians(23)
+        if moved or turned:
+            rr.log(
+                f"world/track/bodies/{n_bodies:04d}",
+                rr.Boxes3D(
+                    centers=[[pose[0], pose[1], pose[3] if len(pose) > 3 else 0.0]],
+                    half_sizes=[[emb.length / 2, emb.width / 2, 0.2]],
+                    rotation_axis_angles=[rr.RotationAxisAngle(axis=(0, 0, 1), radians=pose[2])],
+                    colors=[[0, 200, 100, 60]],
+                ),
+            )
+            last_body = pose
+            n_bodies += 1
     # the track the body actually drove -- "recorded", vs the plans it was asked
     # to drive (requested) and what the planner says offline (replay)
     walked = np.array([[p[0], p[1], 0.01] for p in rec.poses if p is not None])
