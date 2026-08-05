@@ -24,7 +24,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from dimos.cli.bake import BakeError
+from dimos.cli.bake.errors import BakeError
 
 BUILDERS = ("cargo", "cross", "zigbuild")
 

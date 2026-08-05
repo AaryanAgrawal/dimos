@@ -11,3 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
+"""The failure `dimos bake` raises."""
+
+from __future__ import annotations
+
+
+class BakeError(Exception):
+    """A bake that cannot proceed: bad registry, unwireable graph, failed build."""
