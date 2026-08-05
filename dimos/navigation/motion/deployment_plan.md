@@ -1,8 +1,37 @@
 # Deploying the motion stack onto the robot
 
 The time-critical half of the motion stack — local planner, trajectory
-controller, cmd_vel mux — moves onto the Go2. Mapping stays on the laptop for
-now. This is the plan, the reasoning behind the cut, and what is still missing.
+controller, cmd_vel mux — runs on the Go2 itself as one baked binary. Mapping
+stays on the laptop. Quick start below; the reasoning, measurements and sharp
+edges follow.
+
+## Quick start: run it on your Go2
+
+From the repo's dev shell (nix provides the whole toolchain — rust with the
+aarch64 target, zig, cargo-zigbuild; nothing to install):
+
+    dimos bake motion_planner trajectory_follower cmd_vel_mux \
+        -o motion-host --builder zigbuild --target aarch64-unknown-linux-gnu.2.31
+
+    scp target/dimos-bake/motion-host/target/aarch64-unknown-linux-gnu/release/motion-host \
+        root@<robot>:/root/motion-host/
+
+On the robot, install `dimos-motion-host.service` (this directory) — it carries
+the load-bearing zenoh wiring: the host dials the go2web bridge over loopback
+(`DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447`, that is where odometry comes from),
+listens on `7448` for the laptop, and reads its whole config as one JSON line
+on stdin (`/root/motion-host/motion-host.json` — see "Config is the sharp
+edge" below before writing it).
+
+    systemctl enable --now dimos-motion-host
+
+Laptop side, dial both robot ports — the bridge's and the host's:
+
+    dimos --robot-ips <ip>:7447,<ip>:7448 run go2-zenoh-motion
+
+The `.2.31` in the bake triple pins the glibc floor to the Go2's Ubuntu 20.04
+(glibc 2.31); the artifact links at ≤2.30, so it runs there regardless of how
+new your build machine is.
 
 ## The cut
 
