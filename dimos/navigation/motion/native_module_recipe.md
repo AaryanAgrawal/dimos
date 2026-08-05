@@ -482,10 +482,7 @@ remapped to `planner_path`; the follower track is `hinted`.
   | `world_frame` | `"odom"` | |
   | `base_frame` | `"base_link"` | tf resolves the sensor-stamped odometry into it |
   | `replan_on_change` | `True` | plan on a new local map or a moved global route, not on every tick of the clock |
-  | `floor_anchor` | `True` | re-zero the cloud on the floor under the robot before planning (`adapter/floor.py`) |
-  | `lidar_height` | `0.0` | lidar height above ground; with tf it gives the floor prior, without which anchoring stays off |
-  | `ground_margin_m` | `0.16` | drop returns this close to the estimated floor, so the ground slab cannot wall the robot in |
-  | `cloud_z_offset` | `0.0` | manual trim on the map's z origin, applied at extraction |
+  | `obstacle_model` | `"body_band"` | which returns are obstacles (`motion/obstacles.py`); rust validates the name and builds the model from the embodiment's vertical geometry (`emb::vert_by_tag`) |
   | `max_map_age_s` | `5.0` | the staleness guard |
   | `viz_publish_hz` | `2.0` | rate-cap for `plan_body` |
 
@@ -559,9 +556,7 @@ remapped to `planner_path`; the follower track is `hinted`.
   | `control_frequency` | `10.0` | |
   | `goal_tolerance` | `0.20` | |
   | `embodiment` | `"go2"` | half-width = `Emb` width / 2 from the pure crate — same one-place-for-body-dims policy the python states (follower.py:117-124). The python `half_width: float \| None` override does not cross (Option ban); drop it from the native wrapper. |
-  | `floor_anchor` | `True` | re-zero the local map on the floor under the robot before the room hint is measured off it (`adapter/floor.py`) — the same band the planner planned in |
-  | `lidar_height` | `0.0` | lidar height above ground; with tf it gives the floor prior, without which anchoring stays off |
-  | `ground_margin_m` | `0.16` | drop returns this close to the estimated floor, so the ground slab is not read as a wall |
+  | `obstacle_model` | `"body_band"` | the planner's model (`motion/obstacles.py`) — the room hint has to be measured off the slice the plan was priced in |
   | `idle_speed` | `0.02` | for the stall log classification only |
   | `max_path_age_s` | `1.0` | **NEW — the guards-table todo.** Chosen default: 1.0 s = five missed 5 Hz replans; the planner is co-located so this guards planner death, not the link. Marked here as a picked default, tune on robot. |
 

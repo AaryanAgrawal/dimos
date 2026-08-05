@@ -587,14 +587,14 @@ def replay(
         imap: int,
         pose: tuple[float, ...],
         goal: tuple[float, float],
-        model: Any,
+        band: Any,
     ) -> np.ndarray:
         # The module's own order (adapter/planner.py::_plan_once): the trim
         # corrects the map's z origin, then the model reads the result.
         ground_z = ground_of(pose)
-        pts = hard_points(model, rec.maps[imap][1] + offset, ground_z)
+        pts = hard_points(band, rec.maps[imap][1] + offset, ground_z)
         seen["pts"] = pts
-        seen["shift"] = ground_z if model.body_referenced else 0.0
+        seen["shift"] = ground_z if band.body_referenced else 0.0
         planned = ep.plan(
             RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
         )

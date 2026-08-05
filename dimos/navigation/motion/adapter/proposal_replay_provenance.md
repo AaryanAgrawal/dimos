@@ -39,7 +39,7 @@ per planning tick on a new topic, atomically with the plan it describes:
       odom_ts     float   # msg.ts of the odometry sample the pose came from
       pose        f64[4]  # the RESOLVED base pose used: x, y, yaw, z
       goal        f64[2]  # the carrot handed to the search
-      floor       f64     # floor the band was anchored to (nan = unanchored)
+      ground_z    f64     # the surface the band was referenced to (nan = raw band)
       config_hash u32     # planner-relevant config fields, fnv1a over repr
 
 The first three fields are *identities* (which messages). The next three are
@@ -50,7 +50,7 @@ the identified inputs and compares against the witness before planning.
     identity mismatch impossible -> pairing is exact by construction
     pose differs    -> tf resolution / OdomBasePose drift
     goal differs    -> carrot_along drift
-    floor differs   -> estimate_floor / anchoring drift
+    ground differs  -> base pose / obstacle-model drift
     all match, plan differs -> the search itself changed (or rust/python skew)
 
 That turns "replay diverges" from a shrug into a five-way pointer.
@@ -72,7 +72,7 @@ already stores (three `float` fields on existing state) and one publish.
 No new locks, no extra work in the hot path beyond serializing ~70 bytes.
 
 `config_hash` covers exactly the fields that change the search: z knobs
-(floor_anchor, ground_margin_m, lidar_height, cloud_z_offset), lookahead,
+(obstacle_model, embodiment), lookahead,
 planner id, embodiment tag. Hash printed at startup; replay prints both on
 mismatch and refuses `--strict`.
 

@@ -245,10 +245,40 @@ move. This recording cannot score it: the replay is a planner harness and the
 follower's twist is not in the file — every number above is the planner's, and
 re-running `--only replay` after the change reproduces them unchanged.
 
+## Superseded: fix 1 is now the body, not an estimate
+
+Everything above about `FloorAnchor` / `estimate_floor` is history. Two robot
+recordings the next morning (`20260805-173105`, `-173133`) settled it: the
+deployed anchor **never engaged**. `diagnose.py`'s config sniff, replaying each
+tick under each band and keeping the one whose holds agree with what was
+published, says raw 18/18 and 21/21 against anchored 9/18 and 10/21 — and 40/41
+against 25/41 on this recording. The knob was on and the band was raw anyway,
+because anchoring needs a tf prior it silently degrades without, and an
+estimator that fails quietly into exactly the behaviour it was written to
+replace is not a reference.
+
+The replacement is `motion/obstacles.py`: the base rides `emb.base_height`
+above the surface its feet stand on, so `ground_z = base_z - base_height` and
+the cloud is re-referenced to it. No scene estimate, no prior, no tolerance, no
+degradation mode. The 0.16 m ground exclusion survives — that number was about
+voxel quantisation, not about anchoring, and the second bullet above still
+holds. `--model raw_band` replays the band this recording actually ran.
+
+Replaying all 410 ticks under it, against the "Fixes landed" table above:
+
+| | holds | mean plan arc | mean divergence |
+|---|---|---|---|
+| raw band (what the robot ran) | 39 | 6.96 m | — |
+| floor-anchored (deleted) | 175 | 6.61 m | 0.299 m |
+| **body_band** | **133** | **5.25 m** | 0.29 m |
+
+Same regime as the estimator, slightly less blocking and a shorter plan: the
+per-tick quantile wandered, a body reference does not.
+
 ## Artifacts
 
 - `recordings/20260805-033007.zenoh-diagnose.rrd` — per-frame appeared/disappeared
   voxels, recorded vs replayed plan, robot, carrot
 - `recordings/20260805-033007.zenoh-diagnose/{churn,plans,latency}.svg`
-- tool: `dimos/navigation/motion/adapter/diagnose.py` (`--only`, `--z-offset`,
-  `--spawn`, `--no-ablate`)
+- tool: `dimos/navigation/motion/adapter/diagnose.py` (`--only`, `--model`,
+  `--z-offset`, `--spawn`, `--no-ablate`)

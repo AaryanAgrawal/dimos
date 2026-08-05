@@ -22,7 +22,7 @@ python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save 
 # replay + input ablation, input ages. Writes an rrd + svgs under recordings/.
 python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
-python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-offset 0.25
+python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --model raw_band
 
 # view the rrd it wrote (or use --spawn above to stream live)
 rerun recordings/<rec>-diagnose.rrd
@@ -31,8 +31,14 @@ rerun recordings/<rec>-diagnose.rrd
 # world/requested blue = the plan the robot published (+ wireframe bodies with
 # real yaw), world/robot + world/track green = what the body actually drove
 # (box at 30 Hz, track line), world/replay white = the same tick re-planned
-# offline. world/carrot = the goal dot. A frozen box + carrot with no replay
-# line = a hold.
+# offline. world/obstacles orange = the winning obstacle model's hard set, i.e.
+# the very cloud the replayed search saw, drawn back on the map. world/carrot =
+# the goal dot. A frozen box + carrot with no replay line = a hold.
+#
+# The replay reads obstacles through motion/obstacles.py and by default SNIFFS
+# which model the deployed stack ran -- it replays a tick subsample under each
+# and keeps the one whose holds agree with the recorded plans, so a recording
+# made before body_band landed still replays as it ran. --model names one.
 
 # tests and types
 python -m pytest dimos/navigation/motion/adapter -q
@@ -44,8 +50,8 @@ feeds the carrot: a point `goal_lookahead_m` (5 m) of arc along it. The local
 planner replans to the carrot at `replan_hz` over the raycaster's `local_map`;
 a refusal is a single-pose stub the follower holds on while MLS reroutes. The
 follower annotates the path with clearance from the local map (the sim judge's
-room hint, computed on-robot) and stops through a goal latch that ignores
-sub-tolerance carrot jitter. Both modules take odometry as LIO stamps it — at
+room hint, computed on-robot, off the planner's own obstacle model) and stops
+through a goal latch that ignores sub-tolerance carrot jitter. Both modules take odometry as LIO stamps it — at
 the sensor — and resolve it into `base_link` off tf (`navigation/tf_pose.py`),
 dropping messages until the mount leg arrives.
 
