@@ -130,21 +130,21 @@ def planner_cloud(sc: Scenario) -> RefereeCloud:
     return RefereeCloud.from_numpy(pts.astype(np.float32), frame_id="world")
 
 
-# Cloud slice that can touch the body, as the planner sees it (target.py).
-Z_BAND = (0.05, 0.45)
+def path_clearance(ref: RefereePath, obstacles: np.ndarray, emb: Embodiment) -> np.ndarray:
+    """Per-waypoint room hint (m), derived from the planner's own obstacles.
 
+    Nearest obstacle minus the half-width — a speed HINT for the controller,
+    not a safety contract: it is what a path annotator on the robot would
+    compute from the local map, and the judge measures truth separately.
+    Nothing to hit = infinite room.
 
-def path_clearance(ref: RefereePath, cloud: RefereeCloud, emb: Embodiment) -> np.ndarray:
-    """Per-waypoint room hint (m), derived from the planner's own cloud.
-
-    Nearest cloud point in the body z-band minus the half-width — a speed
-    HINT for the controller, not a safety contract: it is what a path
-    annotator on the robot would compute from the local map, and the judge
-    measures truth separately. Empty cloud = infinite room.
+    `obstacles` is the obstacle model's hard set (motion/obstacles.py), every
+    row of which is an obstacle; z rides along and is ignored. There is no
+    second z rule here, because the planner is priced against the SAME set and
+    a band of our own would price a different world than the one planned.
     """
     xy = np.array([[p.position.x, p.position.y] for p in ref.poses]).reshape(-1, 2)
-    pts = cloud.points_f32()
-    band = pts[(pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])][:, :2]
+    band = np.asarray(obstacles, dtype=np.float32).reshape(-1, 3)[:, :2]
     if not len(band) or not len(xy):
         return np.full(len(xy), np.inf)
     from scipy.spatial import cKDTree

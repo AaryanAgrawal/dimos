@@ -41,7 +41,7 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path, Path as RefereePath
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, PointCloud2 as RefereeCloud
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.motion.adapter.diagnostics import StallReporter
 from dimos.navigation.motion.control.profile import encode_precision
@@ -57,10 +57,10 @@ from dimos.utils.logging_config import setup_logger
 logger = setup_logger()
 
 
-def annotate(ref: RefereePath, cloud: RefereeCloud, emb: Any, ts: float, frame_id: str) -> Path:
+def annotate(ref: RefereePath, obstacles: np.ndarray, emb: Any, ts: float, frame_id: str) -> Path:
     """Referee path -> stamped nav Path: precision profile in the timestamps."""
     nav = to_nav_path(ref, ts=ts, frame_id=frame_id)
-    clearance = world_bridge.path_clearance(ref, cloud, emb)
+    clearance = world_bridge.path_clearance(ref, obstacles, emb)
     return encode_precision(nav, clearance, t0=ts)
 
 
@@ -307,17 +307,18 @@ class MotionPlanner(Module):
     ) -> bool:
         """Plan and publish. False when the search raised and nothing went out."""
         assert self._episode is not None
-        # The search gets the obstacles, in the frame the model read them: the
-        # follower's room hint is measured off the very same points, so the
-        # governor and the stamped profile cannot be pricing different worlds.
+        # The search gets the obstacles, as xy: which returns are obstacles was
+        # decided here, by the model, and the search has no z to decide it again
+        # with. The follower's room hint is measured off the very same points,
+        # so the governor and the stamped profile cannot be pricing different
+        # worlds.
         pts = hard_points(self._model, cloud.points_f32(), ground_z)
-        ref_cloud = RefereeCloud.from_numpy(pts, frame_id=self.config.world_frame)
         try:
-            ref = self._episode.plan(ref_cloud, pose, goal)
+            ref = self._episode.plan(pts[:, :2], pose, goal)
         except Exception:
             logger.exception("planner failed; keeping the last published path")
             return False
-        plan = annotate(ref, ref_cloud, self._emb, ts=time.time(), frame_id=self.config.world_frame)
+        plan = annotate(ref, pts, self._emb, ts=time.time(), frame_id=self.config.world_frame)
         self.path.publish(plan)
         self._stall.ok(f"planning: {len(plan.poses)} waypoints")
         self._publish_viz(plan)

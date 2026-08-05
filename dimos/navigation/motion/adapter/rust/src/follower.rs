@@ -488,10 +488,11 @@ fn dialect_band() -> Params {
 /// The per-waypoint room hint off the model's own hard set: the twin of
 /// `follower.py::_clearance_for`'s recompute branch.
 ///
-/// THE MODEL HAS TO BE THE PLANNER'S. `path_clearance` slices an absolute
-/// 0.05..0.45 m, so measuring it on the raw map on a LIO stack governs the
-/// speed by a slab over the robot's head-room while the plan was priced 0.28 m
-/// lower. Free rather than a method so it can be exercised with no transport.
+/// THE MODEL HAS TO BE THE PLANNER'S. `path_clearance` measures every point it
+/// is handed, so feeding it the raw map would govern the speed by whatever the
+/// lidar saw -- ceilings included -- while the plan was priced against the
+/// model's hard set. Free rather than a method so it can be exercised with no
+/// transport.
 pub fn measure_room(
     model: &dyn ObstacleModel,
     points: &[[f32; 3]],
@@ -1009,9 +1010,9 @@ mod tests {
         obstacles::load(&cfg.obstacle_model, &vert).expect("known model")
     }
 
-    /// The room hint the raw band gives, which is what the body reference has
-    /// to change -- and what it degrades to on a ground already at zero.
-    fn raw_room(points: &[[f32; 3]]) -> Vec<f64> {
+    /// The hint measured straight off `points`, with no model in between --
+    /// so a test can name the set it expects the governor to have read.
+    fn room_off(points: &[[f32; 3]]) -> Vec<f64> {
         let xy: Vec<[f64; 2]> = waypoints().iter().map(|s| [s[0], s[1]]).collect();
         clearance::path_clearance(&xy, points, half_width())
     }
@@ -1049,26 +1050,39 @@ mod tests {
     }
 
     #[test]
-    fn a_room_hint_on_a_ground_already_at_zero_is_the_raw_band() {
+    fn a_room_hint_on_a_ground_already_at_zero_matches_the_raw_band() {
         // the referee's sim worlds put the plan poses on the ground; the two
         // models agree there, so the hint the judge hands the controller
         // cannot move
         let room = room_with_a_post(0.0);
+        let raw = Config {
+            obstacle_model: "raw_band".into(),
+            ..config()
+        };
         let cfg = config();
         let got = measure_room(model(&cfg).as_ref(), &room, 0.0, &waypoints(), half_width());
-        assert_eq!(got, raw_room(&room));
+        let want = measure_room(model(&raw).as_ref(), &room, 0.0, &waypoints(), half_width());
+        assert_eq!(got, want);
     }
 
     #[test]
     fn the_room_hint_is_the_model_hard_set_not_the_whole_map() {
-        // the governor has to measure the very points the search routed around
-        let room = room_with_a_post(-0.28);
+        // The governor has to measure the very points the search routed
+        // around. `path_clearance` takes every point it is handed, so handing
+        // it the whole map would price a ceiling as room taken away -- which
+        // is what the control below is: a return 1.5 m over the path.
+        let mut room = room_with_a_post(-0.28);
+        room.push([0.25, 0.0, -0.28 + 1.5]);
         let cfg = config();
         let m = model(&cfg);
         let hard = obstacles::hard_points(m.as_ref(), &room, -0.28);
         assert_eq!(
             measure_room(m.as_ref(), &room, -0.28, &waypoints(), half_width()),
-            raw_room(&hard)
+            room_off(&hard)
+        );
+        assert!(
+            room_off(&room)[0] < room_off(&hard)[0],
+            "the whole map has to read TIGHTER, or this test proves nothing"
         );
     }
 

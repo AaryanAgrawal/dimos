@@ -50,7 +50,7 @@ pub const MAX_YAW_RATE: f64 = 1.4;
 /// Clearance (m) -> speed ceiling (m/s): creep at the floor, cruise with room.
 ///
 /// A port of `profile.governor_speed`. Infinite clearance is expected and
-/// meaningful -- an empty z-band means nothing can touch the body, so the
+/// meaningful -- no obstacles means nothing can touch the body, so the
 /// fraction saturates and the waypoint gets cruise.
 // `max` then `min` rather than `clamp`, which is what clippy wants here:
 // f64::clamp PANICS when handed a NaN. No caller can produce one (clearance is

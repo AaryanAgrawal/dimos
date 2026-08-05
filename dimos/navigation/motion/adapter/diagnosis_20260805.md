@@ -121,6 +121,11 @@ recorded plan (blue) and the replayed plan overlaid.
 `planners/target.py` slices the cloud at `Z_BAND = (0.05, 0.45)` — absolute z,
 assuming the plan poses sit on the ground. In this recording they do not:
 
+> Since superseded twice over: the band moved into `motion/obstacles.py` as the
+> `raw_band` model, and the search then stopped slicing at all — it takes
+> obstacle xy and nothing else. `RAW_BAND` is the only place this span is
+> written now.
+
 - floor in the map, 2nd percentile within 1.5 m of the robot: **z = −0.28 m**
 - `base_link` resolved off tf: z = +0.05 m (`ROBOT_HEIGHT 0.45 − mount 0.16 = 0.29 m`
   above ground — the odom origin is at base height, not at the floor)
@@ -237,7 +242,8 @@ Two things the numbers here cannot say:
 **The follower is now on the same band.** Its room hint
 (`adapter/follower.py::_clearance_for`) anchors the local map through the same
 `FloorAnchor`, off the same tf prior, before `path_clearance` slices `Z_BAND`
-out of it — so its speed governor and the planner's stamped profile measure one
+out of it (that second slice is gone now: `path_clearance` measures the model's
+hard set as given) — so its speed governor and the planner's stamped profile measure one
 world again. Unanchored (no `lidar_height`, no mount leg, or
 `floor_anchor=False`) it degrades to the raw band exactly as the planner does,
 and on a floor already at zero it is a no-op, so the referee's sim scores cannot

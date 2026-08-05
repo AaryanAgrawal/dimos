@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The room hint: how much space each waypoint has, from a cloud.
+//! The room hint: how much space each waypoint has, from a set of obstacles.
 //!
 //! Shared facility, not a law. Both deployed modules need it and need it to
 //! agree -- the planner stamps the profile it computes here into the path
@@ -25,17 +25,17 @@
 //! `adapter/follower.py:path_clearance` (follower), which are the same
 //! function written twice; both are the specification.
 //!
+//! The input is an obstacle model's hard set (`obstacles.rs`): every point
+//! handed in is something the body can hit, and z rides along unread. There is
+//! no band here, deliberately -- the planner searches the SAME set, so a rule
+//! of our own would price a world nobody planned, and would cut off any body
+//! taller than whatever band this file happened to carry.
+//!
 //! A HINT, not a safety contract. It is the nearest thing that could touch the
 //! body, minus the body -- the judge measures actual clearance separately, and
 //! nothing here is allowed to be the reason a robot does or does not collide.
 
 use std::collections::HashMap;
-
-/// The cloud slice that can touch the body, in the map's own z. Matches
-/// `Z_BAND` in `control/world.py`, `adapter/follower.py` and
-/// `planner/autoresearch/planners/target.py` -- the planner searches over this
-/// slice, so the room hint has to be measured over the same one.
-pub const Z_BAND: (f64, f64) = (0.05, 0.45);
 
 /// Grid cell size (m). Only a performance knob: the query below is exact at
 /// any cell size, because it keeps expanding rings until the ring itself is
@@ -140,14 +140,14 @@ fn ring(cx: i32, cy: i32, k: i32) -> Vec<Cell> {
     out
 }
 
-/// Per-waypoint room (m): nearest z-band point minus the body half-width.
+/// Per-waypoint room (m): nearest obstacle minus the body half-width.
 ///
-/// A port of the two python `path_clearance` twins. `points` is the raw cloud
-/// as it arrives (xyz, f32); the z-band filter and the widening to f64 happen
-/// here so both callers cannot do it differently.
+/// A port of the two python `path_clearance` twins. `points` is the obstacle
+/// model's hard set (xyz, f32) -- every row counts, z included or not; the
+/// widening to f64 happens here so both callers cannot do it differently.
 ///
-/// An empty band or an empty path is infinite room, matching the python: a map
-/// with nothing in the body slice is not a tight map, it is an empty one, and
+/// No obstacles or an empty path is infinite room, matching the python: a map
+/// with nothing the body can hit is not a tight map, it is an empty one, and
 /// the governor saturates to cruise on it.
 ///
 /// Only the DISTANCE is returned, never which point produced it, which is why
@@ -158,14 +158,7 @@ pub fn path_clearance(xy: &[[f64; 2]], points: &[[f32; 3]], half_width: f64) -> 
     if xy.is_empty() {
         return Vec::new();
     }
-    let band: Vec<[f64; 2]> = points
-        .iter()
-        .filter(|p| {
-            let z = p[2] as f64;
-            z > Z_BAND.0 && z < Z_BAND.1
-        })
-        .map(|p| [p[0] as f64, p[1] as f64])
-        .collect();
+    let band: Vec<[f64; 2]> = points.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
     if band.is_empty() {
         return vec![f64::INFINITY; xy.len()];
     }

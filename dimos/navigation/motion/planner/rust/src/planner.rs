@@ -13,8 +13,14 @@
 // limitations under the License.
 
 //! Port of the motion2 target planner spec (planners/target.py + se2_search):
-//! cloud z-band -> 2D distance field -> SE(2) lattice search -> shortcut
+//! obstacle xy -> 2D distance field -> SE(2) lattice search -> shortcut
 //! smoothing -> densified (x, y, yaw) path. Deterministic by construction.
+//!
+//! The intake is PLANAR and takes every point handed to it. Which returns are
+//! obstacles is decided before the call, by an obstacle model that knows the
+//! body (`motion/obstacles.py`); a z rule in here as well would be a second
+//! source of truth for the same question, and would silently truncate any body
+//! taller than the band it happened to be written with.
 //!
 //! The spec's semantics are reproduced exactly; what changed is *when* the
 //! work happens. The baseline built the whole fine distance field and the
@@ -30,7 +36,6 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::f64::consts::PI;
 
-pub const Z_BAND: (f64, f64) = (0.05, 0.45);
 pub const FINE: f64 = 0.05;
 pub const PAD: f64 = 1.5;
 const CELL: f64 = 0.12;
@@ -244,11 +249,11 @@ impl PointBuckets {
         }
         // Collapse coincident points, bucket by bucket.
         //
-        // The cloud is a z-band SLICE of box surfaces sampled on a 3D grid, so
-        // every vertical face contributes the same (x, y) once per z layer:
-        // the band is 0.4 m tall at CLOUD_STEP 0.05, and measured across the
-        // battery the projected band carries 6.4-8.4 copies of each distinct
-        // point. `nearest` reduces a multiset of squared distances with `min`,
+        // The referee's obstacles are a z-band SLICE of box surfaces sampled
+        // on a 3D grid and projected to xy, so every vertical face contributes
+        // the same (x, y) once per z layer: the band is 0.4 m tall at
+        // CLOUD_STEP 0.05, and measured across the battery it carries 6.4-8.4
+        // copies of each distinct point. `nearest` reduces a multiset of squared distances with `min`,
         // and a repeat contributes a value the set already holds, so dropping
         // repeats cannot move the result by one bit -- it only stops the ring
         // sweep from re-measuring the same wall seven times. It also shrinks
@@ -466,16 +471,12 @@ impl World {
 }
 
 pub fn build_world(
-    points: &[[f64; 3]],
+    points: &[[f64; 2]],
     pose: (f64, f64, f64),
     goal: (f64, f64),
     cap: f64,
 ) -> World {
-    let band: Vec<(f64, f64)> = points
-        .iter()
-        .filter(|p| p[2] > Z_BAND.0 && p[2] < Z_BAND.1)
-        .map(|p| (p[0], p[1]))
-        .collect();
+    let band: Vec<(f64, f64)> = points.iter().map(|p| (p[0], p[1])).collect();
     // The working area is taken over {goal, cloud} and then grown to cover the
     // pose in whole grid periods -- deliberately NOT over {pose, goal, cloud}.
     //
@@ -1816,8 +1817,10 @@ pub fn densify(
     dense
 }
 
+/// `points` is every obstacle, as xy. There is no z here to slice: see the
+/// module note.
 pub fn plan(
-    points: &[[f64; 3]],
+    points: &[[f64; 2]],
     pose: (f64, f64, f64),
     goal: (f64, f64),
     emb: &Emb,
@@ -1841,16 +1844,15 @@ pub fn plan(
 mod tests {
     use super::*;
 
-    /// Ring of points (square outline) at z, spacing `step`, half-size `h`.
-    fn ring(cx: f64, cy: f64, h: f64, step: f64) -> Vec<[f64; 3]> {
+    /// Ring of obstacle points (square outline), spacing `step`, half-size `h`.
+    fn ring(cx: f64, cy: f64, h: f64, step: f64) -> Vec<[f64; 2]> {
         let mut pts = Vec::new();
         let mut t = -h;
-        let z = 0.2;
         while t <= h {
-            pts.push([cx - h, cy + t, z]);
-            pts.push([cx + h, cy + t, z]);
-            pts.push([cx + t, cy - h, z]);
-            pts.push([cx + t, cy + h, z]);
+            pts.push([cx - h, cy + t]);
+            pts.push([cx + h, cy + t]);
+            pts.push([cx + t, cy - h]);
+            pts.push([cx + t, cy + h]);
             t += step;
         }
         pts
@@ -1913,7 +1915,7 @@ mod tests {
         tight.retain(|p| !(p[1].abs() < 0.30 && p[0] > 3.0));
         for x in [3.0f64, 3.05, 3.1, 3.15, 3.2] {
             for s in [-1.0f64, 1.0] {
-                tight.push([x, s * 0.30, 0.2]);
+                tight.push([x, s * 0.30]);
             }
         }
         let worlds = [Vec::new(), ring(2.0, 0.0, 0.25, 0.05), tight];
@@ -2008,7 +2010,7 @@ mod tests {
         let mut pts = Vec::new();
         let mut y = -4.0;
         while y <= 4.0 {
-            pts.push([2.0, y, 0.2]);
+            pts.push([2.0, y]);
             y += 0.02;
         }
         let path = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).unwrap();

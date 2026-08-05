@@ -14,7 +14,7 @@
 
 """Closed-loop episodes: referee world -> planner -> controller -> matched sim.
 
-One episode = one scenario. The planner sees the referee's analytic cloud and
+One episode = one scenario. The planner sees the referee's analytic obstacles and
 the controller sees a 29 Hz zero-order-hold pose (the pointlio cadence) — the
 twist it emits then rides the exact command chain the sim-to-real fit
 validated: per-axis hardware slew, fitted transport delay, fitted actuator lag.
@@ -38,6 +38,7 @@ from dimos.navigation.motion.control.controller import TrajectoryController
 from dimos.navigation.motion.control.profile import encode_precision
 from dimos.navigation.motion.control.referee import world
 from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.obstacles import hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.base import load as load_planner
 from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation.evaluate import (
@@ -230,7 +231,12 @@ def run_episode(
     planner = load_planner(cfg.planner)(sc, AvoidanceConfig())
     planner.reset()
     controller.reset()
-    cloud = world.planner_cloud(sc)
+    # The obstacles the planner is allowed to see and the hint is priced off --
+    # one set, named here rather than re-derived by whoever reads it. These
+    # worlds stand on z = 0, the frame `raw_band` is written for.
+    obstacles = hard_points(
+        load_model("raw_band", sc.emb), world.planner_cloud(sc).points_f32(), 0.0
+    )
 
     sim_dt = model.opt.timestep
     decim = max(1, round(CONTROL_DT / sim_dt))
@@ -308,14 +314,14 @@ def run_episode(
                 # -- plan / replan from the controller's own pose
                 if t >= next_plan_t:
                     t0 = _time.process_time()
-                    ref = planner.plan(cloud, visible_pose, sc.goal)
+                    ref = planner.plan(obstacles[:, :2], visible_pose, sc.goal)
                     plan_ms.append((_time.process_time() - t0) * 1e3)
                     plans.append(ref)
                     plan_t.append(t)
                     nav_path = world.to_nav_path(ref, ts=t, frame_id=frame_id)
                     # always computed for the judge's plan_tight diagnostic;
                     # the controller only sees it when annotation is on
-                    clr = world.path_clearance(ref, cloud, sc.emb)
+                    clr = world.path_clearance(ref, obstacles, sc.emb)
                     plan_min_clear.append(float(np.min(clr)) if len(clr) else math.inf)
                     # the wire dialect: precision rides the stamps, sim and
                     # robot paths speak identically (control/profile.py)

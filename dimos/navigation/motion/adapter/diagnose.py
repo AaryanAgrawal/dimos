@@ -49,12 +49,17 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from dimos.msgs.helpers import resolve_msg_type
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2 as RefereeCloud
 from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
-from dimos.navigation.motion.obstacles import OBSTACLE_MODELS, hard_points, load as load_model
+from dimos.navigation.motion.obstacles import (
+    OBSTACLE_MODELS,
+    RAW_BAND,
+    ObstacleModel,
+    hard_points,
+    load as load_model,
+)
 from dimos.navigation.motion.planner.planners.base import load as load_planner
 from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.tf_pose import OdomBasePose
@@ -70,7 +75,6 @@ PLANNER_PATH = "dimos_planner_path_nav_msgs.Path"
 PATH = "dimos_path_nav_msgs.Path"
 TF = "dimos_tf_tf2_msgs.TFMessage"
 
-Z_BAND = (0.05, 0.45)  # planners/target.py: the cloud slice that can touch the body
 FLIP_M = 0.5  # plan divergence (m, mean over the common arc) that counts as a mind change
 KEY_OFF, KEY_SPAN = 8192, 16384  # voxel key packing: +-655 m at 0.08 m
 SUPPORT_MIN = 4  # RayTracingVoxelMapConfig.support_min on the deployed blueprint
@@ -338,11 +342,18 @@ class Frame:
     crop: Crop
 
 
-def churn(rec: Recording, voxel: float, rr: Any = None) -> list[dict[str, float]]:
-    """Per-frame voxel appear/disappear, split boundary vs interior, whole map vs band."""
+def churn(
+    rec: Recording, voxel: float, band_model: ObstacleModel, rr: Any = None
+) -> list[dict[str, float]]:
+    """Per-frame voxel appear/disappear, split boundary vs interior, whole map vs band.
+
+    `band_model` reads the map in the frame it was recorded in -- this is a
+    statement about what the mapper emitted, not about any body, so it is
+    `raw_band`.
+    """
     frames = []
     for ts, pts in rec.maps:
-        slab = pts[(pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])]
+        slab = pts[band_model.field(pts).hard]
         frames.append(
             Frame(
                 ts=ts,
@@ -427,7 +438,7 @@ def churn(rec: Recording, voxel: float, rr: Any = None) -> list[dict[str, float]
         f"{100 * inside.sum() / total.sum():.0f}% of it\n"
         f"crop radius {radius.min():.2f}..{radius.max():.2f} m, |step| mean "
         f"{np.abs(np.diff(radius)).mean():.2f} m max {np.abs(np.diff(radius)).max():.2f} m\n"
-        f"planner band z {Z_BAND[0]}..{Z_BAND[1]}: {band:.0f} voxels | appear "
+        f"map band z {RAW_BAND[0]}..{RAW_BAND[1]}: {band:.0f} voxels | appear "
         f"{col('band_appear').mean():.0f} ({100 * col('band_appear').mean() / band:.1f}%) gone "
         f"{col('band_gone').mean():.0f} ({100 * col('band_gone').mean() / band:.1f}%) per frame\n"
         f"interior vanishings with < {SUPPORT_MIN} neighbours (thin/isolated): "
@@ -595,9 +606,7 @@ def replay(
         pts = hard_points(band, rec.maps[imap][1] + offset, ground_z)
         seen["pts"] = pts
         seen["shift"] = ground_z if band.body_referenced else 0.0
-        planned = ep.plan(
-            RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
-        )
+        planned = ep.plan(pts[:, :2], (pose[0], pose[1], pose[2]), goal)
         return np.array(
             [[q.position.x, q.position.y, q.orientation.euler.yaw] for q in planned.poses]
         ).reshape(-1, 3)
@@ -986,7 +995,9 @@ def main() -> None:
             static=True,
         )
 
-    churn_rows = churn(rec, args.voxel, rr) if "churn" in passes else []
+    churn_rows = (
+        churn(rec, args.voxel, load_model("raw_band", emb), rr) if "churn" in passes else []
+    )
     plan_rows = plans(rec) if "plans" in passes else []
     if "replay" in passes:
         replay(

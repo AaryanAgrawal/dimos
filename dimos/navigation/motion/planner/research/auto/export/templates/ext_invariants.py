@@ -61,13 +61,14 @@ problems: list[str] = []
 
 
 def slalom_cloud() -> np.ndarray:
+    """Obstacle xy: the search is planar and takes every row (planners/base.py)."""
     pts = []
     for cx, cy in ((1.5, 0.6), (3.0, -0.6), (4.5, 0.6), (6.0, -0.6)):
         t = -0.45
         while t <= 0.45:
             for x, y in ((cx - 0.45, cy + t), (cx + 0.45, cy + t),
                          (cx + t, cy - 0.45), (cx + t, cy + 0.45)):
-                pts.append([x, y, 0.2])
+                pts.append([x, y])
             t += 0.05
     return np.ascontiguousarray(np.array(pts, dtype=np.float64))
 
@@ -103,7 +104,7 @@ def check_no_memoization(cloud: np.ndarray) -> None:
 
     def shifted(k: int) -> float:
         d = 0.37 * (k + 1)
-        pts = np.ascontiguousarray(cloud + np.array([d, d, 0.0]))
+        pts = np.ascontiguousarray(cloud + np.array([d, d]))
         return timed(pts, (d, d, 0.0), (7.5 + d, d))
 
     fresh_b = min(shifted(k) for k in range(3))

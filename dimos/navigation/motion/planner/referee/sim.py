@@ -53,6 +53,7 @@ from dimos.navigation.motion.geometry import (
     station_poses,
     turn_mask,
 )
+from dimos.navigation.motion.obstacles import hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.base import load
 from dimos.navigation.motion.scenarios import (
     GEN_COUNT,
@@ -149,6 +150,11 @@ def judge(
         np.concatenate([b.surface(TRUTH_STEP) for b in sc.boxes]) if sc.boxes else np.empty((0, 3))
     )
     cloud = PointCloud2.from_numpy(cloud_pts.astype(np.float32), frame_id="world")
+    # What the candidate is allowed to see, as obstacle xy: the search itself is
+    # planar (planners/base.py), so the harness names the z rule here rather
+    # than leaving one buried in a planner. These worlds stand on z = 0, which
+    # is the frame `raw_band` is written for.
+    obstacles = hard_points(load_model("raw_band", sc.emb), cloud.points_f32(), 0.0)[:, :2]
     plan = straight_plan(
         sc.start, sc.goal
     )  # display only: the hint concept lives inside candidates
@@ -164,7 +170,7 @@ def judge(
         # this is the work the plan actually cost, and it does not absorb
         # whatever else the machine was doing during the call.
         t0 = time.process_time()
-        outs.append(episode.plan(cloud, sc.start, sc.goal))
+        outs.append(episode.plan(obstacles, sc.start, sc.goal))
         times.append((time.process_time() - t0) * 1e3)
         if time_limit_ms is not None and times[-1] > time_limit_ms:
             # Over the eval budget: stop feeding this candidate this world.
@@ -188,7 +194,7 @@ def judge(
         tang = pxy[s_idx + 1] - pxy[s_idx - 1]
         spot = (float(pxy[s_idx][0]), float(pxy[s_idx][1]), math.atan2(tang[1], tang[0]))
         remainder = Path(ts=0.0, frame_id=prev_out.frame_id, poses=prev_out.poses[s_idx:])
-        new_out = episode.plan(cloud, spot, sc.goal)
+        new_out = episode.plan(obstacles, spot, sc.goal)
         consist = max(consist, near_field_diff(remainder, new_out, n))
         chain.append((np.array([[p.position.x, p.position.y] for p in new_out.poses]), pxy[s_idx]))
         prev_out = new_out
@@ -445,15 +451,16 @@ def render(
     fin = np.array([[p.position.x, p.position.y, 0.08] for p in v.final.poses])
     strip("avoid/final", fin, [255, 255, 255])
     # Required precision, as the wire dialect encodes it (path timestamps):
-    # circle radius = the per-waypoint clearance hint -- nearest z-band cloud
-    # point minus the half-width, capped at 0.35 m where the governor grants
-    # full speed anyway. Red = at/under the precision floor (creep + track
-    # tight), yellow = governed, green = full speed. Keep the math in step
-    # with control/world.path_clearance and control/profile.py.
+    # circle radius = the per-waypoint clearance hint -- nearest obstacle point
+    # minus the half-width, capped at 0.35 m where the governor grants full
+    # speed anyway. Red = at/under the precision floor (creep + track tight),
+    # yellow = governed, green = full speed. Keep the math in step with
+    # control/world.path_clearance and control/profile.py -- which means
+    # reading the obstacles through a model, as the harness does.
     if len(pts) and len(fin):
         from scipy.spatial import cKDTree
 
-        band = pts[(pts[:, 2] > 0.05) & (pts[:, 2] < 0.45)][:, :2]
+        band = hard_points(load_model("raw_band", e), pts, 0.0)[:, :2]
         if len(band):
             d, _ = cKDTree(band).query(fin[:, :2])
             clear = d - e.width / 2.0

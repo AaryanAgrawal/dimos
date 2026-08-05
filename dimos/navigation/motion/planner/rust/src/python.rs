@@ -19,9 +19,11 @@ use pyo3::prelude::*;
 
 use crate::planner::{plan as plan_impl, Emb};
 
-/// One plan call. points: (N, 3) float64 cloud in world frame; emb: (length,
-/// width, center_off, comfort, precision, strafe, reverse, yaw_w). Returns an
-/// (M, 3) array of (x, y, yaw) at `resolution`, or None to refuse.
+/// One plan call. points: (N, 2) float64 obstacle xy in world frame -- every
+/// row is an obstacle, the caller's model already decided which (see
+/// `planner.rs`); emb: (length, width, center_off, comfort, precision, strafe,
+/// reverse, yaw_w). Returns an (M, 3) array of (x, y, yaw) at `resolution`, or
+/// None to refuse.
 #[pyfunction]
 #[pyo3(signature = (points, pose, goal, emb, resolution))]
 fn plan<'py>(
@@ -32,15 +34,15 @@ fn plan<'py>(
     emb: (f64, f64, f64, f64, f64, f64, f64, f64),
     resolution: f64,
 ) -> PyResult<Option<Bound<'py, PyArray2<f64>>>> {
-    if points.shape()[1] != 3 {
+    if points.shape()[1] != 2 {
         return Err(PyValueError::new_err(format!(
-            "points must be (N, 3) float64, got shape {:?}",
+            "points must be (N, 2) float64, got shape {:?}",
             points.shape()
         )));
     }
     let view = points.as_array();
-    let pts: Vec<[f64; 3]> = (0..view.shape()[0])
-        .map(|k| [view[[k, 0]], view[[k, 1]], view[[k, 2]]])
+    let pts: Vec<[f64; 2]> = (0..view.shape()[0])
+        .map(|k| [view[[k, 0]], view[[k, 1]]])
         .collect();
     let emb = Emb {
         length: emb.0,

@@ -63,22 +63,19 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-# Cloud slice that can touch the body, as the planner sees it (target.py).
-Z_BAND = (0.05, 0.45)
-
 
 def path_clearance(xy: np.ndarray, points: np.ndarray, half_width: float) -> np.ndarray:
-    """Per-waypoint room hint (m): nearest z-band point minus the half-width.
+    """Per-waypoint room hint (m): nearest obstacle minus the half-width.
 
-    A speed hint for the controller, not a safety contract. Empty band or
-    empty path = infinite room. THE BAND IS ABSOLUTE, so `points` has to arrive
-    in a frame whose z origin is the ground — this module hands in the obstacle
-    model's own hard set (motion/obstacles.py), and `replay.py` a cloud it
-    shifted onto its local floor estimate.
+    A speed hint for the controller, not a safety contract. Nothing to hit or
+    an empty path = infinite room. `points` is an obstacle model's hard set
+    (motion/obstacles.py) — every row is something the body can hit, and z
+    rides along unread. Deciding that again here would price a different world
+    than the plan was made for, and would truncate any body taller than
+    whatever band this function happened to carry.
     """
     xy = np.asarray(xy, dtype=float).reshape(-1, 2)
-    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
-    band = pts[(pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])][:, :2]
+    band = np.asarray(points, dtype=np.float32).reshape(-1, 3)[:, :2]
     if not len(band) or not len(xy):
         return np.full(len(xy), np.inf)
     from scipy.spatial import cKDTree

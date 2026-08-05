@@ -15,7 +15,7 @@
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.embodiment import EMBODIMENTS, GO2
+from dimos.navigation.motion.embodiment import EMBODIMENTS, GO2, Embodiment
 from dimos.navigation.motion.obstacles import (
     LOW,
     OBSTACLE_MODELS,
@@ -25,7 +25,6 @@ from dimos.navigation.motion.obstacles import (
     hard_points,
     load,
 )
-from dimos.navigation.motion.planner.planners.target import band_mask
 
 
 def _room(base_z: float) -> np.ndarray:
@@ -60,22 +59,27 @@ def test_the_ground_exclusion_is_two_voxel_layers():
     assert len(hard_points(BodyBand(GO2), cloud, 0.0)) == 1
 
 
-def test_raw_band_is_exactly_the_planner_band_on_the_cloud_as_given():
+def test_raw_band_is_the_absolute_band_on_the_cloud_as_given():
     # the legacy model exists so recordings made under it replay as they ran,
-    # which means byte-for-byte the same selection the search would make
+    # which means byte-for-byte the selection the stack used to make inside the
+    # search -- 0.05..0.45 of the map's own z, moving nothing
     rng = np.random.default_rng(7)
     cloud = rng.uniform(-1.0, 1.0, size=(500, 3)).astype(np.float32)
     got = hard_points(RawBand(GO2), cloud, ground_z=0.29)
-    assert np.array_equal(got, cloud[band_mask(cloud)])
+    z = cloud[:, 2]
+    assert np.array_equal(got, cloud[(z > RAW_BAND[0]) & (z < RAW_BAND[1])])
     assert RAW_BAND == (0.05, 0.45)
 
 
-def test_a_body_band_selection_survives_the_search_own_slice():
-    # the adapter hands the model's hard set to a search that re-slices Z_BAND;
-    # anything the model kept has to come through that second cut intact
-    ground_z = -0.28
-    out = hard_points(BodyBand(GO2), _room(ground_z), ground_z)
-    assert np.array_equal(out[band_mask(out)], out)
+def test_a_tall_body_keeps_what_the_absolute_band_would_have_cut_off():
+    # The latent bug the 2D search contract closes: a body taller than the old
+    # 0.05..0.45 slice had its correctly-kept obstacles truncated by a SECOND
+    # cut downstream. There is only one cut now, and it is this one.
+    tall = Embodiment(tag="tall", height=0.60)
+    cloud = np.array([[1.0, 0.0, 0.55], [1.0, 0.5, 0.61]], dtype=np.float32)
+    out = hard_points(BodyBand(tall), cloud, 0.0)
+    assert len(out) == 1 and out[0][2] == pytest.approx(0.55)
+    assert out[0][2] > RAW_BAND[1], "the fixture has to sit above the old band"
 
 
 def test_the_registry_names_the_two_models():

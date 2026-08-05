@@ -17,8 +17,15 @@
 A candidate is a factory `make(scenario, cfg) -> PlannerEpisode`. The episode
 is stateful across plan() calls (warm starts, hysteresis live inside it) and
 nothing survives reset(). Honest candidates read only what plan() receives —
-cloud, pose, goal; the scenario handed to the factory is for judge-side
+obstacles, pose, goal; the scenario handed to the factory is for judge-side
 references (gold) and world-free setup, not for peeking at truth.
+
+The search is PLANAR. `plan` is handed obstacle positions as (N, 2) xy, with
+no z to read and therefore none to re-interpret: which returns are obstacles
+was decided before the call, by an obstacle model that knows the body
+(`motion/obstacles.py`). A candidate that wanted a z rule of its own would be
+a second source of truth for the same question, which is the bug this shape
+exists to make unrepresentable.
 """
 
 from __future__ import annotations
@@ -28,15 +35,19 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from dimos.msgs.nav_msgs.Path import Path
-    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 
 class PlannerEpisode(Protocol):
     def reset(self) -> None: ...
 
     def plan(
-        self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
+        self,
+        obstacles: np.ndarray,
+        pose: tuple[float, float, float],
+        goal: tuple[float, float],
     ) -> Path: ...
 
 

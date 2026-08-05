@@ -400,7 +400,7 @@ def test_path_clearance_matches_scipy() -> None:
         # first-ring hit and the long ring walk are covered
         spread = (0.05, 0.5, 5.0, 40.0)[case % 4]
         pts = rng.uniform(-spread, spread, size=(1 + case * 7, 3)).astype(np.float32)
-        # z straddles both band edges, so the slice filter is under test too
+        # spread over z, which neither side reads: the model already decided
         pts[:, 2] = rng.uniform(-0.2, 0.7, size=len(pts)).astype(np.float32)
         xy = rng.uniform(-spread, spread, size=(12, 2))
 

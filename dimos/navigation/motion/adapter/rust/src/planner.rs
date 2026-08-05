@@ -358,15 +358,13 @@ pub fn plan_once(
 ) -> Path {
     let started = Instant::now();
     let t0 = msg::now_secs();
-    // The search gets the obstacles, in the frame the model read them: the
-    // follower's room hint is measured off the very same points, so the
-    // governor and the stamped profile cannot be pricing different worlds.
+    // The search gets the obstacles, as xy: which returns are obstacles was
+    // decided here, by the model, and the search has no z to decide it again
+    // with. The follower's room hint is measured off the very same points, so
+    // the governor and the stamped profile cannot be pricing different worlds.
     let hard = obstacles::hard_points(model, points, ground_z);
     let points: &[[f32; 3]] = &hard;
-    let cloud: Vec<[f64; 3]> = points
-        .iter()
-        .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
-        .collect();
+    let cloud: Vec<[f64; 2]> = points.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
     let states = match plan(&cloud, pose, goal, emb, config.resolution) {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -931,6 +929,60 @@ mod tests {
             -0.28,
         );
         assert_eq!(seen.poses.len(), 1, "the walls are still invisible");
+    }
+
+    /// The latent bug the planar search contract closes -- twin of
+    /// `adapter/test_planner.py::test_a_tall_body_plans_around_what_the_old_band_cut_off`.
+    ///
+    /// A 0.55 m wall is inside a 0.60 m body's band and outside the absolute
+    /// 0.05..0.45 one. While the search re-sliced that band on its way in, it
+    /// dropped the very points the model had correctly kept, and the body
+    /// drove straight through them.
+    #[test]
+    fn a_tall_body_plans_around_what_the_old_band_cut_off() {
+        let mut wall: Vec<[f32; 3]> = Vec::new();
+        let mut y = -1.0f32;
+        while y <= 1.0 {
+            wall.push([1.5, y, 0.55]);
+            y += 0.05;
+        }
+        assert!(
+            wall[0][2] as f64 > obstacles::RAW_BAND.1,
+            "the fixture has to sit above the old band"
+        );
+        let detour = |m: &dyn ObstacleModel| -> f64 {
+            let out = plan_once(
+                &config(),
+                &go2(),
+                m,
+                &wall,
+                (0.0, 0.0, 0.0),
+                (3.0, 0.0),
+                0.0,
+            );
+            if out.poses.len() < 2 {
+                return f64::INFINITY; // a refusal is the strongest "it saw the wall"
+            }
+            out.poses
+                .iter()
+                .map(|q| q.pose.position.y.abs())
+                .fold(0.0f64, f64::max)
+        };
+        let tall = emb::Vert {
+            steppable: 0.20,
+            height: 0.60,
+            base_height: 0.29,
+        };
+        let tall_model = obstacles::load("body_band", &tall).expect("known model");
+        assert!(
+            detour(tall_model.as_ref()) > 0.8,
+            "the tall body drove through its own obstacle"
+        );
+        // and the control: the same wall IS over a go2's belly, so it is not a wall
+        let cfg = config();
+        let go2_model = model(&cfg);
+        assert!(obstacles::hard_points(go2_model.as_ref(), &wall, 0.0).is_empty());
+        assert!(detour(go2_model.as_ref()) < 0.2);
     }
 
     #[test]

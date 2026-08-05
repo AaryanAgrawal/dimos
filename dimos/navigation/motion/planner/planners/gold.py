@@ -32,7 +32,6 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.scenarios import Scenario, se2_path
 
@@ -46,8 +45,9 @@ class GoldEpisode:
         pass
 
     def plan(
-        self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
+        self, obstacles: np.ndarray, pose: tuple[float, float, float], goal: tuple[float, float]
     ) -> Path:
+        del obstacles  # the reference reads the scenario's true boxes instead
         states = se2_path(self._sc.boxes, pose, goal, self._sc.emb)
         if states is None:
             # Sealed: refuse — a single-pose stub, the follower runs out of path.

@@ -27,9 +27,12 @@ from dimos.navigation.motion.adapter.planner import (
     to_nav_path,
 )
 from dimos.navigation.motion.control.laws.seed import PursuitController
-from dimos.navigation.motion.embodiment import EMBODIMENTS
-from dimos.navigation.motion.obstacles import hard_points, load as load_model
+from dimos.navigation.motion.embodiment import EMBODIMENTS, Embodiment
+from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.obstacles import RAW_BAND, hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.gold import pose_stamped
+from dimos.navigation.motion.planner.planners.target import make_py
+from dimos.navigation.motion.scenarios import Scenario
 
 
 def test_to_nav_path_preserves_positions_and_yaw():
@@ -231,3 +234,38 @@ def test_a_ground_already_at_zero_selects_the_same_band():
     raw = _model_planner(obstacle_model="raw_band")
     pts = _room(0.0)
     assert np.array_equal(hard_points(planner._model, pts, 0.0), hard_points(raw._model, pts, 0.0))
+
+
+def _wall_over(ground_z: float, height: float) -> np.ndarray:
+    """A wall across the route at `height` over the ground, and nothing else."""
+    ys = np.arange(-1.0, 1.0 + 1e-9, 0.05)
+    return np.column_stack([np.full(len(ys), 1.5), ys, np.full(len(ys), ground_z + height)]).astype(
+        np.float32
+    )
+
+
+def _detour(emb: Embodiment, cloud: np.ndarray, ground_z: float) -> float:
+    """How far off the straight line the plan goes, planning the way the module does."""
+    hard = hard_points(load_model("body_band", emb), cloud, ground_z)
+    episode = make_py(Scenario("tall", [], goal=(3.0, 0.0), emb=emb), AvoidanceConfig())
+    episode.reset()
+    path = episode.plan(hard[:, :2], (0.0, 0.0, 0.0), (3.0, 0.0))
+    if len(path.poses) < 2:
+        return math.inf  # a refusal is the strongest form of "it saw the wall"
+    return max(abs(p.position.y) for p in path.poses)
+
+
+def test_a_tall_body_plans_around_what_the_old_band_cut_off():
+    """The latent bug the 2D search contract closes.
+
+    A 0.55 m wall is inside a 0.60 m body's band and outside the absolute
+    0.05..0.45 one. While the search re-sliced that band it dropped the very
+    points the model had correctly kept, and drove straight through them.
+    """
+    wall = _wall_over(0.0, 0.55)
+    assert wall[0][2] > RAW_BAND[1], "the fixture has to sit above the old band"
+    tall = Embodiment(tag="tall", height=0.60)
+    assert _detour(tall, wall, 0.0) > 0.8, "the tall body drove through its own obstacle"
+    # and the control: the same wall IS over a go2's belly, so it is not a wall
+    assert not len(hard_points(load_model("body_band", EMBODIMENTS["go2"]), wall, 0.0))
+    assert _detour(EMBODIMENTS["go2"], wall, 0.0) < 0.2

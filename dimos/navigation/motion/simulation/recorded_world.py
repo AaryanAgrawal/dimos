@@ -48,8 +48,10 @@ VOXEL = 0.08
 STABILITY = 0.5
 MIN_FRAMES = 2  # ...and never fewer than this many sightings, span or no span
 
-# The planner's body z-band over the floor, and the height the band's
-# rectangles get extruded to as Scenario boxes (control/world.Z_BAND).
+# The band this pass reads the recorded map in, and the height its rectangles
+# get extruded to as Scenario boxes. The same span as `obstacles.RAW_BAND` but
+# NOT that model: this one rides an ESTIMATED floor (`floor_z + BAND[0]`), and
+# it builds scenery rather than deciding what a body can hit.
 BAND = (0.05, 0.45)
 BAND_HEIGHT = 0.6
 

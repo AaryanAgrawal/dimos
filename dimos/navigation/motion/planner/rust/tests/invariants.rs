@@ -25,22 +25,22 @@ use std::time::Instant;
 
 use dimos_motion2_target::planner::{plan, Emb};
 
-/// Square outline of points at z=0.2, half-size `h`, spacing `step`.
-fn ring(cx: f64, cy: f64, h: f64, step: f64) -> Vec<[f64; 3]> {
+/// Square outline of obstacle points, half-size `h`, spacing `step`.
+fn ring(cx: f64, cy: f64, h: f64, step: f64) -> Vec<[f64; 2]> {
     let mut pts = Vec::new();
     let mut t = -h;
     while t <= h {
-        pts.push([cx - h, cy + t, 0.2]);
-        pts.push([cx + h, cy + t, 0.2]);
-        pts.push([cx + t, cy - h, 0.2]);
-        pts.push([cx + t, cy + h, 0.2]);
+        pts.push([cx - h, cy + t]);
+        pts.push([cx + h, cy + t]);
+        pts.push([cx + t, cy - h]);
+        pts.push([cx + t, cy + h]);
         t += step;
     }
     pts
 }
 
 /// A world with enough structure that planning it is real work.
-fn slalom() -> Vec<[f64; 3]> {
+fn slalom() -> Vec<[f64; 2]> {
     let mut pts = Vec::new();
     for (cx, cy) in [(1.5, 0.6), (3.0, -0.6), (4.5, 0.6), (6.0, -0.6)] {
         pts.extend(ring(cx, cy, 0.45, 0.05));
@@ -100,7 +100,7 @@ fn no_cross_call_memoization() {
     let pose_a = (0.0, 0.0, 0.0);
     let goal_a = (7.5, 0.0);
 
-    let timed = |cloud: &[[f64; 3]], pose: (f64, f64, f64), g: (f64, f64)| -> f64 {
+    let timed = |cloud: &[[f64; 2]], pose: (f64, f64, f64), g: (f64, f64)| -> f64 {
         let t0 = Instant::now();
         let out = plan(cloud, pose, g, &emb, 0.1);
         let dt = t0.elapsed().as_secs_f64();
@@ -115,7 +115,7 @@ fn no_cross_call_memoization() {
         rep_a = rep_a.min(timed(&pts, pose_a, goal_a));
         // Same world, same route, translated: identical work, nothing reusable.
         let d = 0.37 * (k + 1) as f64;
-        let shifted: Vec<[f64; 3]> = pts.iter().map(|p| [p[0] + d, p[1] + d, p[2]]).collect();
+        let shifted: Vec<[f64; 2]> = pts.iter().map(|p| [p[0] + d, p[1] + d]).collect();
         fresh_b = fresh_b.min(timed(&shifted, (d, d, 0.0), (goal_a.0 + d, goal_a.1 + d)));
     }
 
@@ -161,7 +161,7 @@ fn thin_wall_not_hopped() {
     let mut pts = Vec::new();
     let mut y = -4.0;
     while y <= 4.0 {
-        pts.push([2.0, y, 0.2]);
+        pts.push([2.0, y]);
         y += 0.02;
     }
     let path = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route around the end");

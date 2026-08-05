@@ -32,7 +32,8 @@ rerun recordings/<rec>-diagnose.rrd
 # real yaw), world/robot + world/track green = what the body actually drove
 # (box at 30 Hz, track line), world/replay white = the same tick re-planned
 # offline. world/obstacles orange = the winning obstacle model's hard set, i.e.
-# the very cloud the replayed search saw, drawn back on the map. world/carrot =
+# the very points the replayed search planned around, drawn back on the map
+# (the search itself is planar and gets them as xy). world/carrot =
 # the goal dot. A frozen box + carrot with no replay line = a hold.
 #
 # The replay reads obstacles through motion/obstacles.py and by default SNIFFS

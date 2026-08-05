@@ -223,10 +223,10 @@ fn ceilings_to_clearance(py: Python<'_>, ceilings: PyReadonlyArray1<'_, f64>) ->
     py.allow_threads(|| stamps::ceilings_to_clearance(&v))
 }
 
-/// Per-waypoint room hint. `xy` is (N, 2) float64 waypoints, `points` the raw
-/// (M, 3) float32 cloud; the z-band filter happens inside. Exposed for parity
-/// against the python's `cKDTree` twins -- on the robot both modules call the
-/// rust directly.
+/// Per-waypoint room hint. `xy` is (N, 2) float64 waypoints, `points` the
+/// obstacle model's (M, 3) float32 hard set -- every row counts, z unread.
+/// Exposed for parity against the python's `cKDTree` twins -- on the robot both
+/// modules call the rust directly.
 #[pyfunction]
 #[pyo3(signature = (xy, points, half_width))]
 fn path_clearance(

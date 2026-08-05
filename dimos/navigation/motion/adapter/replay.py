@@ -35,14 +35,18 @@ import time
 
 import numpy as np
 
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2 as RefereeCloud
 from dimos.navigation.motion.adapter.follower import path_clearance
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.obstacles import RAW_BAND, hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.base import load as load_planner
 from dimos.navigation.motion.scenarios import Scenario
 
-FLOOR_BAND = (0.05, 0.45)  # the planner's z-band over the estimated local floor
+# The band this replay reads, over the cloud it shifted onto its local floor
+# estimate: `raw_band` is the absolute one, which is what a floor-referenced
+# cloud wants. Named as a MODEL because the search and the room hint no longer
+# carry a z rule of their own (motion/obstacles.py).
+FLOOR_MODEL = "raw_band"
 FULL_SPEED_CLEAR = 0.35  # AvoidanceConfig.speed_clearance, circle cap
 FLOOR_RADIUS_M = 2.5  # neighbourhood the floor is read from
 FLOOR_PERCENTILE = 5.0  # low quantile of it: the ground, not what stands on it
@@ -125,6 +129,7 @@ def main() -> None:
     sc = Scenario("replay", [], goal=(0.0, 0.0), emb=emb)
     episode = load_planner("target")(sc, AvoidanceConfig())
     episode.reset()
+    band_model = load_model(FLOOR_MODEL, emb)
 
     arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(opos[:, :2], axis=0), axis=1))])
     sample_ts = np.arange(t0, ots[-1], args.every)
@@ -156,16 +161,15 @@ def main() -> None:
         g = int(np.searchsorted(arc, arc[k] + args.carrot))
         goal = (float(opos[min(g, len(opos) - 1)][0]), float(opos[min(g, len(opos) - 1)][1]))
 
-        ref_cloud = RefereeCloud.from_numpy(shifted.astype(np.float32), frame_id="odom")
+        obstacles = hard_points(band_model, shifted, 0.0)
         started = time.process_time()
-        path = episode.plan(ref_cloud, pose2d, goal)
+        path = episode.plan(obstacles[:, :2], pose2d, goal)
         plan_ms = (time.process_time() - started) * 1e3
 
         rr.set_time("sample", sequence=si)
-        band = shifted[(shifted[:, 2] > FLOOR_BAND[0]) & (shifted[:, 2] < FLOOR_BAND[1])]
-        show = band + np.array([0.0, 0.0, floor])
+        show = obstacles + np.array([0.0, 0.0, floor], dtype=np.float32)
         rr.log("cloud/band", rr.Points3D(show[::3], radii=0.01, colors=[[230, 120, 60]]))
-        rest = shifted[(shifted[:, 2] <= FLOOR_BAND[0]) | (shifted[:, 2] >= FLOOR_BAND[1])]
+        rest = shifted[(shifted[:, 2] <= RAW_BAND[0]) | (shifted[:, 2] >= RAW_BAND[1])]
         showr = rest + np.array([0.0, 0.0, floor])
         rr.log("cloud/rest", rr.Points3D(showr[::6], radii=0.004, colors=[[110, 110, 130]]))
         rr.log("robot", rr.Points3D([pos], radii=0.09, colors=[[255, 200, 0]]))
@@ -176,7 +180,7 @@ def main() -> None:
         xy = np.array([[p.position.x, p.position.y] for p in path.poses]).reshape(-1, 2)
         line = np.column_stack([xy, np.full(len(xy), pos[2] + 0.03)])
         rr.log("plan/path", rr.LineStrips3D([line], colors=[[100, 160, 255]], radii=0.012))
-        clear = path_clearance(xy, shifted.astype(np.float32), emb.width / 2.0)
+        clear = path_clearance(xy, obstacles, emb.width / 2.0)
         seg = np.linalg.norm(np.diff(xy, axis=0), axis=1) if len(xy) > 1 else np.zeros(1)
         arcs = np.concatenate([[0.0], np.cumsum(seg)])
         idx = np.unique(np.searchsorted(arcs, np.arange(0.0, arcs[-1] + 1e-9, 0.35)))

@@ -27,25 +27,18 @@ from typing import Any
 import numpy as np
 
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.motion.embodiment import Embodiment
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.scenarios import Scenario, se2_search
 
 from .gold import densify_states, pose_stamped
 
-Z_BAND = (0.05, 0.45)  # cloud slice that can touch the body
 FINE = 0.05
 PAD = 1.5
 
 BUILD_CMD = (
     "uv run maturin develop --uv --release -m dimos/navigation/motion/planner/rust/Cargo.toml"
 )
-
-
-def band_mask(pts: np.ndarray) -> np.ndarray:
-    """The slice of an (already anchored) cloud this planner treats as obstacles."""
-    return (pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])
 
 
 class TargetEpisode:
@@ -57,13 +50,11 @@ class TargetEpisode:
         pass
 
     def plan(
-        self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
+        self, obstacles: np.ndarray, pose: tuple[float, float, float], goal: tuple[float, float]
     ) -> Path:
         from scipy.spatial import cKDTree
 
-        pts, _ = cloud.as_numpy()
-        pts = np.asarray(pts, dtype=float).reshape(-1, 3)
-        band = pts[band_mask(pts)][:, :2]
+        band = np.asarray(obstacles, dtype=float).reshape(-1, 2)
 
         xs = [pose[0], goal[0]] + ([] if not len(band) else [band[:, 0].min(), band[:, 0].max()])
         ys = [pose[1], goal[1]] + ([] if not len(band) else [band[:, 1].min(), band[:, 1].max()])
@@ -103,10 +94,9 @@ class RustTargetEpisode:
         pass
 
     def plan(
-        self, cloud: PointCloud2, pose: tuple[float, float, float], goal: tuple[float, float]
+        self, obstacles: np.ndarray, pose: tuple[float, float, float], goal: tuple[float, float]
     ) -> Path:
-        pts, _ = cloud.as_numpy()
-        pts = np.ascontiguousarray(np.asarray(pts, dtype=np.float64).reshape(-1, 3))
+        pts = np.ascontiguousarray(np.asarray(obstacles, dtype=np.float64).reshape(-1, 2))
         e = self._emb
         out = self._mod.plan(
             pts,

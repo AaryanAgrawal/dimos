@@ -20,7 +20,7 @@
 //! reaches the same answer via `cKDTree`, so agreement here plus agreement
 //! against scipy (`control/test_rust_parity.py`) pins the port from both ends.
 
-use dimos_motion2_tc::clearance::{path_clearance, Z_BAND};
+use dimos_motion2_tc::clearance::path_clearance;
 
 /// Deterministic pseudo-random floats: a plain LCG, because the crate's
 /// dependencies stay at pyo3/numpy and a seeded sweep needs no more than this.
@@ -37,16 +37,12 @@ impl Rng {
     }
 }
 
-/// The definition: scan every band point.
+/// The definition: scan every obstacle point.
 fn brute(xy: &[[f64; 2]], points: &[[f32; 3]], half_width: f64) -> Vec<f64> {
     xy.iter()
         .map(|q| {
             let mut best = f64::INFINITY;
             for p in points {
-                let z = p[2] as f64;
-                if z <= Z_BAND.0 || z >= Z_BAND.1 {
-                    continue;
-                }
                 let (dx, dy) = (p[0] as f64 - q[0], p[1] as f64 - q[1]);
                 let d = (dx * dx + dy * dy).sqrt();
                 if d < best {
@@ -71,7 +67,7 @@ fn the_grid_never_disagrees_with_brute_force() {
                 [
                     rng.range(-spread, spread) as f32,
                     rng.range(-spread, spread) as f32,
-                    // straddles both band edges, so the filter is under test too
+                    // spread over z: the hint reads none of it
                     rng.range(-0.2, 0.7) as f32,
                 ]
             })
@@ -102,20 +98,21 @@ fn a_query_far_outside_the_cloud_still_terminates() {
 }
 
 #[test]
-fn only_the_body_slice_can_take_room_away() {
+fn every_point_handed_in_takes_room_away_whatever_its_z() {
+    // The model already decided; a floor-height or overhead z reaching this
+    // function means the model KEPT it, and re-judging it here would take the
+    // hint back off the world the plan was priced against.
     let q = [[0.0, 0.0]];
-    // a point directly underfoot and one overhead are both outside the band:
-    // the robot drives over the floor and under the ceiling
-    let below = vec![[0.1f32, 0.0, Z_BAND.0 as f32 - 0.01]];
-    let above = vec![[0.1f32, 0.0, Z_BAND.1 as f32 + 0.01]];
-    assert_eq!(path_clearance(&q, &below, 0.0)[0], f64::INFINITY);
-    assert_eq!(path_clearance(&q, &above, 0.0)[0], f64::INFINITY);
-    // the same point inside the band does. Compared against the f32 widened
-    // to f64, not against 0.1: the cloud arrives as f32 and 0.1f32 is
-    // 0.10000000149..., so testing against the f64 literal would be asserting
-    // that the widening is lossless, which it is not.
-    let inside = vec![[0.1f32, 0.0, 0.2]];
-    assert_eq!(path_clearance(&q, &inside, 0.0)[0], 0.1f32 as f64);
+    // Compared against the f32 widened to f64, not against 0.1: the cloud
+    // arrives as f32 and 0.1f32 is 0.10000000149..., so testing against the
+    // f64 literal would be asserting that the widening is lossless, which it
+    // is not.
+    for z in [-0.5f32, 0.0, 0.04, 0.2, 0.46, 2.0] {
+        let pts = vec![[0.1f32, 0.0, z]];
+        assert_eq!(path_clearance(&q, &pts, 0.0)[0], 0.1f32 as f64, "z {z}");
+    }
+    // Nothing at all is still infinite room.
+    assert_eq!(path_clearance(&q, &[], 0.0)[0], f64::INFINITY);
 }
 
 #[test]
@@ -128,13 +125,9 @@ fn the_body_is_subtracted_and_may_go_negative() {
 }
 
 #[test]
-fn an_empty_band_or_path_is_infinite_room() {
-    // a map with nothing in the body slice is an empty map, not a tight one
+fn no_obstacles_or_no_path_is_infinite_room() {
+    // a map the model kept nothing from is an empty map, not a tight one
     let points = vec![[0.0f32, 0.0, 5.0]];
-    assert_eq!(
-        path_clearance(&[[0.0, 0.0]], &points, 0.25)[0],
-        f64::INFINITY
-    );
     assert_eq!(path_clearance(&[[0.0, 0.0]], &[], 0.25)[0], f64::INFINITY);
     assert!(path_clearance(&[], &points, 0.25).is_empty());
 }
