@@ -598,7 +598,7 @@ def replay(
             rr.log("world/replay", rr.LineStrips3D([np.column_stack([out[:, :2], z])], radii=0.012))
             rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [255, 255, 255, 60]))
             rr.log(
-                "world/recorded",
+                "world/requested",
                 rr.LineStrips3D(
                     [np.column_stack([tick.recorded[:, :2], np.full(len(tick.recorded), 0.03)])],
                     colors=[[100, 160, 255]],
@@ -606,7 +606,7 @@ def replay(
                 ),
             )
             rr.log(
-                "world/recorded/bodies",
+                "world/requested/bodies",
                 _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 60]),
             )
     wall = time.perf_counter() - started
@@ -864,6 +864,15 @@ def main() -> None:
                 translation=[pose[0], pose[1], pose[3] if len(pose) > 3 else 0.0],
                 rotation=rr.RotationAxisAngle(axis=(0, 0, 1), radians=pose[2]),
             ),
+        )
+    # the track the body actually drove -- "recorded", vs the plans it was asked
+    # to drive (requested) and what the planner says offline (replay)
+    walked = np.array([[p[0], p[1], 0.01] for p in rec.poses if p is not None])
+    if len(walked) > 1:
+        rr.log(
+            "world/track",
+            rr.LineStrips3D([walked], colors=[[0, 200, 100]], radii=0.008),
+            static=True,
         )
 
     churn_rows = churn(rec, args.voxel, rr) if "churn" in passes else []

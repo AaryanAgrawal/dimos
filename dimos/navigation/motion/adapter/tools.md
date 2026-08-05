@@ -27,10 +27,12 @@ python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --z-of
 # view the rrd it wrote (or use --spawn above to stream live)
 rerun recordings/<rec>-diagnose.rrd
 # in the 3D view: world/map grey cloud (1:4 subsampled), world/appeared green /
-# world/disappeared red voxels per frame (full resolution), world/robot the
-# base_link box (oriented, rides through holds), world/carrot the goal dot,
-# world/recorded blue = the plan the robot published, world/replay = the same
-# tick re-planned offline. A frozen box + carrot with no replay line = a hold.
+# world/disappeared red voxels per frame (full resolution). Three pose sources:
+# world/requested blue = the plan the robot published (+ wireframe bodies with
+# real yaw), world/robot + world/track green = what the body actually drove
+# (box at 30 Hz, track line), world/replay white = the same tick re-planned
+# offline. world/carrot = the goal dot. A frozen box + carrot with no replay
+# line = a hold.
 
 # tests and types
 python -m pytest dimos/navigation/motion/adapter -q
