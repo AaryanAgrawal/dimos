@@ -52,6 +52,7 @@ from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.planner.referee.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.referee.planners.base import load as load_planner
+from dimos.navigation.motion.planner.referee.planners.target import band_mask
 from dimos.navigation.motion.planner.referee.scenarios import EMBODIMENTS, Scenario
 from dimos.navigation.motion.planner.referee.types import PointCloud2 as RefereeCloud
 from dimos.navigation.tf_pose import OdomBasePose, base_height_above_ground
@@ -585,6 +586,9 @@ def replay(
     ep = episode(planner, embodiment)
     ticks = gated_ticks(rec.ticks) if gate else rec.ticks
     offset = np.array([0.0, 0.0, z_offset], dtype=np.float32)
+    # what plan() last handed the episode, so the renderer can mark the very
+    # cloud the search saw instead of re-deriving one
+    seen: dict[str, Any] = {"pts": None, "floor": 0.0}
 
     def plan(
         imap: int,
@@ -595,10 +599,13 @@ def replay(
         # The module's own order (adapter/planner.py::_plan_once): the trim
         # corrects the map's z origin, then the floor is measured off that map.
         pts = rec.maps[imap][1] + offset
+        seen["floor"] = 0.0
         if anchor and prior is not None:
             floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
             if floor is not None:
                 pts = anchor_to_floor(pts, floor, ground_margin)
+                seen["floor"] = floor
+        seen["pts"] = pts
         planned = ep.plan(
             RefereeCloud.from_numpy(pts, frame_id="odom"), (pose[0], pose[1], pose[2]), goal
         )
@@ -631,6 +638,17 @@ def replay(
         if rr is not None:
             rr.set_time("time", timestamp=tick.ts)
             rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
+            # the planner's own obstacle slice (band_mask) of the very cloud
+            # plan() handed it, holds included -- shifted back onto the map
+            obs = seen["pts"][band_mask(seen["pts"])]
+            rr.log(
+                "world/obstacles",
+                rr.Points3D(
+                    np.column_stack([obs[:, :2], obs[:, 2] + seen["floor"]]),
+                    radii=0.022,
+                    colors=[[255, 120, 0]],
+                ),
+            )
         if rr is not None and len(out) > 1:
             base_z = tick.pose[3] if len(tick.pose) > 3 else 0.0
             z = np.full(len(out), 0.02)

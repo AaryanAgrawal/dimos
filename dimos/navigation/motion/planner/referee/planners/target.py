@@ -40,6 +40,11 @@ BUILD_CMD = (
 )
 
 
+def band_mask(pts: np.ndarray) -> np.ndarray:
+    """The slice of an (already anchored) cloud this planner treats as obstacles."""
+    return (pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])
+
+
 class TargetEpisode:
     def __init__(self, emb: Embodiment, resolution: float) -> None:
         self._emb = emb
@@ -55,7 +60,7 @@ class TargetEpisode:
 
         pts, _ = cloud.as_numpy()
         pts = np.asarray(pts, dtype=float).reshape(-1, 3)
-        band = pts[(pts[:, 2] > Z_BAND[0]) & (pts[:, 2] < Z_BAND[1])][:, :2]
+        band = pts[band_mask(pts)][:, :2]
 
         xs = [pose[0], goal[0]] + ([] if not len(band) else [band[:, 0].min(), band[:, 0].max()])
         ys = [pose[1], goal[1]] + ([] if not len(band) else [band[:, 1].min(), band[:, 1].max()])
