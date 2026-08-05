@@ -36,13 +36,13 @@ def _fields_of(source: Any) -> tuple[Any, ...]:
     """Pull the four Joy fields out of a dict, an (axes, buttons) pair, a Joy or an LCM message."""
     if isinstance(source, dict):
         return (
-            source.get("ts", 0.0),
+            source.get("ts"),
             source.get("frame_id", ""),
             source.get("axes"),
             source.get("buttons"),
         )
     if isinstance(source, tuple | list):
-        return (0.0, "", list(source[0]), list(source[1]))
+        return (None, "", list(source[0]), list(source[1]))
     if isinstance(source, Joy):
         return (source.ts, source.frame_id, list(source.axes), list(source.buttons))
     return (
@@ -62,7 +62,7 @@ class Joy(Timestamped):
 
     def __init__(
         self,
-        ts: float | JoyConvertable | Joy = 0.0,
+        ts: float | JoyConvertable | Joy | None = None,
         frame_id: str = "",
         axes: list[float] | None = None,
         buttons: list[int] | None = None,
@@ -82,7 +82,7 @@ class Joy(Timestamped):
         if isinstance(stamp, dict | tuple | list | Joy | LCMJoy):
             stamp, frame_id, axes, buttons = _fields_of(stamp)
 
-        self.ts = stamp if stamp != 0 else time.time()
+        self.ts = time.time() if stamp is None else stamp
         self.frame_id = frame_id
         self.axes = axes if axes is not None else []
         self.buttons = buttons if buttons is not None else []

@@ -48,12 +48,12 @@ class Transform(Timestamped):
         rotation: Quaternion | None = None,
         frame_id: str = "world",
         child_frame_id: str = "unset",
-        ts: float = 0.0,
+        ts: float | None = None,
         **kwargs,
     ) -> None:
         self.frame_id = frame_id
         self.child_frame_id = child_frame_id
-        self.ts = ts if ts != 0.0 else time.time()
+        self.ts = time.time() if ts is None else ts
         self.translation = translation if translation is not None else Vector3()
         self.rotation = rotation if rotation is not None else Quaternion()
 
@@ -220,7 +220,7 @@ class Transform(Timestamped):
         cls,
         matrix: np.ndarray,
         *,
-        ts: float = 0.0,
+        ts: float | None = None,
         frame_id: str = "world",
         child_frame_id: str = "unset",
     ) -> Transform:

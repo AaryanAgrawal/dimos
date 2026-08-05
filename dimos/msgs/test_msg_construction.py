@@ -16,11 +16,7 @@
 
 Every accepted construction form for the types whose ``__init__`` used to be a
 ``plum`` multiple-dispatch stack, plus the error cases. These pin the contract
-so the dispatch removal is provably behaviour-preserving.
-
-Tests marked LATENT BUG record forms that silently built a broken object under
-plum, because a call that matched no overload fell through to the LCM base
-``__init__``, which stores whatever it is handed.
+that the dispatch removal had to preserve.
 """
 
 import time
@@ -38,17 +34,20 @@ from dimos_lcm.sensor_msgs import JointState as LCMJointState, Joy as LCMJoy
 import numpy as np
 import pytest
 
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.PoseWithCovariance import PoseWithCovariance
 from dimos.msgs.geometry_msgs.PoseWithCovarianceStamped import PoseWithCovarianceStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.TwistWithCovariance import TwistWithCovariance
 from dimos.msgs.geometry_msgs.TwistWithCovarianceStamped import TwistWithCovarianceStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.GraphNodes3D import GraphNodes3D
+from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.Joy import Joy
@@ -638,53 +637,46 @@ def test_twcs_empty_defaults() -> None:
 # --------------------------------------------------------------------------
 # The ``ts`` sentinel
 #
-# LATENT BUG: ``self.ts = ts if ts != 0 else time.time()`` makes ts=0.0
-# unrepresentable — asking for it silently yields wall-clock time instead.
-# Pinned here so the follow-up sentinel change shows up as an explicit diff.
+# ``ts`` defaults to None and means "stamp me now". 0.0 is an ordinary
+# timestamp and is stored as given — it used to be swallowed by a
+# ``ts if ts != 0`` sentinel that made it unrepresentable.
 # --------------------------------------------------------------------------
 
-
-def test_posestamped_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert PoseStamped(ts=0.0).ts != 0.0
-
-
-def test_twiststamped_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert TwistStamped(ts=0.0).ts != 0.0
-
-
-def test_pwcs_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert PoseWithCovarianceStamped(ts=0.0).ts != 0.0
-
-
-def test_twcs_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert TwistWithCovarianceStamped(ts=0.0).ts != 0.0
+STAMPED_TYPES = [
+    PoseStamped,
+    TwistStamped,
+    PoseWithCovarianceStamped,
+    TwistWithCovarianceStamped,
+    JointState,
+    Joy,
+    Path,
+    GraphNodes3D,
+    PointStamped,
+    Transform,
+    Odometry,
+]
 
 
-def test_jointstate_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert JointState(ts=0.0).ts != 0.0
+@pytest.mark.parametrize("msg_type", STAMPED_TYPES, ids=lambda t: t.__name__)
+def test_zero_ts_is_a_real_timestamp(msg_type: type) -> None:
+    assert msg_type(ts=0.0).ts == 0.0
 
 
-def test_joy_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert Joy(ts=0.0).ts != 0.0
+@pytest.mark.parametrize("msg_type", STAMPED_TYPES, ids=lambda t: t.__name__)
+def test_omitted_ts_stamps_now(msg_type: type) -> None:
+    before = time.time()
+    assert before <= msg_type().ts <= time.time()
 
 
-def test_path_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert Path(ts=0.0).ts != 0.0
+@pytest.mark.parametrize("msg_type", STAMPED_TYPES, ids=lambda t: t.__name__)
+def test_explicit_ts_is_honoured(msg_type: type) -> None:
+    assert msg_type(ts=5.0).ts == 5.0
 
 
-def test_graphnodes3d_zero_ts_is_replaced_by_wall_clock() -> None:
-    assert GraphNodes3D(ts=0.0).ts != 0.0
-
-
-def test_nonzero_ts_is_always_honoured() -> None:
-    assert PoseStamped(ts=5.0).ts == 5.0
-    assert TwistStamped(ts=5.0).ts == 5.0
-    assert PoseWithCovarianceStamped(ts=5.0).ts == 5.0
-    assert TwistWithCovarianceStamped(ts=5.0).ts == 5.0
-    assert JointState(ts=5.0).ts == 5.0
-    assert Joy(ts=5.0).ts == 5.0
-    assert Path(ts=5.0).ts == 5.0
-    assert GraphNodes3D(ts=5.0).ts == 5.0
+def test_lcm_decode_of_an_unstamped_message_keeps_the_zero_stamp() -> None:
+    """A producer that never set the header now decodes to ts=0.0, not receive-time."""
+    decoded = PoseStamped.lcm_decode(PoseStamped(ts=0.0, frame_id="odom").lcm_encode())
+    assert decoded.ts == 0.0
 
 
 # --------------------------------------------------------------------------

@@ -53,12 +53,12 @@ class TwistStamped(Twist, Timestamped):
             frame_id = args[1] if len(args) > 1 else kwargs.pop("frame_id", "")
             twist_args: tuple[Any, ...] = ()
         else:
-            ts = kwargs.pop("ts", 0.0)
+            ts = kwargs.pop("ts", None)
             frame_id = kwargs.pop("frame_id", "")
             twist_args = args
 
         self.frame_id = frame_id
-        self.ts = ts if ts != 0 else time.time()
+        self.ts = time.time() if ts is None else ts
         super().__init__(*twist_args, **kwargs)
 
     def lcm_encode(self) -> bytes:

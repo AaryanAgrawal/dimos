@@ -36,7 +36,7 @@ def _fields_of(source: Any) -> tuple[Any, ...]:
     """Pull the six JointState fields out of a dict, a JointState or an LCM message."""
     if isinstance(source, dict):
         return (
-            source.get("ts", 0.0),
+            source.get("ts"),
             source.get("frame_id", ""),
             source.get("name"),
             source.get("position"),
@@ -63,7 +63,7 @@ class JointState(Timestamped):
 
     def __init__(
         self,
-        ts: float | JointStateConvertable | JointState = 0.0,
+        ts: float | JointStateConvertable | JointState | None = None,
         frame_id: str = "",
         name: list[str] | None = None,
         position: list[float] | None = None,
@@ -87,7 +87,7 @@ class JointState(Timestamped):
         if isinstance(stamp, dict | JointState | LCMJointState):
             stamp, frame_id, name, position, velocity, effort = _fields_of(stamp)
 
-        self.ts = stamp if stamp != 0 else time.time()
+        self.ts = time.time() if stamp is None else stamp
         self.frame_id = frame_id
         self.name = name if name is not None else []
         self.position = position if position is not None else []
