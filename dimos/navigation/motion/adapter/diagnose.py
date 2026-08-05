@@ -494,7 +494,7 @@ def plans(rec: Recording) -> list[dict[str, float]]:
 
 
 def _plan_bodies(rr: Any, plan: np.ndarray, base_z: float, emb: Any, color: list[int]) -> Any:
-    """Wireframe body boxes along a plan, one every ~0.4 m of arc or 30 deg of yaw.
+    """Wireframe body boxes along a plan, one every ~0.3 m of arc or 23 deg of yaw.
 
     A third column is the pose's own yaw (in-place turns show); with only xy the
     yaw is derived from the segment direction.
@@ -504,8 +504,8 @@ def _plan_bodies(rr: Any, plan: np.ndarray, base_z: float, emb: Any, color: list
     arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
     keep = [0]
     for i in range(1, len(xy)):
-        turned = yaw is not None and abs(yaw[i] - yaw[keep[-1]]) >= np.radians(30)
-        if arc[i] - arc[keep[-1]] >= 0.4 or turned:
+        turned = yaw is not None and abs(yaw[i] - yaw[keep[-1]]) >= np.radians(23)
+        if arc[i] - arc[keep[-1]] >= 0.3 or turned:
             keep.append(i)
     yaws = []
     for i in keep:
@@ -595,8 +595,13 @@ def replay(
         if rr is not None and len(out) > 1:
             base_z = tick.pose[3] if len(tick.pose) > 3 else 0.0
             z = np.full(len(out), 0.02)
-            rr.log("world/replay", rr.LineStrips3D([np.column_stack([out[:, :2], z])], radii=0.012))
-            rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [255, 255, 255, 60]))
+            rr.log(
+                "world/replay",
+                rr.LineStrips3D(
+                    [np.column_stack([out[:, :2], z])], colors=[[150, 150, 150]], radii=0.012
+                ),
+            )
+            rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [150, 150, 150, 60]))
             rr.log(
                 "world/requested",
                 rr.LineStrips3D(
