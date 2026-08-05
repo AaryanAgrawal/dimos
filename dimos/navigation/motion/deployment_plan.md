@@ -10,8 +10,12 @@ edges follow.
 From the repo's dev shell (nix provides the whole toolchain — rust with the
 aarch64 target, zig, cargo-zigbuild; nothing to install):
 
-    dimos bake motion_planner trajectory_follower cmd_vel_mux \
+    dimos bake motion_planner trajectory_follower cmd_vel_mux go2_tf \
         -o motion-host --builder zigbuild --target aarch64-unknown-linux-gnu.2.31
+
+(`go2_tf` publishes the go2's own tf tree robot-side; the host refuses to start
+if the stdin config names a module it wasn't baked with, so keep the bake list
+and `motion-host.json` in sync.)
 
     scp target/dimos-bake/motion-host/target/aarch64-unknown-linux-gnu/release/motion-host \
         root@<robot>:/root/motion-host/
@@ -290,7 +294,7 @@ come back.
 
 Then:
 
-    dimos bake motion_planner trajectory_follower cmd_vel_mux \
+    dimos bake motion_planner trajectory_follower cmd_vel_mux go2_tf \
         -o motion-host --builder zigbuild --target aarch64-unknown-linux-gnu.2.31
 
 The `.2.31` suffix pins the glibc floor the binary links against — check the
