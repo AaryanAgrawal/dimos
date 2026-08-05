@@ -15,26 +15,46 @@
 """Why did the local plan change its mind? Offline post-mortem of a recording.
 
 Reads a recording of the go2-zenoh-motion graph (local_map, odometry, tf,
-planner_path, path) and runs four passes:
+planner_path, path, nav_cmd_vel, stop_movement) and runs five passes:
 
-  churn    what the local map does to the planner's world, frame to frame,
-           split into crop-boundary (the map window moved) and interior
-           (obstacles flickering in place) — the second kind is the bad kind
-  plans    when the published plan flipped, holds, and whether the flips land
-           on the frames where a new local map arrived
-  replay   the planner re-run on the recorded inputs (same tf-resolved pose and
-           carrot the module used), then a one-input-at-a-time ablation that
-           attributes each flip to the cloud, the pose, or the carrot
-  latency  how old the inputs each tick planned on actually were
+  churn     what the local map does to the planner's world, frame to frame,
+            split into crop-boundary (the map window moved) and interior
+            (obstacles flickering in place) — the second kind is the bad kind
+  plans     when the published plan flipped, holds, and whether the flips land
+            on the frames where a new local map arrived
+  replay    the planner re-run on the recorded inputs (same tf-resolved pose and
+            carrot the module used), then a one-input-at-a-time ablation that
+            attributes each flip to the cloud, the pose, or the carrot
+  latency   how old the inputs each tick planned on actually were
+  follower  the FOLLOWER re-run: at every recorded nav_cmd_vel tick, the
+            deployed law on the deployed config against the twist that actually
+            went out, one tick classified match / boundary / hold / MISMATCH
 
     python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --model raw_band
+    python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only follower \\
+        --host-config motion-host.json --from 6.9 --to 8.6
 
 The replay reads obstacles through `motion/obstacles.py`, the same models the
 module runs -- and by default it SNIFFS which one the deployed module actually
 ran, replaying a tick subsample under each and keeping the one whose holds
 agree with the recorded plans. `--model` names one instead.
+
+The follower pass reconstructs each tick's inputs the way the module does (the
+tf-resolved base pose, the latest path, and — on the `hinted` track — the room
+hint RECOMPUTED from the latest local map through that same obstacle model,
+not decoded from the path's stamps; the `blind` track decodes the stamps). The
+deployed config arrives as one JSON: `--host-config` reads
+`modules.trajectory_follower.config` off a motion-host blob, and without it the
+`go2-zenoh-motion` blueprint's own values stand in. The law is stateful (it
+rate-limits its own command), so ticks run in order through ONE law instance
+and the window only decides which ticks are REPORTED — a window's first tick
+inherits the state the robot's did.
+
+`--from` / `--to` bound every pass. Both take either seconds from the start of
+the recording (`--from 6.9`) or a wall-clock time of day in UTC, matching the
+message stamps (`--from 06:34:35.400`).
 """
 
 from __future__ import annotations
@@ -42,15 +62,23 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from itertools import pairwise
+import json
+import math
 from pathlib import Path as FsPath
 import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.helpers import resolve_msg_type
+from dimos.navigation.motion.adapter.follower import GoalLatch, path_clearance
 from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
+from dimos.navigation.motion.control.controller import ControllerConfig, load as load_law
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
+from dimos.navigation.motion.control.tracks import TRACKS
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.obstacles import (
@@ -66,6 +94,8 @@ from dimos.navigation.tf_pose import OdomBasePose
 
 if TYPE_CHECKING:
     from dimos.memory2.store.base import Store
+    from dimos.msgs.nav_msgs.Path import Path as NavPath
+    from dimos.navigation.motion.control.controller import TrajectoryController
     from dimos.navigation.motion.planner.planners.base import PlannerEpisode
 
 # Stream names as the zenoh recorder slugs them (topic -> name, "/" -> "_").
@@ -74,10 +104,76 @@ ODOMETRY = "dimos_odometry_nav_msgs.Odometry"
 PLANNER_PATH = "dimos_planner_path_nav_msgs.Path"
 PATH = "dimos_path_nav_msgs.Path"
 TF = "dimos_tf_tf2_msgs.TFMessage"
+NAV_CMD_VEL = "dimos_nav_cmd_vel_geometry_msgs.Twist"
+STOP_MOVEMENT = "dimos_stop_movement_std_msgs.Bool"
 
 FLIP_M = 0.5  # plan divergence (m, mean over the common arc) that counts as a mind change
 KEY_OFF, KEY_SPAN = 8192, 16384  # voxel key packing: +-655 m at 0.08 m
 SUPPORT_MIN = 4  # RayTracingVoxelMapConfig.support_min on the deployed blueprint
+DAY = 86400.0
+
+
+# ------------------------------------------------------------------- window --
+
+
+@dataclass(frozen=True)
+class Instant:
+    """A `--from`/`--to` bound, before it knows what recording it bounds."""
+
+    seconds: float
+    absolute: bool  # a UTC time of day, rather than an offset from the start
+
+    def resolve(self, t0: float) -> float:
+        """The unix second this names, given the recording starts at `t0`."""
+        if not self.absolute:
+            return t0 + self.seconds
+        midnight = math.floor(t0 / DAY) * DAY
+        # a recording may cross midnight, so take the occurrence of this time of
+        # day nearest the start rather than assuming the start's own date
+        return min(
+            (midnight + d + self.seconds for d in (-DAY, 0.0, DAY)), key=lambda t: abs(t - t0)
+        )
+
+
+def parse_instant(text: str) -> Instant:
+    """`6.9` = seconds into the recording; `06:34:35.4` = that UTC time of day."""
+    if ":" not in text:
+        return Instant(float(text), absolute=False)
+    parts = text.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"{text!r} is neither seconds nor HH:MM:SS[.fff]")
+    h, m, s = (float(p) for p in parts)
+    return Instant(h * 3600.0 + m * 60.0 + s, absolute=True)
+
+
+@dataclass(frozen=True)
+class Window:
+    """The slice of a recording every pass is held to (unix seconds)."""
+
+    lo: float = -math.inf
+    hi: float = math.inf
+
+    @classmethod
+    def between(cls, start: Instant | None, end: Instant | None, t0: float) -> Window:
+        return cls(
+            -math.inf if start is None else start.resolve(t0),
+            math.inf if end is None else end.resolve(t0),
+        )
+
+    @property
+    def bounded(self) -> bool:
+        return math.isfinite(self.lo) or math.isfinite(self.hi)
+
+    def __contains__(self, ts: float) -> bool:
+        return self.lo <= ts <= self.hi
+
+    def mask(self, stamps: np.ndarray) -> np.ndarray:
+        return np.asarray((stamps >= self.lo) & (stamps <= self.hi))
+
+    def label(self, t0: float) -> str:
+        lo = "start" if self.lo == -math.inf else f"{self.lo - t0:.1f}"
+        hi = "end" if self.hi == math.inf else f"{self.hi - t0:.1f}"
+        return f"{lo}..{hi} s"
 
 
 class _LcmCodec:
@@ -129,7 +225,13 @@ class Tick:
 
 @dataclass
 class Recording:
-    """A motion-stack recording, decoded and pose-resolved the way the stack does."""
+    """A motion-stack recording, decoded and pose-resolved the way the stack does.
+
+    The streams stay WHOLE however `window` is set: a tick inside the window
+    still planned on the map and the plan that arrived before it, so trimming
+    the inputs would replay a world the robot never had. The window decides
+    which ticks each pass reports on, nothing else.
+    """
 
     path: str
     maps: list[tuple[float, np.ndarray]]  # local_map: ts, points (n, 3)
@@ -138,7 +240,12 @@ class Recording:
     poses: list[tuple[float, ...] | None]  # base_link (x, y, yaw, z)
     globals: list[tuple[float, np.ndarray]]  # planner_path: ts, xy
     plans: list[tuple[float, np.ndarray]]  # path: ts, (x, y, yaw)
-    ticks: list[Tick] = field(default_factory=list)
+    plan_msgs: list[NavPath] = field(default_factory=list)  # the same plans, undecoded
+    twists: list[tuple[float, tuple[float, float, float]]] = field(default_factory=list)
+    stops: np.ndarray = field(default_factory=lambda: np.zeros(0))  # stop_movement True stamps
+    all_ticks: list[Tick] = field(default_factory=list)  # every tick with complete inputs
+    ticks: list[Tick] = field(default_factory=list)  # the in-window ones passes report on
+    window: Window = field(default_factory=Window)
 
     @property
     def t0(self) -> float:
@@ -157,7 +264,9 @@ def _xyy(msg: Any) -> np.ndarray:
 
 
 def _stream(store: Store, name: str) -> list[Any]:
-    """Decoded observations of one stream."""
+    """Decoded observations of one stream, empty when the recording has none."""
+    if name not in store.list_streams():
+        return []
     return list(store.stream(name))
 
 
@@ -166,7 +275,13 @@ def _before(ts: float, stamps: np.ndarray) -> int:
     return int(np.searchsorted(stamps, ts, "right")) - 1
 
 
-def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
+def load_recording(
+    path: str,
+    base_frame: str,
+    lookahead: float,
+    start: Instant | None = None,
+    end: Instant | None = None,
+) -> Recording:
     """Decode the streams and rebuild each tick's inputs (tf-resolved pose, carrot)."""
     from dimos.memory2.tf import StreamTF
     from dimos.utils.data import get_data
@@ -192,6 +307,11 @@ def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
         ceilings = decode_ceilings(o.data)
         stamped.append(ceilings_to_clearance(ceilings) if ceilings is not None else None)
 
+    twists = [
+        (o.ts, (o.data.linear.x, o.data.linear.y, o.data.angular.z))
+        for o in _stream(store, NAV_CMD_VEL)
+    ]
+
     rec = Recording(
         path=path,
         maps=maps,
@@ -200,7 +320,11 @@ def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
         poses=poses,
         globals=globals_,
         plans=plans,
+        plan_msgs=[o.data for o in raw_plans],
+        twists=twists,
+        stops=np.array([o.ts for o in _stream(store, STOP_MOVEMENT) if o.data.data]),
     )
+    rec.window = Window.between(start, end, rec.t0)
     map_ts = np.array([t for t, _ in maps])
     global_ts = np.array([t for t, _ in globals_])
     # MLS republishes its route at ~1 Hz whether or not it moved; the module's
@@ -215,7 +339,7 @@ def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
         pose = rec.poses[j]
         assert pose is not None
         goal = carrot_along(globals_[k][1], (pose[0], pose[1]), lookahead)
-        rec.ticks.append(
+        rec.all_ticks.append(
             Tick(
                 ts=ts,
                 imap=i,
@@ -226,6 +350,7 @@ def load_recording(path: str, base_frame: str, lookahead: float) -> Recording:
                 stamped_clear=stamped[n],
             )
         )
+    rec.ticks = [t for t in rec.all_ticks if t.ts in rec.window]
     return rec
 
 
@@ -353,6 +478,8 @@ def churn(
     """
     frames = []
     for ts, pts in rec.maps:
+        if ts not in rec.window:
+            continue
         slab = pts[band_model.field(pts).hard]
         frames.append(
             Frame(
@@ -571,64 +698,75 @@ def episode(planner: str, embodiment: str) -> PlannerEpisode:
     return ep
 
 
-def replay(
-    rec: Recording,
-    planner: str,
-    embodiment: str,
-    z_offset: float,
-    ablate: bool,
-    model: str | None = None,
-    gate: bool = False,
-    rr: Any = None,
-) -> list[dict[str, float]]:
-    """Re-plan every recorded tick from its own inputs; optionally ablate one input at a time."""
-    ep = episode(planner, embodiment)
-    emb = EMBODIMENTS[embodiment]
-    ticks = gated_ticks(rec.ticks) if gate else rec.ticks
-    offset = np.array([0.0, 0.0, z_offset], dtype=np.float32)
-    # what plan() last handed the episode, so the renderer can mark the very
-    # cloud the search saw instead of re-deriving one
-    seen: dict[str, Any] = {"pts": None, "shift": 0.0}
+class Replanner:
+    """One planner episode, re-solving a recorded tick from its own inputs."""
 
-    def ground_of(pose: tuple[float, ...]) -> float:
+    def __init__(self, rec: Recording, planner: str, embodiment: str, z_offset: float) -> None:
+        self.rec = rec
+        self.planner = planner
+        self.embodiment = embodiment
+        self.z_offset = z_offset
+        self.emb = EMBODIMENTS[embodiment]
+        self.ep = episode(planner, embodiment)
+        self.offset = np.array([0.0, 0.0, z_offset], dtype=np.float32)
+        # what the last call handed the episode, so the renderer can mark the
+        # very cloud the search saw instead of re-deriving one
+        self.pts: np.ndarray | None = None
+        self.shift = 0.0
+
+    def ground_of(self, pose: tuple[float, ...]) -> float:
         """Where the surface under the robot is, off the body: base z - base_height."""
-        return (pose[3] if len(pose) > 3 else 0.0) - emb.base_height
+        return (pose[3] if len(pose) > 3 else 0.0) - self.emb.base_height
 
-    def plan(
-        imap: int,
-        pose: tuple[float, ...],
-        goal: tuple[float, float],
-        band: Any,
+    def __call__(
+        self, imap: int, pose: tuple[float, ...], goal: tuple[float, float], band: ObstacleModel
     ) -> np.ndarray:
         # The module's own order (adapter/planner.py::_plan_once): the trim
         # corrects the map's z origin, then the model reads the result.
-        ground_z = ground_of(pose)
-        pts = hard_points(band, rec.maps[imap][1] + offset, ground_z)
-        seen["pts"] = pts
-        seen["shift"] = ground_z if band.body_referenced else 0.0
-        planned = ep.plan(pts[:, :2], (pose[0], pose[1], pose[2]), goal)
+        ground_z = self.ground_of(pose)
+        pts = hard_points(band, self.rec.maps[imap][1] + self.offset, ground_z)
+        self.pts = pts
+        self.shift = ground_z if band.body_referenced else 0.0
+        planned = self.ep.plan(pts[:, :2], (pose[0], pose[1], pose[2]), goal)
         return np.array(
             [[q.position.x, q.position.y, q.orientation.euler.yaw] for q in planned.poses]
         ).reshape(-1, 3)
 
-    # Which model did the DEPLOYED module run? A recording predates whatever is
-    # current, so sniff it rather than assume: the model whose holds agree with
-    # the recorded plans is the one the robot used. `model` None = auto.
-    if model is None:
+    def sniff(self, ticks: list[Tick]) -> str:
+        """Which obstacle model did the DEPLOYED stack run?
+
+        A recording predates whatever is current, so sniff it rather than
+        assume: replay a tick subsample under each model and keep the one whose
+        holds agree with the recorded plans.
+        """
         sample = ticks[:: max(1, len(ticks) // 40)]
         agree = {}
         for name in OBSTACLE_MODELS:
-            candidate = load_model(name, emb)
+            candidate = load_model(name, self.emb)
             agree[name] = sum(
-                is_hold(plan(t.imap, t.pose, t.goal, candidate)) == is_hold(t.recorded)
+                is_hold(self(t.imap, t.pose, t.goal, candidate)) == is_hold(t.recorded)
                 for t in sample
             )
         model = max(agree, key=lambda k: (agree[k], k == "body_band"))
         print(
             "config sniff: holds agree "
             + ", ".join(f"{n} {a}/{len(sample)}" for n, a in sorted(agree.items()))
-            + f" -> replaying {model}"
+            + f" -> {model}"
         )
+        return model
+
+
+def replay(
+    rec: Recording,
+    plan: Replanner,
+    model: str,
+    ablate: bool,
+    gate: bool = False,
+    rr: Any = None,
+) -> list[dict[str, float]]:
+    """Re-plan every recorded tick from its own inputs; optionally ablate one input at a time."""
+    emb = plan.emb
+    ticks = gated_ticks(rec.ticks) if gate else rec.ticks
     band = load_model(model, emb)
 
     t = ticks[len(ticks) // 2]
@@ -656,11 +794,12 @@ def replay(
             rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
             # the winning model's hard set -- the very cloud plan() handed the
             # search, holds included -- shifted back onto the map
-            obs = seen["pts"]
+            obs = plan.pts
+            assert obs is not None
             rr.log(
                 "world/obstacles",
                 rr.Points3D(
-                    np.column_stack([obs[:, :2], obs[:, 2] + seen["shift"]]),
+                    np.column_stack([obs[:, :2], obs[:, 2] + plan.shift]),
                     radii=0.022,
                     colors=[[255, 120, 0]],
                 ),
@@ -715,8 +854,8 @@ def replay(
     both = ~rec_hold & ~rep_hold
     cadence = "gated on input arrival" if gate else "every recorded tick"
     print(
-        f"\n=== replay ({planner}, {model}, {cadence}, "
-        f"z_offset {z_offset:+.2f} m, {len(rows)} ticks) ==="
+        f"\n=== replay ({plan.planner}, {model}, {cadence}, "
+        f"z_offset {plan.z_offset:+.2f} m, {len(rows)} ticks) ==="
     )
     print(
         f"deterministic (same inputs twice): {deterministic}\n"
@@ -735,7 +874,7 @@ def replay(
     return rows
 
 
-def _ablate(ticks: list[Tick], plan: Any, band: Any) -> None:
+def _ablate(ticks: list[Tick], plan: Replanner, band: ObstacleModel) -> None:
     """Re-plan each tick pair changing ONE input, to attribute the change."""
     rows = []
     for a, b in pairwise(ticks):
@@ -790,12 +929,16 @@ def latency(rec: Recording) -> list[dict[str, float]]:
     ]
     print("\n=== latency ===")
     print(f"{'stream':>14} {'n':>6} {'median dt':>10} {'p95':>9} {'max':>9}")
-    for name, stamps in (
+    for name, all_stamps in (
         ("local_map", map_ts),
         ("odometry", rec.odom_ts),
         ("planner_path", global_ts),
         ("path", np.array([t for t, _ in rec.plans])),
+        ("nav_cmd_vel", np.array([t for t, _ in rec.twists])),
     ):
+        stamps = all_stamps[rec.window.mask(all_stamps)]
+        if len(stamps) < 2:
+            continue
         dt = np.diff(stamps) * 1e3
         print(
             f"{name:>14} {len(stamps):6d} {np.median(dt):9.1f}ms {np.percentile(dt, 95):8.1f}ms "
@@ -809,6 +952,310 @@ def latency(rec: Recording) -> list[dict[str, float]]:
     return rows
 
 
+# ----------------------------------------------------------------- follower --
+
+
+@dataclass(frozen=True)
+class FollowerSetup:
+    """The deployed `trajectory_follower` config, however it was obtained."""
+
+    track: str
+    controller: ControllerConfig
+    control_frequency: float
+    goal_tolerance: float
+    embodiment: str
+    max_path_age_s: float
+    obstacle_model: str | None  # None = fall back to the planner sniff's winner
+    source: str
+
+    @property
+    def period(self) -> float:
+        return 1.0 / self.control_frequency
+
+
+def blueprint_setup() -> FollowerSetup:
+    """The `go2-zenoh-motion` follower, read off the blueprint rather than copied.
+
+    `max_path_age_s` has no python twin — it is the baked host's deadman — so
+    it comes off :class:`TrajectoryFollowerNativeConfig`, which is the module
+    that actually runs on the robot.
+    """
+    from dimos.navigation.motion.adapter.follower import (
+        TrajectoryFollower,
+        TrajectoryFollowerConfig,
+    )
+    from dimos.navigation.motion.adapter.follower_native import TrajectoryFollowerNativeConfig
+    from dimos.robot.unitree.go2.zenoh.blueprints import go2_zenoh_motion
+
+    kwargs: dict[str, Any] = {}
+    for atom in go2_zenoh_motion.blueprints:
+        if atom.module is TrajectoryFollower:
+            kwargs = dict(atom.kwargs)
+    cfg = TrajectoryFollowerConfig(**kwargs)
+    return FollowerSetup(
+        track=cfg.track,
+        controller=cfg.controller_config,
+        control_frequency=cfg.control_frequency,
+        goal_tolerance=cfg.goal_tolerance,
+        embodiment=cfg.embodiment,
+        max_path_age_s=TrajectoryFollowerNativeConfig.model_fields["max_path_age_s"].default,
+        obstacle_model=cfg.obstacle_model,
+        source="go2-zenoh-motion blueprint",
+    )
+
+
+def host_setup(path: str) -> FollowerSetup:
+    """`modules.trajectory_follower.config` off a motion-host stdin blob."""
+    blob = json.loads(FsPath(path).read_text())
+    try:
+        cfg = blob["modules"]["trajectory_follower"]["config"]
+    except (KeyError, TypeError) as e:
+        raise SystemExit(f"{path}: no modules.trajectory_follower.config") from e
+    fallback = FollowerSetup(
+        track="hinted",
+        controller=ControllerConfig(),
+        control_frequency=10.0,
+        goal_tolerance=0.20,
+        embodiment="go2",
+        max_path_age_s=2.5,
+        obstacle_model="body_band",
+        source=path,
+    )
+    return FollowerSetup(
+        track=cfg.get("track", fallback.track),
+        controller=ControllerConfig(**cfg.get("controller_config", {})),
+        control_frequency=cfg.get("control_frequency", fallback.control_frequency),
+        goal_tolerance=cfg.get("goal_tolerance", fallback.goal_tolerance),
+        embodiment=cfg.get("embodiment", fallback.embodiment),
+        max_path_age_s=cfg.get("max_path_age_s", fallback.max_path_age_s),
+        obstacle_model=cfg.get("obstacle_model", fallback.obstacle_model),
+        source=path,
+    )
+
+
+def bind_law(track: str, cfg: ControllerConfig) -> tuple[str, TrajectoryController]:
+    """The deployed rust law, or its python twin when the extension is missing."""
+    name = TRACKS[track].controller
+    try:
+        law = load_law(f"{name}-rs")(cfg)
+        return f"{name}-rs", law
+    except ImportError as e:
+        print(
+            f"  {e}\n"
+            "  falling back to the python law. The wheel goes stale SILENTLY: rebuild it "
+            "after any control/rust change, or a parity bug replays as a match."
+        )
+        return name, load_law(name)(cfg)
+
+
+ZERO: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class Command:
+    """One recorded nav_cmd_vel tick, next to what the law would have said."""
+
+    ts: float
+    recorded: tuple[float, float, float]
+    law: tuple[float, float, float]  # zero where the module never ran its law
+    verdict: str
+    reason: str  # why it was a hold: stale, latched, stub
+    gap: float
+    age: float  # how old the plan this tick tracked was
+
+    @property
+    def hold(self) -> bool:
+        return self.verdict == "hold"
+
+
+def classify(
+    recorded: tuple[float, float, float],
+    law: tuple[float, float, float] | None,
+    boundary: bool,
+    threshold: float,
+) -> tuple[str, float]:
+    """One tick's verdict and the worst per-component gap.
+
+    `law` is None where the module never reached its law — the deadman, the
+    goal latch, or a single-pose stub — and the recorded twist is then held
+    against zero instead. `boundary` marks a tick a plan landed on within one
+    control period, where which plan the module held is genuinely ambiguous.
+    """
+    against = ZERO if law is None else law
+    gap = max(abs(a - b) for a, b in zip(recorded, against, strict=True))
+    if law is None:
+        return ("hold" if gap < threshold else "MISMATCH"), gap
+    if boundary:
+        return "boundary", gap
+    return ("match" if gap < threshold else "MISMATCH"), gap
+
+
+def _pose_at(pose: tuple[float, ...], ts: float, frame_id: str) -> PoseStamped:
+    """The tf-resolved base pose as the law's own input type."""
+    return PoseStamped(
+        ts=ts,
+        frame_id=frame_id,
+        position=Vector3(pose[0], pose[1], pose[3] if len(pose) > 3 else 0.0),
+        orientation=Quaternion.from_euler(Vector3(0.0, 0.0, pose[2])),
+    )
+
+
+def follower(
+    rec: Recording,
+    setup: FollowerSetup,
+    model: str,
+    threshold: float,
+    world_frame: str = "odom",
+) -> list[Command]:
+    """Re-run the deployed law at every recorded nav_cmd_vel tick and classify it.
+
+    The law rate-limits its own command, so it is the SAME instance across the
+    whole recording, in order — a window's first tick inherits the state the
+    robot's did. Only in-window ticks are reported.
+    """
+    if not rec.twists:
+        print("\n=== follower ===\nno nav_cmd_vel stream in this recording")
+        return []
+    emb = EMBODIMENTS[setup.embodiment]
+    band = load_model(model, emb)
+    half_width = emb.width / 2.0
+    track = TRACKS[setup.track]
+    binding, law = bind_law(setup.track, setup.controller)
+    law.reset()
+    latch = GoalLatch(setup.goal_tolerance)
+
+    plan_ts = np.array([t for t, _ in rec.plans])
+    map_ts = np.array([t for t, _ in rec.maps])
+    room: np.ndarray | None = None
+    room_key: tuple[int, int] | None = None
+    fed = -1  # the newest plan whose goal the latch has been shown
+
+    def clearance_for(ip: int, imap: int, path: NavPath, pose: tuple[float, ...]) -> Any:
+        """`follower.py::_clearance_for`, off the recorded map instead of a live one."""
+        nonlocal room, room_key
+        if not track.annotate_clearance:
+            return None  # the blind track: the law reads the path's own stamps
+        if imap < 0:
+            ceilings = decode_ceilings(path)
+            return ceilings_to_clearance(ceilings) if ceilings is not None else None
+        if (ip, imap) != room_key:
+            wp = np.array([[p.position.x, p.position.y] for p in path.poses]).reshape(-1, 2)
+            ground_z = (pose[3] if len(pose) > 3 else 0.0) - emb.base_height
+            pts = hard_points(band, rec.maps[imap][1], ground_z)
+            room = path_clearance(wp, pts, half_width)
+            room_key = (ip, imap)
+        return room
+
+    rows: list[Command] = []
+    warmed = 0
+    preempted = False
+    for ts, recorded in rec.twists:
+        ip, j = _before(ts, plan_ts), _before(ts, rec.odom_ts)
+        if ip < 0 or j < 0 or rec.poses[j] is None:
+            continue  # the module was Idle here: no pose, or no plan yet
+        pose = rec.poses[j]
+        assert pose is not None
+        path = rec.plan_msgs[ip]
+        # every plan that arrived since the last tick, in order, so the latch
+        # sees the same set_goal SEQUENCE the module's subscription saw
+        for k in range(fed + 1, ip + 1):
+            poses = rec.plan_msgs[k].poses
+            if len(poses) >= 2:
+                latch.set_goal((poses[-1].position.x, poses[-1].position.y))
+        fed = ip
+        age = ts - plan_ts[ip]
+
+        # the deployed branch (adapter/rust/src/follower.rs::decide), in its own
+        # order: the deadman outranks arrival, because a goal reached against a
+        # plan nobody is refreshing is a coincidence
+        out: tuple[float, float, float] | None
+        reason = ""
+        istop = _before(ts, rec.stops)
+        if istop >= 0 and rec.stops[istop] > plan_ts[ip]:
+            # stop_movement nulled the held path and reset the law; the module
+            # is Idle until the planner publishes again. Resetting once per
+            # stretch is the same law state as resetting per message, since
+            # nothing steps it in between.
+            if not preempted:
+                law.reset()
+                preempted = True
+            out, reason = None, "stopped"
+        elif age > setup.max_path_age_s:
+            out, reason = None, "stale"
+        elif latch.arrive((pose[0], pose[1])) or latch.reached:
+            out, reason = None, "latched"
+        else:
+            preempted = False
+            tw = law.update(
+                _pose_at(pose, ts, world_frame),
+                path,
+                ts,
+                clearance_for(ip, _before(ts, map_ts), path, pose),
+            )
+            out = (tw.linear.x, tw.linear.y, tw.angular.z)
+            if len(path.poses) < 2:
+                # the law obeys the planner's refusal with a zero of its own;
+                # naming it a hold keeps the stats about TRACKING
+                out, reason = None, "stub"
+        if ts not in rec.window:
+            warmed += 1
+            continue
+        verdict, gap = classify(recorded, out, boundary=age < setup.period, threshold=threshold)
+        rows.append(
+            Command(
+                ts=ts,
+                recorded=recorded,
+                law=out or ZERO,
+                verdict=verdict,
+                reason=reason,
+                gap=gap,
+                age=age,
+            )
+        )
+
+    counts = {c: sum(1 for r in rows if r.verdict == c) for c in ("match", "boundary", "hold")}
+    reasons = {
+        w: sum(1 for r in rows if r.hold and r.reason == w)
+        for w in ("stale", "latched", "stopped", "stub")
+    }
+    bad = [r for r in rows if r.verdict == "MISMATCH"]
+    comparable = np.array([r.gap for r in rows if r.verdict in ("match", "MISMATCH")])
+    print(
+        f"\n=== follower ({setup.track}/{binding}, {model} clearance, "
+        f"{len(rows)} ticks over {rec.window.label(rec.t0)}) ==="
+    )
+    print(
+        f"config: {setup.source} (max_path_age {setup.max_path_age_s} s, "
+        f"{setup.control_frequency:g} Hz, max_speed {setup.controller.max_speed})\n"
+        f"law state warmed over {warmed} pre-window ticks\n"
+        f"match {counts['match']}  boundary {counts['boundary']}  "
+        f"hold {counts['hold']} (" + ", ".join(f"{w} {n}" for w, n in reasons.items()) + ")  "
+        f"MISMATCH {len(bad)}"
+    )
+    if len(comparable):
+        print(
+            f"comparable ticks ({len(comparable)}): median {np.median(comparable):.3f}  "
+            f"p95 {np.percentile(comparable, 95):.3f}  max {comparable.max():.3f} "
+            f"(worst component, m/s or rad/s)"
+        )
+    # The cheapest proof that the config is not the one the robot ran, and the
+    # one failure this pass would otherwise report as a wall of MISMATCH: a
+    # twist the law's own envelope cannot produce did not come from this config.
+    fastest = max((math.hypot(*r.recorded[:2]) for r in rows), default=0.0)
+    if fastest > setup.controller.max_speed + 1e-6:
+        print(
+            f"the recorded twist reaches {fastest:.2f} m/s, over this config's max_speed "
+            f"{setup.controller.max_speed} -- {setup.source} is NOT what the robot ran"
+        )
+    for r in bad:
+        print(
+            f"  MISMATCH t={r.ts - rec.t0:6.2f}  recorded "
+            f"({r.recorded[0]:+.3f} {r.recorded[1]:+.3f} {r.recorded[2]:+.3f})  law "
+            f"({r.law[0]:+.3f} {r.law[1]:+.3f} {r.law[2]:+.3f})  gap {r.gap:.3f}"
+        )
+    return rows
+
+
 # -------------------------------------------------------------------- plots --
 
 
@@ -816,9 +1263,10 @@ def write_plots(
     churn_rows: list[dict[str, float]],
     plan_rows: list[dict[str, float]],
     latency_rows: list[dict[str, float]],
+    follower_rows: list[Command],
     out: FsPath,
 ) -> None:
-    """Churn / flip / age time series as SVG (dimos.memory2.vis.plot)."""
+    """Churn / flip / age / twist time series as SVG (dimos.memory2.vis.plot)."""
     from dimos.memory2.vis import color
     from dimos.memory2.vis.plot.elements import Series, VLine
     from dimos.memory2.vis.plot.plot import Plot
@@ -886,6 +1334,33 @@ def write_plots(
                 )
             )
         p.to_svg(str(out / "latency.svg"))
+    if follower_rows:
+        p = Plot()
+        ts = [cmd.ts for cmd in follower_rows]
+        for k, label, c in ((0, "vx", color.blue), (1, "vy", color.green), (2, "wz", color.orange)):
+            p.add(
+                Series(
+                    ts=ts,
+                    values=[cmd.recorded[k] for cmd in follower_rows],
+                    label=label,
+                    color=c.hex(),
+                )
+            )
+            p.add(
+                Series(
+                    ts=ts,
+                    values=[cmd.law[k] for cmd in follower_rows],
+                    label=f"{label} (law)",
+                    color=c.hex(),
+                    opacity=0.45,
+                )
+            )
+        for cmd in follower_rows:
+            if cmd.hold:
+                p.add(VLine(x=cmd.ts, color=color.purple.hex(), opacity=0.2))
+            elif cmd.verdict == "MISMATCH":
+                p.add(VLine(x=cmd.ts, color=color.red.hex(), opacity=0.6))
+        p.to_svg(str(out / "follower.svg"))
     print("\nplots: " + " ".join(str(f) for f in sorted(out.glob("*.svg"))))
 
 
@@ -895,7 +1370,14 @@ def write_plots(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("recording", help="path to the .mcap recording")
-    ap.add_argument("--only", default="churn,plans,replay,latency", help="passes to run")
+    ap.add_argument("--only", default="churn,plans,replay,latency,follower", help="passes to run")
+    ap.add_argument(
+        "--from",
+        dest="start",
+        default=None,
+        help="window start: seconds into the recording, or HH:MM:SS[.fff] UTC",
+    )
+    ap.add_argument("--to", dest="end", default=None, help="window end, same two forms")
     ap.add_argument("--voxel", type=float, default=0.08, help="raycaster voxel size")
     ap.add_argument("--planner", default="target")
     ap.add_argument("--embodiment", default="go2")
@@ -921,6 +1403,17 @@ def main() -> None:
     ap.add_argument(
         "--gate", action="store_true", help="replay only the ticks a replan gate would keep"
     )
+    ap.add_argument(
+        "--host-config",
+        default=None,
+        help="motion-host.json the follower ran; without it the blueprint's values stand in",
+    )
+    ap.add_argument(
+        "--threshold",
+        type=float,
+        default=0.15,
+        help="per-component twist gap (m/s, rad/s) under which a follower tick matches",
+    )
     ap.add_argument("--no-ablate", action="store_true", help="skip the one-input-at-a-time replay")
     ap.add_argument("--spawn", action="store_true", help="live rerun viewer instead of an rrd")
     ap.add_argument("--out", default="recordings", help="where the rrd and svgs land")
@@ -931,14 +1424,18 @@ def main() -> None:
     args = ap.parse_args()
 
     passes = {p.strip() for p in args.only.split(",")}
-    model = "raw_band" if args.no_anchor else (None if args.model == "auto" else args.model)
-    rec = load_recording(args.recording, args.base_frame, args.lookahead)
+    named = "raw_band" if args.no_anchor else (None if args.model == "auto" else args.model)
+    start = parse_instant(args.start) if args.start else None
+    end = parse_instant(args.end) if args.end else None
+    rec = load_recording(args.recording, args.base_frame, args.lookahead, start, end)
+    setup = host_setup(args.host_config) if args.host_config else blueprint_setup()
     stem = FsPath(args.out) / f"{FsPath(args.recording).stem}-diagnose"
     stem.parent.mkdir(parents=True, exist_ok=True)
     print(
         f"{args.recording}: {len(rec.maps)} local_map, {len(rec.plans)} plans, "
-        f"{len(rec.ticks)} ticks with complete inputs, "
+        f"{len(rec.twists)} nav_cmd_vel, {len(rec.ticks)} ticks with complete inputs, "
         f"{rec.plans[-1][0] - rec.t0:.1f} s"
+        + (f" | window {rec.window.label(rec.t0)}" if rec.window.bounded else "")
     )
 
     import rerun as rr
@@ -995,23 +1492,45 @@ def main() -> None:
             static=True,
         )
 
+    # One planner episode serves both the model sniff and the replay, and is
+    # built only if something asks for it -- `--only follower` should not pay
+    # for a planner it never runs.
+    replanner: Replanner | None = None
+    sniffed: str | None = named
+
+    def obstacle_model() -> str | None:
+        """The model the recording was made under; None when nothing can tell."""
+        nonlocal replanner, sniffed
+        if sniffed is None and rec.all_ticks:
+            if replanner is None:
+                replanner = Replanner(rec, args.planner, args.embodiment, args.z_offset)
+            # over the WHOLE recording: which model ran is a fact about the
+            # robot, not about whatever window is being looked at
+            sniffed = replanner.sniff(rec.all_ticks)
+        return sniffed
+
     churn_rows = (
         churn(rec, args.voxel, load_model("raw_band", emb), rr) if "churn" in passes else []
     )
     plan_rows = plans(rec) if "plans" in passes else []
     if "replay" in passes:
-        replay(
-            rec,
-            args.planner,
-            args.embodiment,
-            args.z_offset,
-            not args.no_ablate,
-            model=model,
-            gate=args.gate,
-            rr=rr,
-        )
+        model = obstacle_model() or "body_band"
+        if replanner is None:
+            replanner = Replanner(rec, args.planner, args.embodiment, args.z_offset)
+        replay(rec, replanner, model, not args.no_ablate, gate=args.gate, rr=rr)
     latency_rows = latency(rec) if "latency" in passes else []
-    write_plots(churn_rows, plan_rows, latency_rows, FsPath(args.plots or str(stem)))
+    follower_rows: list[Command] = []
+    if "follower" in passes:
+        # --model wins outright; otherwise the sniff, because it measures what
+        # the robot RAN while a config only says what it was asked to run
+        room_model = named or obstacle_model() or setup.obstacle_model or "body_band"
+        if setup.obstacle_model and room_model != setup.obstacle_model:
+            print(
+                f"\nnote: {setup.source} says obstacle_model={setup.obstacle_model}, the sniff "
+                f"says {room_model} -- measuring the room hint off {room_model} (--model overrides)"
+            )
+        follower_rows = follower(rec, setup, room_model, args.threshold)
+    write_plots(churn_rows, plan_rows, latency_rows, follower_rows, FsPath(args.plots or str(stem)))
     if not args.spawn:
         print(f"rerun: {rrd}")
 

@@ -19,10 +19,20 @@ python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --spawn
 python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save athens.rrd --every 3
 
 # post-mortem a recording of the live stack: map churn, plan flips, planner
-# replay + input ablation, input ages. Writes an rrd + svgs under recordings/.
+# replay + input ablation, input ages, follower replay. Writes an rrd + svgs
+# under recordings/.
 python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --model raw_band
+
+# the FOLLOWER re-run: the deployed law on the deployed config against the twist
+# that actually went out, one verdict per recorded nav_cmd_vel tick
+python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only follower \
+    --host-config motion-host.json --from 6.9 --to 8.6
+
+# every pass takes the same two window flags: seconds into the recording, or a
+# UTC time of day matching the message stamps
+python -m dimos.navigation.motion.adapter.diagnose rec.mcap --from 06:34:35.4 --to 06:34:37
 
 # view the rrd it wrote (or use --spawn above to stream live)
 rerun recordings/<rec>-diagnose.rrd
@@ -40,6 +50,29 @@ rerun recordings/<rec>-diagnose.rrd
 # which model the deployed stack ran -- it replays a tick subsample under each
 # and keeps the one whose holds agree with the recorded plans, so a recording
 # made before body_band landed still replays as it ran. --model names one.
+#
+# The follower pass rebuilds each tick's inputs the way the module does: the
+# tf-resolved base pose, the latest path, and -- on the hinted track -- the room
+# hint RECOMPUTED from the latest local map through that same obstacle model
+# (the blind track decodes the path's stamps instead). It runs the deployed rust
+# law when the extension is built and says so; on the python fallback, remember
+# the venv wheel goes stale silently after any control/rust change:
+#   uv run maturin develop --uv --release -m dimos/navigation/motion/control/rust/Cargo.toml
+#
+# Each tick is match (under --threshold, default 0.15 per component), boundary
+# (a plan landed within one control period -- unpairable, left out of the
+# stats), hold (the module never reached its law: deadman, goal latch, or a
+# single-pose refusal, so the recorded twist is held against zero), or MISMATCH.
+# The law rate-limits its own command, so ticks run in order through ONE law
+# instance and --from only decides which are REPORTED: a window's first tick
+# inherits the state the robot's did, and a window reproduces the full run
+# restricted to it, tick for tick.
+#
+# --host-config reads modules.trajectory_follower.config off a motion-host stdin
+# blob (track, controller_config, control_frequency, max_path_age_s,
+# obstacle_model); without it the go2-zenoh-motion blueprint's own values stand
+# in. A recorded twist faster than the config's max_speed is called out: it is
+# proof the blob is not what the robot ran.
 
 # tests and types
 python -m pytest dimos/navigation/motion/adapter -q
