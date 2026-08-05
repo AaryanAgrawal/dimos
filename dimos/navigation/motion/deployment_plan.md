@@ -246,30 +246,18 @@ The host runs **on the robot itself**, same machine as the go2web bridge —
 that is why it dials the bridge over loopback and listens on its own port
 (see the deployment comment in `go2/zenoh/blueprints.py`).
 
-One-time toolchain on an Arch dev box (the plain `rust` package has host-only
-std, no cross target):
+No host-side toolchain setup. The nix dev shell carries the whole thing —
+rust 1.97.1 pinned through the `rustOverlay` input (oxalica/rust-overlay) with
+`aarch64-unknown-linux-gnu` in its target list, plus `cargo-zigbuild` and `zig`
+from nixpkgs. Inside `nix develop` (or the direnv shell), `cargo`, `rustc`,
+`zig` and `cargo-zigbuild` all resolve to `/nix/store/...` — which also shadows
+the `~/.local/bin/cargo` niceness shim that used to break rustup proxying. No
+rustup, no pipx, no PATH fronting.
 
-    sudo pacman -S rustup            # replaces the 'rust' package
-    rustup default stable
-    rustup target add aarch64-unknown-linux-gnu
-    pipx install cargo-zigbuild
-    pipx inject cargo-zigbuild ziglang   # zig is NOT bundled; without this the
-                                         # link step dies with "Failed to find zig"
-
-Two environment traps, both hit and solved on 2026-08-05:
-
-- zig must be findable on PATH: pipx puts it inside the venv
-  (`~/.local/share/pipx/venvs/cargo-zigbuild/lib/*/site-packages/ziglang/zig`)
-  without exposing a bin — symlink it somewhere on PATH.
-- a `cargo` niceness shim in `~/.local/bin` (nice/ionice wrapper) canonicalizes
-  the rustup proxy down to the raw `rustup` binary, which then fails with
-  "Usage: rustup <+toolchain>". Front the PATH with a dir containing a plain
-  `cargo -> /usr/bin/cargo` symlink for the bake, or fix the shim to exec by
-  path without readlink -f.
-
-The clean end state is the nix dev shell providing rust + the aarch64 std +
-cargo-zigbuild itself (today it provides no rust at all; the toolchain leaks
-in from the host) — until then the above is the working host-side setup.
+Two environment traps hit on 2026-08-05, both dead as of the flake change: zig
+hiding inside a pipx venv with no bin, and that `cargo` shim canonicalizing the
+rustup proxy down to raw `rustup`. If you ever bake outside the nix shell, they
+come back.
 
 Then:
 
@@ -283,9 +271,11 @@ robot's (`ldd --version` on it) and pin at or below. Artifact lands at
 (`DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447` to reach the bridge, a fixed
 `DIMOS_ZENOH_LISTEN` port of its own so the laptop can dial it).
 
-A plain `--target aarch64-unknown-linux-gnu` without zigbuild fails on this
-setup with `can't find crate for core` — that is the missing cross std, not a
-bake bug.
+`--builder zigbuild` is what makes the glibc pin possible at all; the aarch64
+std the flake ships is what makes any aarch64 target work. Outside the nix
+shell, a plain `--target aarch64-unknown-linux-gnu` against a host rust with no
+cross std fails with `can't find crate for core` — that is the missing std, not
+a bake bug.
 
 ### Config is the sharp edge
 
