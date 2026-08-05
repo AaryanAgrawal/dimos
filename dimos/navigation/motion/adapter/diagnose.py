@@ -649,33 +649,48 @@ def replay(
                     colors=[[255, 120, 0]],
                 ),
             )
-        if rr is not None and len(out) > 1:
+        if rr is not None:
+            # each source cleared on its own hold: a hold means "no active
+            # path", and a plan left on screen would be one the follower was
+            # not actually tracking
             base_z = tick.pose[3] if len(tick.pose) > 3 else 0.0
-            z = np.full(len(out), 0.02)
-            rr.log(
-                "world/replay",
-                rr.LineStrips3D(
-                    [np.column_stack([out[:, :2], z])], colors=[[150, 150, 150]], radii=0.012
-                ),
-            )
-            rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [150, 150, 150, 140]))
-            rr.log(
-                "world/requested",
-                rr.LineStrips3D(
-                    [np.column_stack([tick.recorded[:, :2], np.full(len(tick.recorded), 0.03)])],
-                    colors=[[100, 160, 255]],
-                    radii=0.012,
-                ),
-            )
-            rr.log(
-                "world/requested/bodies",
-                _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 140]),
-            )
-            if tick.stamped_clear is not None:
+            if len(out) > 1:
+                z = np.full(len(out), 0.02)
                 rr.log(
-                    "world/requested/precision",
-                    _precision_circles(rr, tick.recorded, tick.stamped_clear, 0.04, emb),
+                    "world/replay",
+                    rr.LineStrips3D(
+                        [np.column_stack([out[:, :2], z])], colors=[[150, 150, 150]], radii=0.012
+                    ),
                 )
+                rr.log(
+                    "world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [150, 150, 150, 140])
+                )
+            else:
+                rr.log("world/replay", rr.Clear(recursive=True))
+            if len(tick.recorded) > 1:
+                rr.log(
+                    "world/requested",
+                    rr.LineStrips3D(
+                        [
+                            np.column_stack(
+                                [tick.recorded[:, :2], np.full(len(tick.recorded), 0.03)]
+                            )
+                        ],
+                        colors=[[100, 160, 255]],
+                        radii=0.012,
+                    ),
+                )
+                rr.log(
+                    "world/requested/bodies",
+                    _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 140]),
+                )
+                if tick.stamped_clear is not None:
+                    rr.log(
+                        "world/requested/precision",
+                        _precision_circles(rr, tick.recorded, tick.stamped_clear, 0.04, emb),
+                    )
+            else:
+                rr.log("world/requested", rr.Clear(recursive=True))
     wall = time.perf_counter() - started
 
     d = np.array([r["div"] for r in rows])
