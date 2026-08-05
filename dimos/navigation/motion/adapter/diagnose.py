@@ -32,7 +32,9 @@ planner_path, path) and runs four passes:
     python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --no-anchor
 
 The replay anchors the cloud to the floor exactly as the module does, off the
-same tf prior; `--no-anchor` is the band as it was deployed before that landed.
+same tf prior -- unless the recording says otherwise: the replay sniffs which
+band the DEPLOYED module actually ran (whose holds agree with the recorded
+plans) and follows it. `--no-anchor` forces the raw band.
 """
 
 from __future__ import annotations
@@ -577,7 +579,7 @@ def replay(
     embodiment: str,
     z_offset: float,
     ablate: bool,
-    anchor: bool = True,
+    anchor: bool | None = None,
     ground_margin: float = 0.16,
     gate: bool = False,
     rr: Any = None,
@@ -600,7 +602,7 @@ def replay(
         # corrects the map's z origin, then the floor is measured off that map.
         pts = rec.maps[imap][1] + offset
         seen["floor"] = 0.0
-        if anchor and prior is not None:
+        if prior is not None:
             floor = estimate_floor(pts, (pose[0], pose[1]), prior=prior)
             if floor is not None:
                 pts = anchor_to_floor(pts, floor, ground_margin)
@@ -616,14 +618,37 @@ def replay(
     t = ticks[len(ticks) // 2]
     twice = plan(t.imap, t.pose, t.goal, t.floor_prior), plan(t.imap, t.pose, t.goal, t.floor_prior)
     deterministic = twice[0].shape == twice[1].shape and bool(np.allclose(*twice))
-    anchored = anchor and any(t.floor_prior is not None for t in rec.ticks)
+
+    # Which band did the DEPLOYED module run? Anchoring degrades to the raw
+    # band in the field when tf/lidar_height are not in place, so sniff: the
+    # band whose holds agree with the recorded plans is the band the robot
+    # used. `anchor` None = auto; --no-anchor forces raw.
+    use_anchor = anchor
+    if use_anchor is None:
+        sample = ticks[:: max(1, len(ticks) // 40)]
+        agree_a = agree_r = 0
+        for t in sample:
+            held = is_hold(t.recorded)
+            agree_a += is_hold(plan(t.imap, t.pose, t.goal, t.floor_prior)) == held
+            agree_r += is_hold(plan(t.imap, t.pose, t.goal, None)) == held
+        use_anchor = agree_a >= agree_r
+        print(
+            f"config sniff: anchored holds agree {agree_a}/{len(sample)}, raw "
+            f"{agree_r}/{len(sample)} -> replaying {'anchored' if use_anchor else 'RAW band'}"
+            + ("" if use_anchor else " (the robot ran without floor anchoring)")
+        )
+
+    def prior_of(t: Tick) -> float | None:
+        return t.floor_prior if use_anchor else None
+
+    anchored = bool(use_anchor) and any(t.floor_prior is not None for t in rec.ticks)
 
     rows: list[dict[str, float]] = []
     started = time.perf_counter()
     previous: np.ndarray | None = None
     emb = EMBODIMENTS[embodiment]
     for tick in ticks:
-        out = plan(tick.imap, tick.pose, tick.goal, tick.floor_prior)
+        out = plan(tick.imap, tick.pose, tick.goal, prior_of(tick))
         row = {
             "ts": tick.ts,
             "n_rec": float(len(tick.recorded)),
@@ -716,24 +741,24 @@ def replay(
         f"plan wall time {1e3 * wall / len(rows):.1f} ms/tick"
     )
     if ablate:
-        _ablate(ticks, plan)
+        _ablate(ticks, plan, prior_of)
     return rows
 
 
-def _ablate(ticks: list[Tick], plan: Any) -> None:
+def _ablate(ticks: list[Tick], plan: Any, prior_of: Any) -> None:
     """Re-plan each tick pair changing ONE input, to attribute the change."""
     rows = []
     for a, b in pairwise(ticks):
         # the floor prior travels with the pose: it is read off the same
         # odometry message the pose is
-        base = plan(a.imap, a.pose, a.goal, a.floor_prior)
+        base = plan(a.imap, a.pose, a.goal, prior_of(a))
         rows.append(
             {
                 "ts": b.ts,
-                "all": divergence(base, plan(b.imap, b.pose, b.goal, b.floor_prior)),
-                "cloud": divergence(base, plan(b.imap, a.pose, a.goal, a.floor_prior)),
-                "pose": divergence(base, plan(a.imap, b.pose, a.goal, b.floor_prior)),
-                "goal": divergence(base, plan(a.imap, a.pose, b.goal, a.floor_prior)),
+                "all": divergence(base, plan(b.imap, b.pose, b.goal, prior_of(b))),
+                "cloud": divergence(base, plan(b.imap, a.pose, a.goal, prior_of(a))),
+                "pose": divergence(base, plan(a.imap, b.pose, a.goal, prior_of(b))),
+                "goal": divergence(base, plan(a.imap, a.pose, b.goal, prior_of(a))),
                 "hold": float(is_hold(base)),
                 "new_map": float(a.imap != b.imap),
             }
@@ -897,7 +922,7 @@ def main() -> None:
         "--ground-margin", type=float, default=0.16, help="MotionPlanner ground_margin_m"
     )
     ap.add_argument(
-        "--no-anchor", action="store_true", help="replay on the raw z-band, as deployed before"
+        "--no-anchor", action="store_true", help="force the raw z-band (default: sniff)"
     )
     ap.add_argument(
         "--gate", action="store_true", help="replay only the ticks a replan gate would keep"
@@ -984,7 +1009,7 @@ def main() -> None:
             args.embodiment,
             args.z_offset,
             not args.no_ablate,
-            anchor=not args.no_anchor,
+            anchor=False if args.no_anchor else None,
             ground_margin=args.ground_margin,
             gate=args.gate,
             rr=rr,
