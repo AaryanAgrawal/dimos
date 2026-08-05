@@ -640,7 +640,7 @@ def replay(
                     [np.column_stack([out[:, :2], z])], colors=[[150, 150, 150]], radii=0.012
                 ),
             )
-            rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [150, 150, 150, 60]))
+            rr.log("world/replay/bodies", _plan_bodies(rr, out, base_z, emb, [150, 150, 150, 140]))
             rr.log(
                 "world/requested",
                 rr.LineStrips3D(
@@ -651,7 +651,7 @@ def replay(
             )
             rr.log(
                 "world/requested/bodies",
-                _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 60]),
+                _plan_bodies(rr, tick.recorded, base_z, emb, [100, 160, 255, 140]),
             )
             if tick.stamped_clear is not None:
                 rr.log(
@@ -927,7 +927,7 @@ def main() -> None:
                     centers=[[pose[0], pose[1], pose[3] if len(pose) > 3 else 0.0]],
                     half_sizes=[[emb.length / 2, emb.width / 2, 0.2]],
                     rotation_axis_angles=[rr.RotationAxisAngle(axis=(0, 0, 1), radians=pose[2])],
-                    colors=[[0, 200, 100, 60]],
+                    colors=[[0, 200, 100, 140]],
                 ),
             )
             last_body = pose
