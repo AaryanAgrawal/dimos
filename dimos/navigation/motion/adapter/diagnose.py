@@ -1629,6 +1629,21 @@ def main() -> None:
             rr.LineStrips3D([walked], colors=[[0, 200, 100]], radii=0.008),
             static=True,
         )
+    # the MLS global route the carrot rides on, at each republish; an empty
+    # route is MLS saying "no way through", so nothing should stay on screen
+    for gts, gxy in rec.globals:
+        rr.set_time("time", timestamp=float(gts))
+        if len(gxy) > 1:
+            rr.log(
+                "world/global",
+                rr.LineStrips3D(
+                    [np.column_stack([gxy, np.full(len(gxy), 0.04)])],
+                    colors=[[200, 100, 255]],
+                    radii=0.010,
+                ),
+            )
+        else:
+            rr.log("world/global", rr.Clear(recursive=True))
 
     # One planner episode serves both the model sniff and the replay, and is
     # built only if something asks for it -- `--only follower` should not pay

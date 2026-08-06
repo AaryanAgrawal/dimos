@@ -46,8 +46,9 @@ rerun recordings/<rec>-diagnose.rrd
 # (box at 30 Hz, track line), world/replay white = the same tick re-planned
 # offline. world/obstacles orange = the winning obstacle model's hard set, i.e.
 # the very points the replayed search planned around, drawn back on the map
-# (the search itself is planar and gets them as xy). world/carrot =
-# the goal dot. A frozen box + carrot with no replay line = a hold.
+# (the search itself is planar and gets them as xy). world/global violet =
+# the MLS route at each republish; world/carrot = the goal dot along it.
+# A frozen box + carrot with no replay line = a hold.
 #
 # The replay reads obstacles through motion/obstacles.py and by default SNIFFS
 # which model the deployed stack ran -- it replays a tick subsample under each
