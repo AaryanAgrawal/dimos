@@ -66,7 +66,11 @@ def _resample(xy: np.ndarray, step: float = 0.1) -> np.ndarray:
 
 def score_world(v: Verdict) -> dict[str, Any]:
     """Score one verdict; see module docstring for the shape."""
-    out: dict[str, Any] = {"name": v.scenario.name, "dq": False}
+    # Envelope violation: how deep the world reaches into the slack between the
+    # heading row the plan promised and the all-gait union the follower could
+    # still occupy (planner/revision.md). Named, never scored -- it is the
+    # planner-assumes vs follower-does mismatch made visible, not a penalty.
+    out: dict[str, Any] = {"name": v.scenario.name, "dq": False, "env_viol": round(v.env_viol, 4)}
 
     # Safety gate: a non-vetoed path that interpenetrates truth is a
     # collision the robot would perform. Nothing else matters.
@@ -114,6 +118,11 @@ def summarize(worlds: list[dict[str, Any]]) -> dict[str, Any]:
         "worst": {"name": worst["name"], "total": worst["total"]} if worst else None,
         "dq": sum(1 for w in worlds if w["dq"]),
         "timeouts": sum(1 for w in worlds if w["dq"] == "timeout"),
+        # Worlds where the union touched but the planned heading row did not,
+        # and how deep the worst one reached: the envelope's exposure, reported
+        # beside the score rather than inside it.
+        "env_viol": sum(1 for w in worlds if w.get("env_viol", 0.0) > 0.0),
+        "env_viol_max": round(max((w.get("env_viol", 0.0) for w in worlds), default=0.0), 4),
         "gold": round(float(np.mean([w["gold"] for w in worlds])), 4),
         "consistency": round(float(np.mean([w["consistency"] for w in worlds])), 4),
         "speed": round(float(np.mean([w["speed"] for w in worlds])), 4),

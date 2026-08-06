@@ -26,6 +26,13 @@ half of a world is not a tightrope); the same deviation beside a wall is the
 violation. That makes the score context-specific with zero per-world tuning,
 and it is fair to a clearance-blind controller: tracking within the floor
 everywhere satisfies it maximally. Cross-track stays as a raw diagnostic.
+
+The body it measures is the all-gait UNION, and stays that way now that the
+planner's judge sweeps per-heading rows (planner/revision.md): this referee
+scores the follower, and the follower is precisely what may leave the row the
+plan assumed. What it gains instead is the same named metric -- ``env_viol``,
+the share of ticks spent outside that row but inside the union -- so the
+mismatch is reported rather than folded into a pillar.
 """
 
 from __future__ import annotations
@@ -63,20 +70,78 @@ def cross_track(pos_xy: np.ndarray, path_xy: np.ndarray) -> np.ndarray:
     return np.asarray(np.min(np.linalg.norm(pos_xy[:, None, :] - closest, axis=2), axis=1))
 
 
-def executed_clearance(result: EpisodeResult) -> np.ndarray:
-    """Exact body clearance to truth per tick: footprint samples vs box SDFs."""
+def _footprint_clearance(
+    result: EpisodeResult, off: np.ndarray, sel: np.ndarray | None = None
+) -> np.ndarray:
+    """Clearance of a body-frame sample set against the truth boxes, per tick.
+
+    ``sel`` restricts the work to a subset of ticks; the answer keeps the full
+    tick indexing and leaves the rest at +inf.
+    """
     n = len(result.pos)
     sc = result.scenario
-    if not sc.boxes or n == 0:
-        return np.full(n, np.inf)
-    off = sc.emb.offsets()  # (m, 2) body-frame samples, center_off included
-    xy = result.pos[:, :2]
-    c, s = np.cos(result.yaw), np.sin(result.yaw)
+    idx = np.arange(n) if sel is None else np.flatnonzero(sel)
+    out = np.full(n, np.inf)
+    if not len(idx):
+        return out
+    xy = result.pos[idx, :2]
+    c, s = np.cos(result.yaw[idx]), np.sin(result.yaw[idx])
     wx = xy[:, 0, None] + c[:, None] * off[None, :, 0] - s[:, None] * off[None, :, 1]
     wy = xy[:, 1, None] + s[:, None] * off[None, :, 0] + c[:, None] * off[None, :, 1]
     pts = np.column_stack([wx.ravel(), wy.ravel()])
     d = np.min(np.stack([b.sdf2d(pts) for b in sc.boxes]), axis=0)
-    return np.asarray(d.reshape(n, -1).min(axis=1))
+    out[idx] = d.reshape(len(idx), -1).min(axis=1)
+    return out
+
+
+def executed_clearance(result: EpisodeResult) -> np.ndarray:
+    """Exact body clearance to truth per tick: footprint samples vs box SDFs.
+
+    The all-gait UNION, deliberately, and not the planner's per-heading row:
+    this side of the referee measures what the follower DID, and the follower
+    is exactly the thing that may leave the row the plan assumed (a crab
+    correction mid-doorway is the open question in planner/revision.md). A
+    hard floor may not soften with an assumption about gait — see
+    envelope_excursion for how far outside the row it went.
+    """
+    n = len(result.pos)
+    sc = result.scenario
+    if not sc.boxes or n == 0:
+        return np.full(n, np.inf)
+    return _footprint_clearance(result, sc.emb.offsets())
+
+
+def envelope_excursion(result: EpisodeResult) -> tuple[float, float]:
+    """(fraction of ticks, worst depth) outside the planned row, inside the union.
+
+    The planner-assumes vs follower-does mismatch, named. Per tick the row is
+    the swept box the embodiment measured for the direction the trunk is
+    ACTUALLY travelling in body frame; a tick where the union touches truth and
+    that row does not is a contact the plan never promised and the follower's
+    gait alone can produce. Zero for a body with no measured rows: there the
+    two shapes are the same box.
+    """
+    sc = result.scenario
+    if not sc.boxes or not sc.emb.envelope or len(result.pos) < 2:
+        return 0.0, 0.0
+    uni = _footprint_clearance(result, sc.emb.offsets())
+    # Central-difference travel direction; a tick that is not translating has
+    # no drift and reads the union, as the search's turn-in-place edges do.
+    d = np.gradient(result.pos[:, :2], axis=0)
+    moving = np.hypot(d[:, 0], d[:, 1]) > 1e-6
+    drift = np.arctan2(d[:, 1], d[:, 0]) - result.yaw
+    rows = [sc.emb.envelope_at(float(a)) if m else None for a, m in zip(drift, moving, strict=True)]
+    # One clearance pass per DISTINCT row (nine at most), not per tick.
+    witness: dict[tuple[float, float, float, float], float] = {}
+    for a, r in zip(drift, rows, strict=True):
+        if r is not None:
+            witness.setdefault(r, float(a))
+    row = uni.copy()
+    for key, a in witness.items():
+        sel = np.array([r == key for r in rows], dtype=bool)
+        row[sel] = _footprint_clearance(result, sc.emb.offsets(drift=a), sel)[sel]
+    out = (uni < 0.0) & (row >= 0.0)
+    return float(np.mean(out)), (float(np.max(-uni[out])) if out.any() else 0.0)
 
 
 def _plan_xy(result: EpisodeResult) -> np.ndarray:
@@ -161,11 +226,14 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
     if out["dq"]:
         clear = executed_clearance(result)
         xt = active_cross_track(result)
+        env_frac, env_depth = envelope_excursion(result)
         out.update(
             arrived=0.0,
             precision=0.0,
             pace=0.0,
             composure=0.0,
+            env_viol=round(env_frac, 4),
+            env_viol_depth=round(env_depth, 4),
             min_clear=round(float(np.min(clear)), 4) if len(clear) else math.inf,
             below_floor=round(float(np.mean(clear < sc.emb.precision)), 4) if len(clear) else 0.0,
             xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
@@ -216,11 +284,17 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
     composure = (stability + (1.0 - sat) + calm) / 3.0
 
     xt = active_cross_track(result)
+    # Named, never scored: the pillars stay on the union (see
+    # executed_clearance), and this says how much of the run the body spent
+    # outside the row the planner promised but inside the union it is allowed.
+    env_frac, env_depth = envelope_excursion(result)
     out.update(
         arrived=arrived,
         precision=round(precision, 4),
         pace=round(pace, 4),
         composure=round(composure, 4),
+        env_viol=round(env_frac, 4),
+        env_viol_depth=round(env_depth, 4),
         min_clear=round(float(np.min(clear)), 4) if len(clear) else math.inf,
         below_floor=round(below, 4),
         xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
@@ -246,6 +320,8 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "worst": {"name": worst["name"], "total": worst["total"]} if worst else None,
         "dq": sum(1 for r in rows if r["dq"]),
         "outcomes": outcomes,
+        "env_viol": sum(1 for r in rows if r.get("env_viol", 0.0) > 0.0),
+        "env_viol_max": round(max((r.get("env_viol_depth", 0.0) for r in rows), default=0.0), 4),
         "arrived": round(float(np.mean([r["arrived"] for r in rows])), 4) if rows else math.nan,
         "precision": round(float(np.mean([r["precision"] for r in rows])), 4) if rows else math.nan,
         "pace": round(float(np.mean([r["pace"] for r in rows])), 4) if rows else math.nan,

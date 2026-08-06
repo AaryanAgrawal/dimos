@@ -82,8 +82,13 @@ spec + gold + referee; phase 2 = the rust candidate re-earns.
   far-point invariance over the full battery.
 - Field scenarios: door.zenoh and door2.zenoh (recorded worlds) route through
   the doorway with the forward envelope.
-- Judge gains a per-mode envelope-violation metric (planner-assumes vs
+- [x] Judge gains a per-mode envelope-violation metric (planner-assumes vs
   follower-does mismatch shows up named, not just as wall contact).
+  *Phase 1.5: the planner judge sweeps the drift row and reports `env_viol`
+  (union hits, the row does not); gold's 3 self-DQs became 3 named violations,
+  6-27 mm. The control judge keeps the union as its pillar — it grades the
+  follower, which is the thing that may leave the row — and reports the same
+  metric as the share of ticks spent outside it.*
 - **Gold before/after review**: old vs new gold paths overlaid per world
   (curated 16 + gen 40) as a browsable artifact — Ivan reviews before phase 2.
 - Referee re-baselined; runtime planner re-earns via the lab on the new spec.

@@ -34,10 +34,9 @@ from typing import Any
 
 import numpy as np
 
-from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.embodiment import EMBODIMENTS, Embodiment
 from dimos.navigation.motion.geometry import (
     GO2_BODY,
     NEAR_FIELD_M,
@@ -45,12 +44,13 @@ from dimos.navigation.motion.geometry import (
     AvoidanceConfig,
     CollisionShape,
     DistanceField,
-    SolidPrimitive,
     _path_arcs,
     angle_diff,
+    body_shape,
     near_field_diff,
     scored_clearance,
     station_poses,
+    travel_drift,
     turn_mask,
 )
 from dimos.navigation.motion.obstacles import hard_points, load as load_model
@@ -89,8 +89,10 @@ class Verdict:
     truth_pts: np.ndarray
     repeats: list[np.ndarray]  # xy of each seeded re-run (indecision, visible)
     min_scored: float  # planner's belief along its own plan
-    min_truth: float  # exact world clearance along the plan (the judge)
-    truth_clear: np.ndarray  # per scored waypoint
+    min_truth: float  # exact world clearance along the plan, per-heading (the judge)
+    min_union: float  # the same sweep with the all-gait union: the outer bound
+    env_viol: float  # deepest envelope violation (union hits, the heading row does not)
+    truth_clear: np.ndarray  # per scored waypoint, union (the sweep markers' outer bound)
     # per scored waypoint: (cx, cy, yaw, sx, sy, is_box) of the swept shape
     swept_shapes: np.ndarray
     lat_mean: float
@@ -127,13 +129,42 @@ def _fan_marks(path: Path, cfg: AvoidanceConfig) -> tuple[np.ndarray, int]:
 def _emb_cfg(cfg: AvoidanceConfig, sc: Scenario) -> AvoidanceConfig:
     """Condition the config on the scenario's embodiment (GO2 = unchanged)."""
     e = sc.emb
-    shape = CollisionShape(
-        primitive=SolidPrimitive.box(e.length, e.width, 0.40),
-        pose=Pose(e.center_off, 0.0, 0.20),
-    )
+    shape = body_shape(e)
     if repr(shape) == repr(GO2_BODY) and cfg.shape is GO2_BODY:
         return cfg
     return cfg.model_copy(update={"shape": shape, "veto_clearance": -e.precision})
+
+
+def envelope_sweep(
+    emb: Embodiment, union: CollisionShape, poses: Any, truth_pts: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pose clearance to exact truth, measured twice: heading row, union.
+
+    The row is the swept box the embodiment measured for the pose's own
+    direction of travel -- the shape the search planned that edge with -- taken
+    over BOTH segments adjacent to the pose, since the body arrives on one and
+    leaves on the other. A pose with no direction of travel (a fan, a stop, the
+    standing start) reads the union, the same honest fallback the search's
+    turn-in-place edges take. The union is never narrower than a row, so the
+    gap between the two readings is exactly the slack the planner's
+    motion-conditioned assumption is spending.
+    """
+    xy = np.array([[p.position.x, p.position.y] for p in poses])
+    yaws = np.array([p.orientation.euler[2] for p in poses])
+    drifts = travel_drift(xy, yaws)
+    shapes: dict[tuple[float, ...], CollisionShape] = {}
+    row = np.empty(len(xy))
+    uni = np.empty(len(xy))
+    for i, p in enumerate(poses):
+        uni[i] = float(np.min(union.at(p).distance(truth_pts)))
+        vals = []
+        for d in drifts[i]:
+            key = tuple(round(v, 9) for v in emb.envelope_at(d))
+            if key not in shapes:
+                shapes[key] = body_shape(emb, d)
+            vals.append(float(np.min(shapes[key].at(p).distance(truth_pts))))
+        row[i] = min(vals) if vals else uni[i]
+    return row, uni
 
 
 def judge(
@@ -215,15 +246,28 @@ def judge(
     turn = turn_mask(yaws, cfg.turn_yaw_eps) & ~s_fan
     swept, clear = scored_clearance(field, cfg.shape, poses, cfg, turn=turn, prev_yaw=sc.start[2])
 
-    # Truth at the scored waypoints (sweep coloring)...
+    # Truth at the scored waypoints, on the union: these are the sweep markers,
+    # and a marker's job is to show the outer bound the body may occupy...
     if len(truth_pts):
         truth = np.array([float(np.min(cfg.shape.at(p).distance(truth_pts))) for p in poses])
-        # ...but min_truth judges EVERY final pose: a stride sampler steps
-        # clean over a 0.15 m wall (boxed_in scored +0.03 through one).
-        dense = min(float(np.min(cfg.shape.at(p).distance(truth_pts))) for p in final.poses[:k])
+        # ...but the gate judges EVERY final pose (a stride sampler steps clean
+        # over a 0.15 m wall -- boxed_in scored +0.03 through one), and it
+        # judges the body the plan actually promised: the envelope row for that
+        # pose's own direction of travel, since planner/revision.md that is what
+        # the search plans each edge with. The union reading rides along as the
+        # outer bound, and where the two disagree the difference is an ENVELOPE
+        # VIOLATION -- the world reaches inside the slack between what the
+        # planner assumed and what any gait could do -- named and reported
+        # instead of silently DQ-ing a path nothing touches.
+        row_d, uni_d = envelope_sweep(sc.emb, cfg.shape, final.poses[:k], truth_pts)
+        dense = float(np.min(row_d))
+        dense_union = float(np.min(uni_d))
+        clean = row_d > -1e-6
+        env_viol = float(np.max(np.maximum(-uni_d[clean], 0.0))) if clean.any() else 0.0
     else:
         truth = np.full(len(poses), np.inf)
-        dense = math.inf
+        dense = dense_union = math.inf
+        env_viol = 0.0
 
     t0 = time.perf_counter()
     gold = se2_path(sc.boxes, sc.start, sc.goal, sc.emb)
@@ -243,6 +287,8 @@ def judge(
         repeats=[np.array([[p.position.x, p.position.y] for p in o.poses]) for o in outs],
         min_scored=float(np.min(clear)) if len(clear) else math.inf,
         min_truth=dense,
+        min_union=dense_union,
+        env_viol=env_viol,
         truth_clear=truth,
         swept_shapes=np.array(
             [
@@ -558,6 +604,8 @@ def _record(v: Verdict, sc: Scenario, score: bool) -> dict[str, Any]:
         "lat_max": v.lat_max,
         "min_scored": v.min_scored,
         "min_truth": v.min_truth,
+        "min_union": v.min_union,
+        "env_viol": v.env_viol,
         "veto": v.veto,
         "fans": v.fans,
         "flicker": v.flicker,
@@ -576,7 +624,8 @@ def _print_row(r: dict[str, Any], score: bool) -> None:
         score_col = f"{'DQ' if w['dq'] else w['total']:>8}"
     print(
         f"{r['name']:<14}{r['side']:>6}{r['lat_max']:>9.2f}{r['min_scored']:>9.2f}"
-        f"{r['min_truth']:>9.2f}{r['veto']!s:>6}{r['fans']:>6}{r['flicker']:>9.3f}"
+        f"{r['min_truth']:>9.2f}{r['env_viol']:>7.3f}{r['veto']!s:>6}{r['fans']:>6}"
+        f"{r['flicker']:>9.3f}"
         f"{r['consist']:>9.3f}{r['avoid_ms']:>7.1f}{r['gold_ms']:>7.1f}{score_col}  {r['note']}"
     )
 
@@ -773,7 +822,7 @@ def main() -> None:
             rr.save("sim2d.rrd")
 
     hdr = (
-        f"{'scenario':<14}{'side':>6}{'lat_max':>9}{'scored':>9}{'truth':>9}"
+        f"{'scenario':<14}{'side':>6}{'lat_max':>9}{'scored':>9}{'truth':>9}{'envio':>7}"
         f"{'veto':>6}{'fans':>6}{'flicker':>9}{'consist':>9}{'ms':>7}{'gold':>7}  note"
     )
     if not args.quiet and not args.json:

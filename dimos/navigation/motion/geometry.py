@@ -159,6 +159,47 @@ GO2_BODY = CollisionShape(
     pose=Pose(0.002, 0.0, 0.20),
 )
 
+BODY_H = 0.40  # collider height; paths are ground-level, so the box sits on it
+
+
+def body_shape(emb: Any, drift: float | None = None, height: float = BODY_H) -> CollisionShape:
+    """The embodiment's collider: the all-gait union, or one heading's swept box.
+
+    ``drift`` None asks for the union — the honest outer bound, and the only
+    answer for a body with no direction of travel. A body-frame drift angle in
+    rad asks for the measured envelope row that heading needs, which is what
+    the SE(2) search plans every moving edge against.
+    """
+    length, width, off_x, off_y = (
+        (emb.length, emb.width, emb.center_off, 0.0) if drift is None else emb.envelope_at(drift)
+    )
+    return CollisionShape(
+        primitive=SolidPrimitive.box(length, width, height),
+        pose=Pose(off_x, off_y, height / 2.0),
+    )
+
+
+def travel_drift(xy: np.ndarray, yaws: np.ndarray, eps: float = 1e-4) -> list[tuple[float, ...]]:
+    """Body-frame directions of travel adjacent to each pose (empty = standing).
+
+    A pose is entered on one segment and left on another, so both of their
+    drift angles describe a body that passes through it; a segment shorter
+    than ``eps`` carries no direction at all. An empty tuple therefore means
+    "no direction of travel" — a fan, a stop, a standing start — which is
+    exactly where the union is the only honest shape.
+    """
+    out: list[tuple[float, ...]] = []
+    for i in range(len(xy)):
+        drifts = []
+        for a, b in ((i - 1, i), (i, i + 1)):
+            if a < 0 or b >= len(xy):
+                continue
+            d = xy[b] - xy[a]
+            if float(np.hypot(d[0], d[1])) >= eps:
+                drifts.append(float(math.atan2(d[1], d[0]) - yaws[i]))
+        out.append(tuple(dict.fromkeys(drifts)))
+    return out
+
 
 class AvoidanceConfig(BaseConfig):
     """Avoidance/scoring parameters (the referee-relevant subset is what the

@@ -24,22 +24,21 @@ scores ~1.0 against itself.
 Seeds: 28 is the historical regression world; 0 and 30 sample the mixed
 embodiment roster.
 
-Since planner/revision.md the two sides no longer measure the same box: the
-search plans with the swept box the edge's own heading needs, while the judge
-still sweeps the all-gait UNION, which is up to (union - narrowest row) wider.
-So the oracle's own path can read as touching the judge's box without the robot
-touching anything, and the invariant has to say so in bounded terms rather than
-pretend the mismatch is not there. Closing it is the revision's own acceptance
-item — the judge gains a per-mode envelope-violation metric — and until it
-lands, `envelope_slack` is exactly how far the two shapes are allowed to
-disagree.
+Since planner/revision.md both sides measure the same box again, per heading:
+the search plans each edge with the swept box that edge's drift angle needs and
+the judge sweeps the same rows, so contact the judge reports is contact the
+robot makes. Where the world reaches into the slack between a row and the
+all-gait union, that is an ENVELOPE VIOLATION — reported by name, never a DQ —
+and gold is allowed to have them (its three, corridor_side_goal / gen004 /
+gen028, are 6-27 mm into a union the follower only occupies in a gait the plan
+does not command).
 """
 
 from __future__ import annotations
 
 import pytest
 
-from dimos.navigation.motion.embodiment import EMBODIMENTS, Embodiment
+from dimos.navigation.motion.embodiment import EMBODIMENTS
 from dimos.navigation.motion.geometry import AvoidanceConfig
 from dimos.navigation.motion.planner.referee.score import score_world
 from dimos.navigation.motion.planner.referee.sim import Verdict, judge
@@ -47,20 +46,6 @@ from dimos.navigation.motion.scenarios import SCENARIOS, Scenario, generate
 
 GEN_SEEDS = [0, 28, 30]
 WORLD_IDS = [sc.name for sc in SCENARIOS] + [f"gen{s:03d}" for s in GEN_SEEDS]
-
-
-def envelope_slack(emb: Embodiment) -> float:
-    """How far the judge's union box can stick out past a row the body walks in.
-
-    Zero for an embodiment with no measured rows: there, both sides sweep the
-    same box and any contact the judge reports is a real one.
-    """
-    if not emb.envelope:
-        return 0.0
-    return max(
-        (emb.width - min(r[2] for r in emb.envelope)) / 2.0,
-        (emb.length - min(r[1] for r in emb.envelope)) / 2.0,
-    )
 
 
 @pytest.fixture(scope="module")
@@ -77,15 +62,34 @@ def test_gold_survives_its_own_judge(
 ) -> None:
     sc, v = verdicts[name]
     w = score_world(v)
-    slack = envelope_slack(sc.emb)
-    assert v.min_truth > -slack - 1e-6, (
-        f"gold's path is {-v.min_truth:.4f} m into truth on {name}, past the "
-        f"{slack:.4f} m the union may disagree with its own rows by"
-    )
-    if not slack:
-        assert w["dq"] is False, f"gold DQ'd on {name}"
+    assert w["dq"] is False, f"gold DQ'd on {name} (min_truth {v.min_truth:.4f})"
     if sc.expect != "refuse":
         assert not v.veto, f"gold vetoed its own path on {name} (min_scored {v.min_scored:.3f})"
-    if v.gold is not None and not w["dq"]:
+    if v.gold is not None:
         # Gold vs itself: only densify-vs-raw resampling separates them.
         assert w["gold"] > 0.9, f"gold scored {w['gold']} against itself on {name}"
+
+
+@pytest.mark.parametrize("name", WORLD_IDS)
+def test_an_envelope_violation_is_named_and_bounded(
+    verdicts: dict[str, tuple[Scenario, Verdict]], name: str
+) -> None:
+    """The union may only stick out past the planned row by what it measures."""
+    sc, v = verdicts[name]
+    emb = sc.emb
+    slack = (
+        0.0
+        if not emb.envelope
+        else max(
+            (emb.width - min(r[2] for r in emb.envelope)) / 2.0,
+            (emb.length - min(r[1] for r in emb.envelope)) / 2.0,
+        )
+    )
+    assert v.min_union <= v.min_truth + 1e-9, "the union read wider than its own row"
+    assert score_world(v)["env_viol"] == pytest.approx(v.env_viol, abs=1e-4)
+    assert v.env_viol <= slack + 1e-6, (
+        f"{name}: envelope violation {v.env_viol:.4f} m exceeds the {slack:.4f} m "
+        "the union and the narrowest row are apart"
+    )
+    if not emb.envelope:
+        assert v.env_viol == 0.0, "an embodiment with no rows cannot violate its envelope"
