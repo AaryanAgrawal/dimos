@@ -109,14 +109,15 @@ def main() -> None:
 
     from dimos.memory2.vis import color
     from dimos.memory2.vis.plot.elements import HLine, Series
-    from dimos.memory2.vis.plot.plot import Plot
+    from dimos.memory2.vis.plot.plot import Plot, TimeAxis
 
     floor = EMBODIMENTS[args.embodiment].precision
     start = parse_instant(args.start) if args.start else None
     end = parse_instant(args.end) if args.end else None
     palette = [color.blue, color.green, color.orange, color.purple, color.red]
 
-    p = Plot()
+    # x is SPEED, not time: raw numeric axis, or the formatter prints "0s".."1s"
+    p = Plot(time_axis=TimeAxis.raw)
     p.add(HLine(y=floor, color=color.red.hex(), opacity=0.6))
     for idx, path in enumerate(args.recordings):
         rec = load_recording(path, args.base_frame, 5.0, start, end)
@@ -143,6 +144,7 @@ def main() -> None:
                 values=[r[4] for r in rows],
                 label=f"{name} p95",
                 color=c.hex(),
+                axis="cross-track (m) vs speed (m/s)",
             )
         )
         p.add(
@@ -152,6 +154,7 @@ def main() -> None:
                 label=f"{name} p50",
                 color=c.hex(),
                 opacity=0.45,
+                axis="cross-track (m) vs speed (m/s)",
             )
         )
     FsPath(args.out).parent.mkdir(parents=True, exist_ok=True)
