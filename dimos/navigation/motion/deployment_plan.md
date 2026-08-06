@@ -21,17 +21,19 @@ and `motion-host.json` in sync.)
         root@<robot>:/root/motion-host/
 
 On the robot, install `dimos-motion-host.service` (this directory) — it carries
-the load-bearing zenoh wiring: the host dials the go2web bridge over loopback
-(`DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447`, that is where odometry comes from),
-listens on `7448` for the laptop, and reads its whole config as one JSON line
-on stdin (`/root/motion-host/motion-host.json` — see "Config is the sharp
-edge" below before writing it).
+the load-bearing zenoh wiring: go2web runs as the zenoh ROUTER on 7447, and the
+host connects to it as a client over loopback
+(`DIMOS_ZENOH_MODE=client`, `DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447` — that is
+where odometry comes from). The host listens on nothing; the router does all
+forwarding. Config arrives as one JSON line on stdin
+(`/root/motion-host/motion-host.json` — see "Config is the sharp edge" below
+before writing it).
 
     systemctl enable --now dimos-motion-host
 
-Laptop side, dial both robot ports — the bridge's and the host's:
+Laptop side, one dial — the router forwards to everything behind it:
 
-    dimos --robot-ips <ip>:7447,<ip>:7448 run go2-zenoh-motion
+    dimos --robot-ip <robot> run go2-zenoh-motion
 
 The `.2.31` in the bake triple pins the glibc floor to the Go2's Ubuntu 20.04
 (glibc 2.31); the artifact links at ≤2.30, so it runs there regardless of how

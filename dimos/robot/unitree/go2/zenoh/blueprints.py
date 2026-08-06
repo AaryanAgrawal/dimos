@@ -299,32 +299,22 @@ go2_zenoh_motion_blind = autoconnect(
 # planner, no follower and no mux, so clicks become goals and MLS plans a global
 # path that nothing tracks. Bring the robot host up first:
 #
-#     dimos bake motion_planner trajectory_follower cmd_vel_mux \
-#         -o motion-host --target aarch64-unknown-linux-gnu
+#     dimos bake motion_planner trajectory_follower cmd_vel_mux go2_tf \
+#         -o motion-host --builder zigbuild --target aarch64-unknown-linux-gnu.2.31
 #
-# and run it with DIMOS_ZENOH_LISTEN on a port of its own (the go2web bridge owns
-# 7447), then dial both from here: --robot-ips <ip>:7447,<ip>:7448. Dialling both
-# is belt-and-braces now that gossip is on at every scope -- one endpoint hands
-# back the peers behind it -- but the fixed listen port still earns its keep: it
-# is what makes the host dialable at all before any gossip has happened.
+# Topology: go2web runs as the zenoh ROUTER on 7447 (GO2_ZENOH_MODE=router in
+# its unit) and everything hangs off it as a client. The host dials it over
+# loopback (DIMOS_ZENOH_MODE=client, DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447 --
+# that link is where odometry comes from, and it keeps the 30 Hz stream off the
+# wifi); it listens on nothing. The laptop dials the same router once:
+# --robot-ip <robot>. A router forwards to its CLIENTS -- there is no second
+# port and no double dial anymore.
 #
-# THE HOST MUST ALSO DIAL THE BRIDGE ITSELF, over loopback:
-#
-#     DIMOS_ZENOH_CONNECT=tcp/127.0.0.1:7447
-#
-# Both robot-side sessions are passive listeners, so without this neither ever
-# links to the other and `dimos/odometry` and `dimos/tf` -- which GO2Zenoh and the
-# go2web bridge publish, not this laptop -- never reach the baked planner and
-# follower. The failure is quiet and asymmetric: local_map and planner_path still
-# arrive, because the laptop's native children dial 7448 directly, so the host
-# looks half-connected rather than misconfigured. Dialling the bridge locally also
-# keeps odometry off the wifi entirely.
-#
-# tf is the sharp edge now that the mount is not a config knob: both baked modules
-# hold their pose down until the base_link <- mid360_link leg arrives on tf, and
-# that leg comes from GO2Zenoh on the laptop. A host that never links to it plans
-# nothing at all rather than planning off-heading, which is the failure mode we
-# wanted -- but it is silent apart from one "dropping odometry" line per outage.
+# tf is robot-local now: go2_tf is baked into the host and publishes the mount
+# tree there, so the base_link <- mid360_link leg no longer depends on the
+# laptop being up. Both baked modules still hold their pose until that leg
+# arrives on tf -- planning nothing rather than planning off-heading -- and say
+# so with one "dropping odometry" line per outage.
 #
 # cmd_vel still crosses back to the laptop, because GO2Zenoh is what talks to the
 # go2web bridge. This cut buys jitter immunity on the control loop, not fewer wire
