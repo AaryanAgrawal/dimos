@@ -84,12 +84,13 @@ loopback dial to the bridge working). They keep waiting on `local_map` /
 ## 4. The laptop half
 
 ```sh
-dimos --robot-ips <robot>:7447,<robot>:7448 run go2-zenoh-motion
+dimos --robot-ip <robot> run go2-zenoh-motion
 ```
 
-Both ports matter: 7447 is the bridge, 7448 the motion host; dialing both is
-what links the laptop's raycaster + MLS to the robot-side planner. Click a
-goal in the viewer.
+One dial: go2web runs as a zenoh ROUTER on 7447, and everything hangs off it —
+the motion host on the robot connects to it as a client over loopback, and the
+laptop's raycaster + MLS reach the robot-side planner through the same router.
+There is no second port anymore. Click a goal in the viewer.
 
 **Check**: the robot walks. The follower journal shows plans arriving; a
 standing robot logging `single-pose stub, i.e. no safe route` is the planner
