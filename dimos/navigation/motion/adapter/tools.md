@@ -25,6 +25,10 @@ python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save 
 # time the latency pass reports the true pipeline age -- receipt minus stamp --
 # on top of the inter-arrival cadence it always had.
 python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
+
+# how good is the control: precision-vs-speed frontier, recordings overlay on
+# one plot (p50/p95 cross-track per speed bin, red line = the precision floor)
+python -m dimos.navigation.motion.adapter.precision rec1.mcap rec2.mcap
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --model raw_band
 
