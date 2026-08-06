@@ -106,11 +106,15 @@ def test_merged_boxes_are_metric_and_centred():
 
 
 def test_band_rects_take_only_the_body_slice():
-    # one column in the band, one below the floor band, one overhead
-    pts = np.array([[0.05, 0.05, 0.2], [0.25, 0.05, 0.01], [0.45, 0.05, 1.2]])
+    # one column in the band, one in the floor's own quantisation layer
+    # (below obstacles.LOW), one below the floor, one overhead
+    pts = np.array([[0.05, 0.05, 0.2], [0.15, 0.05, 0.12], [0.25, 0.05, 0.01], [0.45, 0.05, 1.2]])
     rects = band_rects(pts, voxel=0.1, floor_z=0.0)
     assert len(rects) == 1
-    assert np.allclose(rects[0], [0.05, 0.05, 0.1, 0.1])
+    # centred on the voxel and shrunk to the centre span: a one-voxel run is
+    # the thin slab its centre point is, not a full fattened cell
+    assert np.allclose(rects[0][:2], [0.05, 0.05])
+    assert rects[0][2] < 0.01 and rects[0][3] < 0.01
 
 
 def test_local_map_is_range_limited_around_the_pose():

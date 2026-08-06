@@ -38,6 +38,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from dimos.navigation.motion import obstacles
+
 if TYPE_CHECKING:
     import mujoco
 
@@ -48,11 +50,12 @@ VOXEL = 0.08
 STABILITY = 0.5
 MIN_FRAMES = 2  # ...and never fewer than this many sightings, span or no span
 
-# The band this pass reads the recorded map in, and the height its rectangles
-# get extruded to as Scenario boxes. The same span as `obstacles.RAW_BAND` but
-# NOT that model: this one rides an ESTIMATED floor (`floor_z + BAND[0]`), and
-# it builds scenery rather than deciding what a body can hit.
-BAND = (0.05, 0.45)
+# Upper edge of the planner band over the estimated floor. Both the planner
+# rectangles and the scenery slice `obstacles.LOW` up, like the deployed
+# body_band model: the floor's own returns quantise into the first two voxel
+# layers, and keeping them turns the floor the recorded robot demonstrably
+# walked on into a carpet of phantom 0.08 m obstacles.
+BAND_TOP = 0.45
 BAND_HEIGHT = 0.6
 
 SCENE_MAX_Z = 1.5  # collision boxes above the floor; the ceiling is not a wall
@@ -100,7 +103,7 @@ class RecordedWorld:
         pts = self.centers()
         keep = np.ones(len(pts), dtype=bool)
         if max_z is not None:
-            keep &= (pts[:, 2] > self.floor_z + BAND[0]) & (pts[:, 2] < self.floor_z + max_z)
+            keep &= (pts[:, 2] > self.floor_z + obstacles.LOW) & (pts[:, 2] < self.floor_z + max_z)
         if radius is not None and len(self.track):
             from scipy.spatial import cKDTree
 
@@ -222,7 +225,7 @@ def merged_boxes(pts: np.ndarray, voxel: float) -> tuple[np.ndarray, np.ndarray]
 
 def band_rects(pts: np.ndarray, voxel: float, floor_z: float) -> np.ndarray:
     """The body-band footprint as merged rectangles: (r, 4) cx, cy, sx, sy."""
-    band = pts[(pts[:, 2] > floor_z + BAND[0]) & (pts[:, 2] < floor_z + BAND[1])]
+    band = pts[(pts[:, 2] > floor_z + obstacles.LOW) & (pts[:, 2] < floor_z + BAND_TOP)]
     if not len(band):
         return np.zeros((0, 4))
     idx = np.floor(band[:, :2] / voxel).astype(np.int64)
@@ -231,7 +234,11 @@ def band_rects(pts: np.ndarray, voxel: float, floor_z: float) -> np.ndarray:
     boxes = merge(flat)
     lo = boxes[:, :2] * voxel
     size = boxes[:, 3:5] * voxel
-    return np.column_stack([lo + size / 2.0, size])
+    # The live planner sees voxel CENTRES; a full-cell extrusion puts every
+    # face half a voxel closer and fattens each wall by 8 cm total, which is
+    # enough to seal a doorway the robot walked through. Shrink to the span
+    # of the centres (a one-voxel run becomes a thin slab, like the point it is).
+    return np.column_stack([lo + size / 2.0, np.maximum(size - voxel, 1e-3)])
 
 
 def clearance(rects: np.ndarray, xy: np.ndarray) -> np.ndarray:
@@ -526,7 +533,7 @@ def main() -> None:
         f"y [{lo[1]:.2f}, {hi[1]:.2f}] z [{lo[2]:.2f}, {hi[2]:.2f}]"
     )
     print(
-        f"  scene band (floor+{BAND[0]} .. floor+{args.max_z}"
+        f"  scene band (floor+{obstacles.LOW} .. floor+{args.max_z}"
         + (f", corridor {args.radius} m" if args.radius else "")
         + f"): {len(scene_pts)} voxels -> {len(centres)} geoms"
     )
