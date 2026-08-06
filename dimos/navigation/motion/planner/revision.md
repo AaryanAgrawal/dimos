@@ -1,7 +1,9 @@
 # Spec revision: lattice anchoring + motion-conditioned envelope
 
-Draft for discussion. One revision, gold + candidate + judge move together,
-one re-baseline, one autoresearch re-earn.
+AGREED 2026-08-06 (measurement results folded in from
+[envelope_results.md](envelope_results.md)). One revision, gold + candidate +
+judge move together, one re-baseline, one autoresearch re-earn. Phase 1 =
+spec + gold + referee; phase 2 = the rust candidate re-earns.
 
 ## Evidence
 
@@ -28,44 +30,62 @@ one re-baseline, one autoresearch re-earn.
    bit-exactly. Voxel size is a config constant of the deployment (never
    sniffed from data); changing it is a new spec = new baseline.
 3. **Per-heading envelope.** Feasibility uses the swept box for the edge's
-   body-frame drift angle, not the all-gait union; arcs add a yaw-rate
-   inflation term. Rows measured in the fitted sim as max swept outline over
-   the gait cycle. `precision` (0.05) is untouched — it is the measured
-   follower tracking floor.
+   body-frame drift angle, not the all-gait union; arcs add a curvature
+   inflation term. Rows measured in the fitted sim
+   (`simulation/envelope.py --bake`) as max swept outline over the gait cycle
+   at the executable governed band (stand + 0.35 + 0.50 — the sim cannot
+   execute 0.20, see min_speed below). `precision` (0.05) is untouched — it
+   is the measured follower tracking floor.
 
    Storage on `Embodiment` (frozen dataclass, plain floats — serializes into
    the rust config blob as-is):
 
    ```python
-   # (deg, length, width, center_off); |angle| — left/right symmetric,
-   # 0 = nose-first, 90 = strafe, 180 = reverse. EMPTY = the union
+   # (deg, length, width, off_x, off_y); |angle| rows — 0 = nose-first,
+   # 90 = strafe, 180 = reverse. off_y is stored for POSITIVE drift and
+   # mirrored by sign at lookup (the swept box lags the drift laterally by
+   # up to 57 mm; a blind fold burns 15-56 mm of width). EMPTY = the union
    # length/width/center_off applies at every heading (today's behavior,
    # and the fallback for any unmeasured embodiment).
-   envelope: tuple[tuple[float, float, float, float], ...] = ()
-   arc_inflate: float = 0.0  # extra width per rad of yaw change on an edge
+   envelope: tuple[tuple[float, float, float, float, float], ...] = ()
+   # extra width per rad-per-metre of curvature (edge dyaw / edge length):
+   # measured 0.0334, residuals <= 12 mm. Curvature, not per-edge yaw, so
+   # the number survives lattice pitch changes unmeasured.
+   arc_inflate: float = 0.0
 
-   def envelope_at(self, drift: float) -> tuple[float, float, float]: ...
+   def envelope_at(self, drift: float) -> tuple[float, float, float, float]: ...
    def offsets(self, step=0.05, drift: float | None = None) -> np.ndarray: ...
    ```
 
-   - `length/width/center_off` keep meaning the UNION: the judge's veto,
-     `half_diag`, the body carve and viz stay conservative; only the search's
-     feasibility check becomes heading-aware. Forgetting to pass a drift
-     angle is conservative, never unsafe.
+   - **The union re-baselines to the honest 0.883 × 0.593** (the recorded
+     0.852 × 0.495 was the max over a smaller command sweep — fast strafe and
+     slow tight arcs were outside it). The union's jobs — judge veto,
+     `half_diag`, fallback for unmeasured embodiments, body carve — are
+     exactly where honest-conservative is the only acceptable property. The
+     measured rows are the only non-conservative path.
    - Rows sit at the lattice's own drift angles (0, 26.6, 45, 63.4, 90 +
      reverse family) — nearest-row lookup is exact for every edge the search
      generates, no interpolation semantics.
    - No speed column: baked into the rows at measurement time (governor
      section below).
+   - **min_speed (0.2) is suspect but unproven**: the SIM marches in place at
+     0.2 (wider than walking at most headings), but the sim also undertracks
+     slow commands vs the field (gain 0.62 vs 0.80 at 0.35). Verify on the
+     real robot (command 0.2, run the tracking pass + field.py gain) before
+     raising min_speed to 0.35 — a strictly-dominated crawl is a follower
+     change that rides this same re-baseline if confirmed.
 
 ## Acceptance
 
-- `test_grid_invariance.py` xfail flips to passing; add whole-voxel-translation
-  bit-exactness and far-point invariance over the full battery.
+- `test_grid_invariance.py` xfail flips to passing (phase 2, when the rust
+  candidate re-anchors); add whole-voxel-translation bit-exactness and
+  far-point invariance over the full battery.
 - Field scenarios: door.zenoh and door2.zenoh (recorded worlds) route through
   the doorway with the forward envelope.
 - Judge gains a per-mode envelope-violation metric (planner-assumes vs
   follower-does mismatch shows up named, not just as wall contact).
+- **Gold before/after review**: old vs new gold paths overlaid per world
+  (curated 16 + gen 40) as a browsable artifact — Ivan reviews before phase 2.
 - Referee re-baselined; runtime planner re-earns via the lab on the new spec.
 
 ## Speed: eliminated via the governor, not modelled
