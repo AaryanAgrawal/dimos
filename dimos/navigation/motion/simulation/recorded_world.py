@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from dimos.navigation.motion import obstacles
+from dimos.navigation.motion.embodiment import GO2
 
 if TYPE_CHECKING:
     import mujoco
@@ -67,7 +68,6 @@ BODY = (0.85, 0.50, 0.45)
 # leaves the spawn pose touching a wall and every oracle refuses at step one.
 CARVE = 0.10
 LOCAL_MAP_RANGE = 5.0  # raycaster local_map radius (measured on the recording)
-FLOOR_PCT = 2.0  # floor = this percentile of kept voxel height
 
 
 @dataclass
@@ -329,20 +329,22 @@ def extract(
     keys, counts, spans = voxel_history([c for _, c in maps], voxel)
     kept = keys[stable_mask(counts, spans, frac, min_frames)]
     centres = (kept.astype(np.float64) + 0.5) * voxel
-    floor_z = float(np.percentile(centres[:, 2], FLOOR_PCT))
 
     # Odometry rides the sensor frame; the base pose is the one the sim spawns
     # and the planner is judged at, so resolve it through the static mount leg.
     leg = _base_leg(odom[0][1].child_frame_id)
-    track = np.array(
-        [
-            (p.position.x, p.position.y, p.orientation.euler[2])
-            for p in (
-                (Transform.from_pose(m.child_frame_id, m.to_pose_stamped()) + leg).to_pose()
-                for _, m in odom
-            )
-        ]
-    ).reshape(-1, 3)
+    bases = [
+        (Transform.from_pose(m.child_frame_id, m.to_pose_stamped()) + leg).to_pose()
+        for _, m in odom
+    ]
+    track = np.array([(p.position.x, p.position.y, p.orientation.euler[2]) for p in bases]).reshape(
+        -1, 3
+    )
+    # The ground the way the live stack knows it: under the BODY, not off the
+    # scene. A percentile of voxel heights lands on below-floor returns and
+    # sinks the band a full layer under what the deployed model slices, turning
+    # steppable clutter into walls.
+    floor_z = float(np.median([p.position.z for p in bases])) - GO2.base_height
     ots = np.array([t for t, _ in odom])
     start = track[int(np.clip(np.searchsorted(ots, maps[0][0]), 0, len(track) - 1))]
 
@@ -423,16 +425,23 @@ def scene(
     from dimos.navigation.motion.simulation import model as go2_model
     from dimos.navigation.motion.simulation.evaluate import apply_physics
 
-    centres, half = merged_boxes(rw.select(max_z=max_z, radius=radius), rw.voxel)
+    pts = rw.select(max_z=max_z, radius=radius)
     spec = mujoco.MjSpec.from_file(str(go2_model.scene_path(menagerie)))
     spec.geom("floor").pos = [0.0, 0.0, rw.floor_z]
-    for i, (c, h) in enumerate(zip(centres, half, strict=True)):
-        geom = spec.worldbody.add_geom()
-        geom.type = mujoco.mjtGeom.mjGEOM_BOX
-        geom.name = f"{world.WALL_PREFIX}{i}"
-        geom.pos = tuple(c)
-        geom.size = tuple(h)
-        geom.rgba = world.WALL_RGBA
+    # Planner-band voxels in the wall colour, overhead scenery translucent:
+    # what LOOKS impassable in the viewer must be what the planner slices.
+    in_band = pts[:, 2] < rw.floor_z + BAND_TOP
+    i = 0
+    for sel, rgba in ((in_band, world.WALL_RGBA), (~in_band, (0.55, 0.58, 0.62, 0.35))):
+        centres, half = merged_boxes(pts[sel], rw.voxel)
+        for c, h in zip(centres, half, strict=True):
+            geom = spec.worldbody.add_geom()
+            geom.type = mujoco.mjtGeom.mjGEOM_BOX
+            geom.name = f"{world.WALL_PREFIX}{i}"
+            geom.pos = tuple(c)
+            geom.size = tuple(h)
+            geom.rgba = rgba
+            i += 1
     model = spec.compile()
     if physics:
         apply_physics(model, physics)
