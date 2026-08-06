@@ -48,7 +48,7 @@ DEFAULT_POLICY = "ml-trajectory-research/freewalk_mcf.bin"
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("-s", "--scenario", help="run a single scenario by name")
+    ap.add_argument("-s", "--scenario", help="scenario name, glob ('gen*'), or group (curated/gen)")
     ap.add_argument("--ls", action="store_true", help="list scenario names and exit")
     ap.add_argument("--gen", type=int, default=0, help="add N generated worlds")
     ap.add_argument(
@@ -84,15 +84,18 @@ def main() -> None:
     if args.ood:
         tagged += [(sc, "ood") for sc in ood_worlds(args.ood)]
     tagged += [(recorded(p), "recorded") for p in args.recorded]
+    if args.scenario:
+        from fnmatch import fnmatch
+
+        # a glob selects a family: -s 'gen*' runs only the generated worlds
+        tagged = [(s, g) for s, g in tagged if fnmatch(s.name, args.scenario) or g == args.scenario]
+        if not tagged:
+            ap.error(f"no scenario matching {args.scenario!r}")
     if args.ls:
         for sc, group in tagged:
             emb = f" [{sc.emb.tag}]" if sc.emb.tag != "go2" else ""
             print(f"{sc.name:<20s} {group:<8s} {sc.expect:<7s}{emb} {sc.note}")
         return
-    if args.scenario:
-        tagged = [(s, g) for s, g in tagged if s.name == args.scenario]
-        if not tagged:
-            ap.error(f"no scenario named {args.scenario!r}")
     if args.jobs > 1 and args.view:
         ap.error("--jobs > 1 cannot render; --view runs serially")
 
