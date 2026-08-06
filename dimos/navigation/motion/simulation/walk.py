@@ -21,6 +21,7 @@ Commands come either from a constant (vx, vy, vyaw) or from a recording's
 from __future__ import annotations
 
 import collections
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -215,6 +216,7 @@ def walk(
     view: bool = False,
     speed: float = 1.0,
     ghost: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    probe: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None,
 ) -> Track:
     """Step the policy in MuJoCo.
 
@@ -249,6 +251,9 @@ def walk(
     (:data:`COMMAND_SLEW`) between the schedule and the policy, exactly as the
     hardware does. Not a fitted parameter -- the constants come from the
     executor that produced the recordings. Off only for A/B comparison.
+
+    ``probe`` is called after every physics step, for anything the Track does
+    not carry (``envelope.py`` reads the geometry there at the full sim rate).
     """
     if (command is None) == (schedule is None):
         raise ValueError("pass exactly one of command= or schedule=")
@@ -373,6 +378,8 @@ def walk(
             applied = actuator_step(applied, tau, sim_dt, actuator_tau)
             data.ctrl[:] = applied
             mujoco.mj_step(model, data)
+            if probe is not None:
+                probe(model, data)
 
             if viewer is not None:
                 if not viewer.is_running():
