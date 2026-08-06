@@ -20,7 +20,10 @@ python -m dimos.navigation.motion.adapter.replay mid360_athens_stairs.db --save 
 
 # post-mortem a recording of the live stack: map churn, plan flips, planner
 # replay + input ablation, input ages, follower replay. Writes an rrd + svgs
-# under recordings/.
+# under recordings/. It opens by SNIFFING what each stream's payload stamp
+# means (sensor-time / receipt-echo / foreign-clock), and where it is sensor
+# time the latency pass reports the true pipeline age -- receipt minus stamp --
+# on top of the inter-arrival cadence it always had.
 python -m dimos.navigation.motion.adapter.diagnose ml-trajectory-research/20260805-033007.zenoh.mcap
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only churn --spawn
 python -m dimos.navigation.motion.adapter.diagnose rec.mcap --only replay --model raw_band

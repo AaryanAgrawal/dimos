@@ -28,13 +28,19 @@ the LowState CDR frame is right; :func:`joint_fault` is the guard). There is no
 ``control_log`` with velocities and no ``vive_pose``, so :mod:`evaluate` cannot
 read one of these.
 
-The LIO stream is timestamped when the recorder *received* it, which is later
-than the pose it describes. :func:`clock_offset` measures that lag by
-cross-correlating LIO-derived speed against the robot's own estimate and the
-loader subtracts it, so all three streams end up on one clock. Skipping this
-is not cosmetic: on the 063428 pair it is 170 ms, and during a 1.3 rad/s spin
-an uncorrected LIO track puts the body a quarter of a metre and 0.2 rad from
-where it was, which reads as the robot failing to hold its commanded path.
+The LIO stream is logged when the recorder *received* it, which is later than
+the pose it describes. Two ways to recover the difference, and the loader
+sniffs which one the recording supports (:func:`diagnose.stamp_dialect`): a
+recording whose odometry speaks sensor time carries the answer in its own
+stamps, so the track is timed by them directly; an older one has the stamps on
+the lidar's boot clock, and :func:`clock_offset` recovers the lag instead by
+cross-correlating LIO-derived speed against the robot's own estimate. Where
+both are available they cross-check each other (:data:`LAG_DISAGREE_S`), and
+the correlation wins a disagreement because it is tied to physical motion.
+Skipping this is not cosmetic: on the 063428 pair it is 170 ms, and during a
+1.3 rad/s spin an uncorrected LIO track puts the body a quarter of a metre and
+0.2 rad from where it was, which reads as the robot failing to hold its
+commanded path.
 
 Accumulated sim-vs-real divergence is not the headline here -- a legged gait
 decorrelates within seconds no matter how good the physics is (``FINDINGS.md``).
@@ -56,10 +62,13 @@ import numpy as np
 from dimos.navigation.motion.adapter.diagnose import (
     ODOMETRY,
     TF,
+    Dialect,
     Instant,
     Window,
     open_lcm_mcap,
     parse_instant,
+    payload_ts,
+    stamp_dialect,
 )
 from dimos.navigation.motion.simulation import metrics, model as go2_model, walk as walk_mod
 from dimos.navigation.motion.simulation.policy import FreePolicy
@@ -90,6 +99,12 @@ MAX_CLOCK_LAG_S = 1.0
 # Reported alignment is only corrected past this. Below it the correction is
 # inside the resample grid's own resolution.
 LAG_TOLERANCE_S = 0.05
+
+# How far the stamp-derived lag and the cross-correlated one may disagree before
+# one of them is wrong rather than merely noisy. Past it both get printed and the
+# correlation is used: it is measured against the robot's own motion, while a
+# stamp is only as honest as whatever wrote it.
+LAG_DISAGREE_S = 0.030
 
 # Fraction of recorded joint angles allowed outside the model's own joint
 # travel before the stream is called junk rather than mis-mapped.
@@ -157,6 +172,8 @@ class FieldPair:
     joint_q: np.ndarray  # (k, 12) MuJoCo actuator order
     lag: float  # LIO lag measured by cross-correlation, seconds
     applied_lag: float = 0.0  # how much of it was actually taken off real_t
+    direct_lag: float | None = None  # the same lag off the odometry's own stamps
+    lag_source: str = "correlation"  # which of them timed real_t
     onboard_response: float = 0.0  # cmd_vel -> on-board yaw rate, seconds
     lio_response: float = 0.0  # cmd_vel -> raw LIO yaw rate, seconds
     joint_fault: str | None = None  # set when lowstate is not real leg state
@@ -183,13 +200,17 @@ def read_cmd_vel(store: Any) -> tuple[np.ndarray, np.ndarray]:
     return a[:, 0], a[:, 1:]
 
 
-def read_base_track(store: Any, base_frame: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """LIO odometry resolved to ``base_frame``: ``(t, pos, quat)``, unix seconds.
+def read_base_track(
+    store: Any, base_frame: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """LIO odometry resolved to ``base_frame``: ``(t, pos, quat, stamp_t)``, unix seconds.
 
     The recorded odometry is stamped on the lidar (``child_frame_id`` is
     ``mid360_link``); the mount leg comes off the recorded tf, so the track is
     the body's, not the sensor's -- a 0.3 m lever arm that shows up the moment
-    the robot turns.
+    the robot turns. ``t`` is the recorder's receipt and ``stamp_t`` what the
+    payload itself claims (nan where it claims nothing); which one times the
+    track is :func:`load_pair`'s decision, not this one's.
     """
     from dimos.memory2.tf import StreamTF
 
@@ -198,6 +219,7 @@ def read_base_track(store: Any, base_frame: str) -> tuple[np.ndarray, np.ndarray
         raise ValueError(f"no {TF} stream — cannot resolve the base pose")
     base = OdomBasePose(tf, base_frame)
     ts: list[float] = []
+    stamp: list[float] = []
     pos: list[list[float]] = []
     quat: list[list[float]] = []
     for obs in store.stream(ODOMETRY):
@@ -205,12 +227,13 @@ def read_base_track(store: Any, base_frame: str) -> tuple[np.ndarray, np.ndarray
         if p is None:
             continue
         ts.append(obs.ts)
+        stamp.append(payload_ts(obs.data))
         pos.append([p.position.x, p.position.y, p.position.z])
         q = p.orientation
         quat.append([q.w, q.x, q.y, q.z])
     if not ts:
         raise ValueError("no odometry resolved to the base frame")
-    return np.array(ts), np.array(pos), np.array(quat)
+    return np.array(ts), np.array(pos), np.array(quat), np.array(stamp)
 
 
 def joint_limits() -> np.ndarray:
@@ -352,6 +375,35 @@ def lio_lag(
     return clock_offset(grid, np.hypot(v[:, 0], v[:, 1]), sm_t, _smooth(sm_speed, 40))
 
 
+def direct_lag(dialect: Dialect) -> float | None:
+    """The LIO lag straight off the odometry's stamps, or None when they cannot say.
+
+    A stamp series that does not advance is not a clock, so it is refused rather
+    than interpolated over.
+    """
+    if not dialect.sensor_time:
+        return None
+    stamps = dialect.ts - dialect.age
+    return dialect.delta if bool(np.all(np.diff(stamps) >= 0.0)) else None
+
+
+def choose_lag(measured: float, direct: float | None, override: float | None) -> tuple[float, str]:
+    """Which lag times the LIO track, and where it came from.
+
+    An explicit ``--lag`` wins outright. Otherwise the stamps win when they
+    agree with the correlation, because they carry per-message truth rather
+    than one number; a disagreement past :data:`LAG_DISAGREE_S` hands it back to
+    the correlation, which is anchored to motion the robot actually made.
+    """
+    if override is not None:
+        return override, "override"
+    if direct is None:
+        return (measured if abs(measured) >= LAG_TOLERANCE_S else 0.0), "correlation"
+    if abs(direct - measured) > LAG_DISAGREE_S:
+        return measured, "correlation (the stamps disagree)"
+    return direct, "stamps"
+
+
 def response_lag(cmd_t: np.ndarray, cmd: np.ndarray, t: np.ndarray, yaw_rate: np.ndarray) -> float:
     """How long the body takes to answer a turn command, seconds.
 
@@ -431,8 +483,8 @@ def load_pair(
 ) -> FieldPair:
     """Decode a field pair onto one clock, anchored at the first command.
 
-    ``lag`` forces the LIO clock correction; the default measures it (see
-    :func:`lio_lag`) and applies it only past :data:`LAG_TOLERANCE_S`.
+    ``lag`` forces the LIO clock correction; without it :func:`choose_lag`
+    decides between the odometry's own stamps and the cross-correlation.
     """
     zpath = _resolve(zenoh)
     spath = _resolve(sidecar) if sidecar is not None else _resolve(sidecar_for(zpath))
@@ -440,13 +492,19 @@ def load_pair(
     store = open_lcm_mcap(str(zpath))
     with store:
         cmd_t, cmd = read_cmd_vel(store)
-        real_t, real_pos, real_quat = read_base_track(store, base_frame)
+        real_t, real_pos, real_quat, stamp_t = read_base_track(store, base_frame)
 
     sm_t, sm_speed, sm_yaw_rate = read_body_motion(spath)
     measured = lio_lag(real_t, real_pos, sm_t, sm_speed)
-    applied = measured if lag is None else lag
-    if lag is None and abs(applied) < LAG_TOLERANCE_S:
-        applied = 0.0
+    dialect = stamp_dialect(real_t, stamp_t)
+    direct = direct_lag(dialect)
+    applied, source = choose_lag(measured, direct, lag)
+    if direct is not None and source.startswith("correlation"):
+        print(
+            f"lio lag: odometry stamps say {direct * 1000:+.0f} ms, the correlation against "
+            f"sportmodestate says {measured * 1000:+.0f} ms — over the {LAG_DISAGREE_S * 1000:.0f} "
+            "ms they may differ by, so the correlation stands"
+        )
 
     onboard = response_lag(cmd_t, cmd, sm_t, sm_yaw_rate)
     lio_yaw = np.unwrap(metrics.yaw_of(real_quat))
@@ -458,7 +516,9 @@ def load_pair(
     joint_t, joint_q, fault = read_joints(spath)
 
     t0 = float(cmd_t[0])
-    real_t = real_t - applied
+    # timing the track by its own stamps beats subtracting one median from every
+    # sample, so where they are trusted they ARE the clock
+    real_t = stamp_t if source == "stamps" else real_t - applied
     at = int(np.searchsorted(real_t, t0).clip(0, len(real_t) - 1))
     real_pos, real_quat = anchor(real_pos, real_quat, at)
 
@@ -475,6 +535,8 @@ def load_pair(
         joint_q=joint_q,
         lag=measured,
         applied_lag=applied,
+        direct_lag=direct,
+        lag_source=source,
         onboard_response=onboard,
         lio_response=from_lio,
         joint_fault=fault,
@@ -656,6 +718,11 @@ class FieldReport:
             f"turn answers the command in {p.onboard_response * 1000:.0f} ms on-board and "
             f"{p.lio_response * 1000:.0f} ms through lio; the gap corroborates the lag",
         ]
+        if p.direct_lag is not None:
+            head.append(
+                f"odometry speaks sensor-time: its own stamps put the lag at "
+                f"{p.direct_lag * 1000:+.0f} ms, and the track is timed by the {p.lag_source}"
+            )
         if self.physics:
             head.append(
                 f"preset {self.preset!r}: "

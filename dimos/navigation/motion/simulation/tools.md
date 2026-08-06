@@ -89,7 +89,9 @@ python -m dimos.navigation.motion.simulation.field data/ml-trajectory-research/2
 `--sidecar` names the pair's other half when it is not the matching `*.mcap`,
 `--view --ghost` watches it against the LIO track, `--lag 0` disables the
 measured LIO clock correction (leave it on: it is 170 ms on this pair, and
-skipping it manufactures a quarter-metre of path error during a fast spin).
+skipping it manufactures a quarter-metre of path error during a fast spin). On
+a recording whose odometry speaks sensor time the lag comes off the stamps
+themselves and the cross-correlation only cross-checks it.
 
 **Drive it by hand** — constant command instead of a recording:
 

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ import pytest
 from dimos.navigation.motion.adapter.diagnose import (
     Crop,
     Instant,
+    Recording,
     Window,
     arclen,
     classify,
@@ -31,7 +33,9 @@ from dimos.navigation.motion.adapter.diagnose import (
     host_setup,
     is_hold,
     parse_instant,
+    payload_ts,
     resample,
+    stamp_dialect,
     voxel_centers,
     voxel_keys,
 )
@@ -148,6 +152,98 @@ def test_a_window_is_inclusive_at_both_ends():
     assert (w.lo, w.hi) == (101.0, 103.0)
     assert w.bounded and 101.0 in w and 103.0 in w and 100.9 not in w
     assert list(w.mask(np.array([100.5, 101.0, 102.0, 103.5]))) == [False, True, True, False]
+
+
+# --- what a payload stamp turns out to mean
+
+
+def _receipts(n=200, rate=30.0, t0=1_785_969_268.0):
+    return t0 + np.arange(n) / rate
+
+
+def test_a_stamp_older_than_its_receipt_is_sensor_time():
+    # the synced rig: the stamp is when the lidar saw it, the receipt when the
+    # recorder got it, and the difference is the pipeline
+    ts = _receipts()
+    d = stamp_dialect(ts, ts - 0.093)
+    assert d.verdict == "sensor-time"
+    assert d.sensor_time
+    assert abs(d.delta - 0.093) < 1e-6  # unix-scale floats: microseconds is the resolution
+
+
+def test_a_stamp_written_at_publish_time_carries_no_age():
+    ts = _receipts()
+    rng = np.random.default_rng(0)
+    d = stamp_dialect(ts, ts - rng.normal(0.0, 3e-4, len(ts)))
+    assert d.verdict == "receipt-echo"
+    assert not d.sensor_time
+
+
+def test_a_stamp_from_after_its_own_receipt_is_not_an_age():
+    # a host clock skew puts the stamp in the recorder's future; that is a
+    # receipt echo with a skew on it, never a negative pipeline age
+    ts = _receipts()
+    assert stamp_dialect(ts, ts + 0.008).verdict == "receipt-echo"
+
+
+def test_a_boot_relative_clock_is_foreign():
+    # every recording before go2web 7316c06: the lidar's seconds-since-boot
+    ts = _receipts()
+    d = stamp_dialect(ts, ts - 1_785_861_881.0)
+    assert d.verdict == "foreign-clock"
+    assert not d.sensor_time
+
+
+def test_a_stream_with_no_payload_stamp_says_so():
+    ts = _receipts(n=10)
+    d = stamp_dialect(ts, np.full(10, np.nan))
+    assert d.verdict == "no-stamp"
+    assert not d.sensor_time
+    assert math.isnan(d.delta)
+
+
+def test_an_untimestamped_message_type_reads_as_no_stamp():
+    class Twist:
+        pass
+
+    class Odom:
+        ts = 12.5
+
+    assert math.isnan(payload_ts(Twist()))
+    assert payload_ts(Odom()) == 12.5
+
+
+# --- both clocks, carried side by side
+
+
+def _recording(stamps):
+    ts = _receipts(n=5)
+    return Recording(
+        path="x",
+        maps=[(ts[0], np.zeros((1, 3)))],
+        odom_ts=ts,
+        odom_stamp_ts=stamps(ts),
+        odom_xy=np.zeros((5, 2)),
+        poses=[None] * 5,
+        globals=[],
+        plans=[],
+        dialects={"odometry": stamp_dialect(ts, stamps(ts))},
+    )
+
+
+def test_physics_reads_the_sensor_clock_while_pairing_keeps_the_receipts():
+    rec = _recording(lambda ts: ts - 0.09)
+    assert rec.dialects["odometry"].sensor_time
+    # the module paired on arrival, so replay must too
+    assert np.array_equal(rec.odom_ts, _receipts(n=5))
+    # but the pose was true 90 ms before it landed
+    assert np.allclose(rec.odom_physics_ts, rec.odom_ts - 0.09)
+
+
+def test_an_old_recording_has_one_clock_and_it_is_the_receipt():
+    rec = _recording(lambda ts: ts - 1_785_861_881.0)
+    assert rec.dialects["odometry"].verdict == "foreign-clock"
+    assert np.array_equal(rec.odom_physics_ts, rec.odom_ts)
 
 
 # --- the deployed config, as one JSON

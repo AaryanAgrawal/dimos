@@ -21,15 +21,17 @@ import math
 import numpy as np
 import pytest
 
-from dimos.navigation.motion.adapter.diagnose import parse_instant
+from dimos.navigation.motion.adapter.diagnose import parse_instant, stamp_dialect
 from dimos.navigation.motion.simulation import metrics
 from dimos.navigation.motion.simulation.field import (
     REGIME_BINS,
     Bin,
     _bins,
     anchor,
+    choose_lag,
     clock_offset,
     dead_reckon,
+    direct_lag,
     held,
     joint_fault,
     joint_limits,
@@ -111,6 +113,49 @@ def test_a_constant_stream_has_no_lag_to_find():
 def test_too_short_an_overlap_refuses_to_guess():
     t = np.arange(0.0, 1.0, 0.01)
     assert clock_offset(t, np.sin(t), t, np.sin(t), max_lag=1.0) == 0.0
+
+
+# ------------------------------------------------- which lag times the track --
+
+
+def _odom_dialect(age, n=200, t0=1_785_969_268.0):
+    ts = t0 + np.arange(n) / 30.0
+    return stamp_dialect(ts, ts - age)
+
+
+def test_an_old_recording_has_only_the_correlation():
+    foreign = _odom_dialect(1_785_861_881.0)
+    assert direct_lag(foreign) is None
+    assert choose_lag(0.17, None, None) == (0.17, "correlation")
+
+
+def test_a_correlation_inside_the_grid_resolution_is_not_applied():
+    assert choose_lag(0.02, None, None) == (0.0, "correlation")
+
+
+def test_sensor_time_stamps_time_the_track_when_they_agree():
+    d = _odom_dialect(0.16)
+    assert direct_lag(d) == pytest.approx(0.16)
+    lag, source = choose_lag(0.17, direct_lag(d), None)
+    assert (lag, source) == (pytest.approx(0.16), "stamps")
+
+
+def test_stamps_far_off_the_correlation_lose_to_it():
+    # the correlation is anchored to motion the robot actually made
+    lag, source = choose_lag(0.17, 0.02, None)
+    assert lag == 0.17
+    assert source.startswith("correlation")
+
+
+def test_an_explicit_lag_beats_both():
+    assert choose_lag(0.17, 0.16, 0.0) == (0.0, "override")
+
+
+def test_stamps_that_do_not_advance_are_not_a_clock():
+    ts = 1_785_969_268.0 + np.arange(50) / 30.0
+    jumbled = ts - 0.1
+    jumbled[20] += 5.0  # one stamp out of order
+    assert direct_lag(stamp_dialect(ts, jumbled)) is None
 
 
 # ---------------------------------------------------------------- anchoring --

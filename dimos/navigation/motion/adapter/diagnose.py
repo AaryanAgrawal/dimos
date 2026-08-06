@@ -25,7 +25,9 @@ planner_path, path, nav_cmd_vel, stop_movement) and runs five passes:
   replay    the planner re-run on the recorded inputs (same tf-resolved pose and
             carrot the module used), then a one-input-at-a-time ablation that
             attributes each flip to the cloud, the pose, or the carrot
-  latency   how old the inputs each tick planned on actually were
+  latency   how old the inputs each tick planned on actually were -- inter-arrival
+            cadence always, plus the TRUE pipeline age (receipt minus payload
+            stamp) on recordings whose stamps speak sensor time
   follower  the FOLLOWER re-run: at every recorded nav_cmd_vel tick, the
             deployed law on the deployed config against the twist that actually
             went out, one tick classified match / boundary / hold / MISMATCH
@@ -203,6 +205,73 @@ def open_lcm_mcap(path: str) -> Store:
     return McapStore(path=path, codecs=codecs)
 
 
+# ------------------------------------------------------------------- stamps --
+
+# What a payload stamp turns out to mean, by the size of receipt minus stamp.
+# go2web only started publishing sensor-referenced unix stamps in 7316c06; every
+# recording before that carries the lidar's boot-relative clock, an epoch-sized
+# offset from the recorder's. So the dialect is measured, never assumed.
+FOREIGN_CLOCK_S = 3600.0  # past an hour it is another epoch, not a pipeline age
+RECEIPT_ECHO_S = 0.005  # a stamp no older than its own receipt carries no age
+
+
+@dataclass(frozen=True)
+class Dialect:
+    """What one stream's payload stamp means, and the age it implies per message."""
+
+    verdict: str  # sensor-time | receipt-echo | foreign-clock | no-stamp
+    ts: np.ndarray = field(repr=False, compare=False)  # receipts it was measured against
+    age: np.ndarray = field(repr=False, compare=False)  # receipt - stamp, s (nan where no stamp)
+
+    @property
+    def sensor_time(self) -> bool:
+        """True when receipt minus stamp is a real pipeline age worth reporting."""
+        return self.verdict == "sensor-time"
+
+    @property
+    def delta(self) -> float:
+        """Median receipt minus stamp, seconds (nan when nothing carries a stamp)."""
+        good = self.age[np.isfinite(self.age)]
+        return float(np.median(good)) if len(good) else float("nan")
+
+
+def payload_ts(msg: Any) -> float:
+    """The stamp a decoded message carries, or nan when its type has none."""
+    ts = getattr(msg, "ts", None)
+    return float("nan") if ts is None else float(ts)
+
+
+def stamp_dialect(receipts: np.ndarray, stamps: np.ndarray) -> Dialect:
+    """Sniff whether a stream's payload stamp is sensor time, a receipt echo, or foreign.
+
+    Receipt is when the recorder logged the message; stamp is what the payload
+    says. Their median difference is the whole test: an epoch away is another
+    clock, not measurably positive is a publish time carrying no information,
+    and a small positive age is the pipeline latency this tool could never see.
+    """
+    ts = np.asarray(receipts, dtype=float)
+    age = ts - np.asarray(stamps, dtype=float)
+    good = age[np.isfinite(age)]
+    if not len(good):
+        return Dialect("no-stamp", ts, age)
+    median = float(np.median(good))
+    if abs(median) > FOREIGN_CLOCK_S:
+        return Dialect("foreign-clock", ts, age)
+    if median < RECEIPT_ECHO_S:
+        # includes the negative medians a host clock skew makes: a stamp from
+        # after its own receipt is not an age at all
+        return Dialect("receipt-echo", ts, age)
+    return Dialect("sensor-time", ts, age)
+
+
+def print_dialects(dialects: dict[str, Dialect]) -> None:
+    """One line per stream: what its payload stamp turned out to mean."""
+    print("stamp sniff: payload stamp against receipt, median receipt - stamp")
+    for name, d in dialects.items():
+        delta = "" if math.isnan(d.delta) else f"{d.delta:+.3f} s"
+        print(f"{name:>14} {d.verdict:>14} {delta:>16}")
+
+
 # ------------------------------------------------------------------ loading --
 
 
@@ -231,11 +300,18 @@ class Recording:
     still planned on the map and the plan that arrived before it, so trimming
     the inputs would replay a world the robot never had. The window decides
     which ticks each pass reports on, nothing else.
+
+    Every stream stamp here is the RECEIPT (mcap log time), because that is what
+    the live module reacted to and replay must pair the way the module paired.
+    The payload stamps ride alongside in `odom_stamp_ts` / `dialects` for the
+    two questions arrival cannot answer: how old an input really was, and when
+    a pose was actually true.
     """
 
     path: str
     maps: list[tuple[float, np.ndarray]]  # local_map: ts, points (n, 3)
-    odom_ts: np.ndarray
+    odom_ts: np.ndarray  # receipt, the clock the module paired on
+    odom_stamp_ts: np.ndarray  # payload stamp, nan where the stream carries none
     odom_xy: np.ndarray  # sensor position, which is what the raycaster crops around
     poses: list[tuple[float, ...] | None]  # base_link (x, y, yaw, z)
     globals: list[tuple[float, np.ndarray]]  # planner_path: ts, xy
@@ -246,10 +322,21 @@ class Recording:
     all_ticks: list[Tick] = field(default_factory=list)  # every tick with complete inputs
     ticks: list[Tick] = field(default_factory=list)  # the in-window ones passes report on
     window: Window = field(default_factory=Window)
+    dialects: dict[str, Dialect] = field(default_factory=dict)  # per stream, sniffed
 
     @property
     def t0(self) -> float:
         return self.maps[0][0]
+
+    @property
+    def odom_physics_ts(self) -> np.ndarray:
+        """When each pose was TRUE: sensor stamps where honest, receipts otherwise.
+
+        For physics only. Anything reproducing what the module DID keeps using
+        `odom_ts`, because the module paired on arrival.
+        """
+        d = self.dialects.get("odometry")
+        return self.odom_stamp_ts if d is not None and d.sensor_time else self.odom_ts
 
 
 def _xy(msg: Any) -> np.ndarray:
@@ -291,15 +378,19 @@ def load_recording(
     if tf is None:
         raise SystemExit(f"{path}: no {TF} stream — cannot resolve the base pose")
     base = OdomBasePose(tf, base_frame)
-    maps = [(o.ts, o.data.points_f32()) for o in _stream(store, LOCAL_MAP)]
-    odom = [(o.ts, o.data) for o in _stream(store, ODOMETRY)]
+    # Each stream is read as (receipt, payload stamp, payload) in ONE pass, so
+    # the dialect sniff costs no extra decode and holds no extra cloud alive.
+    map_rows = [(o.ts, payload_ts(o.data), o.data.points_f32()) for o in _stream(store, LOCAL_MAP)]
+    maps = [(t, p) for t, _, p in map_rows]
+    odom = [(o.ts, payload_ts(o.data), o.data) for o in _stream(store, ODOMETRY)]
     poses: list[tuple[float, ...] | None] = []
-    for _, msg in odom:
+    for _, _, msg in odom:
         p = base.resolve(msg)
         poses.append(
             (p.position.x, p.position.y, p.orientation.euler[2], p.position.z) if p else None
         )
-    globals_ = [(o.ts, _xy(o.data)) for o in _stream(store, PLANNER_PATH)]
+    global_rows = [(o.ts, payload_ts(o.data), _xy(o.data)) for o in _stream(store, PLANNER_PATH)]
+    globals_ = [(t, xy) for t, _, xy in global_rows]
     raw_plans = _stream(store, PATH)
     plans = [(o.ts, _xyy(o.data)) for o in raw_plans]
     stamped: list[np.ndarray | None] = []
@@ -307,22 +398,38 @@ def load_recording(
         ceilings = decode_ceilings(o.data)
         stamped.append(ceilings_to_clearance(ceilings) if ceilings is not None else None)
 
-    twists = [
-        (o.ts, (o.data.linear.x, o.data.linear.y, o.data.angular.z))
+    twist_rows = [
+        (o.ts, payload_ts(o.data), (o.data.linear.x, o.data.linear.y, o.data.angular.z))
         for o in _stream(store, NAV_CMD_VEL)
     ]
+    twists = [(t, v) for t, _, v in twist_rows]
+
+    sniffed: dict[str, list[Any]] = {
+        "local_map": map_rows,
+        "odometry": odom,
+        "planner_path": global_rows,
+        "path": [(o.ts, payload_ts(o.data)) for o in raw_plans],
+        "nav_cmd_vel": twist_rows,
+    }
+    dialects = {
+        name: stamp_dialect(np.array([r[0] for r in rows]), np.array([r[1] for r in rows]))
+        for name, rows in sniffed.items()
+        if rows
+    }
 
     rec = Recording(
         path=path,
         maps=maps,
-        odom_ts=np.array([t for t, _ in odom]),
-        odom_xy=np.array([[m.pose.position.x, m.pose.position.y] for _, m in odom]),
+        odom_ts=np.array([t for t, _, _ in odom]),
+        odom_stamp_ts=np.array([s for _, s, _ in odom]),
+        odom_xy=np.array([[m.pose.position.x, m.pose.position.y] for _, _, m in odom]),
         poses=poses,
         globals=globals_,
         plans=plans,
         plan_msgs=[o.data for o in raw_plans],
         twists=twists,
         stops=np.array([o.ts for o in _stream(store, STOP_MOVEMENT) if o.data.data]),
+        dialects=dialects,
     )
     rec.window = Window.between(start, end, rec.t0)
     map_ts = np.array([t for t, _ in maps])
@@ -914,6 +1021,33 @@ def _ablate(ticks: list[Tick], plan: Replanner, band: ObstacleModel) -> None:
 # ------------------------------------------------------------------ latency --
 
 
+def pipeline_age(rec: Recording) -> None:
+    """True age of each stream at receipt: receipt minus the payload's own stamp.
+
+    Only a recording whose stamps speak sensor time can answer this; the rest
+    say so on their own line rather than reporting a number nobody measured.
+    """
+    if not rec.dialects:
+        return
+    print("\ntrue pipeline age (receipt - payload stamp)")
+    print(f"{'stream':>14} {'dialect':>14} {'median':>10} {'p95':>10} {'max':>10}")
+    for name, d in rec.dialects.items():
+        age = d.age[rec.window.mask(d.ts)]
+        age = age[np.isfinite(age)]
+        if not d.sensor_time or not len(age):
+            print(f"{name:>14} {d.verdict:>14} {'-':>10} {'-':>10} {'-':>10}")
+            continue
+        print(
+            f"{name:>14} {d.verdict:>14} {1e3 * np.median(age):8.1f}ms "
+            f"{1e3 * np.percentile(age, 95):8.1f}ms {1e3 * age.max():8.1f}ms"
+        )
+    if not any(d.sensor_time for d in rec.dialects.values()):
+        print(
+            "  no stream here carries a stamp on the recorder's clock, so the true age is "
+            "unmeasurable — only the cadence above is real"
+        )
+
+
 def latency(rec: Recording) -> list[dict[str, float]]:
     """Age of the inputs each tick planned on, and the publish cadence of each stream."""
     map_ts = np.array([t for t, _ in rec.maps])
@@ -944,6 +1078,7 @@ def latency(rec: Recording) -> list[dict[str, float]]:
             f"{name:>14} {len(stamps):6d} {np.median(dt):9.1f}ms {np.percentile(dt, 95):8.1f}ms "
             f"{dt.max():8.1f}ms"
         )
+    pipeline_age(rec)
     print(f"\n{'input at a plan tick':>22} {'mean':>8} {'p95':>8} {'max':>8}")
     ages = (("map_age", "local_map"), ("odom_age", "odometry"), ("global_age", "planner_path"))
     for key, label in ages:
@@ -1437,6 +1572,7 @@ def main() -> None:
         f"{rec.plans[-1][0] - rec.t0:.1f} s"
         + (f" | window {rec.window.label(rec.t0)}" if rec.window.bounded else "")
     )
+    print_dialects(rec.dialects)
 
     import rerun as rr
 
@@ -1455,7 +1591,9 @@ def main() -> None:
     )
     last_body: tuple[float, ...] | None = None
     n_bodies = 0
-    for ots, pose in zip(rec.odom_ts, rec.poses, strict=True):
+    # the body's own timeline, so a sensor-time recording draws each pose where
+    # the lidar says it was rather than where the link delivered it
+    for ots, pose in zip(rec.odom_physics_ts, rec.poses, strict=True):
         if pose is None:
             continue
         rr.set_time("time", timestamp=float(ots))
