@@ -38,6 +38,19 @@ import numpy as np
 
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.nav_msgs.Path import Path
+
+# The gold search prices an edge by the time the FOLLOWER's governor will take
+# over it, so it reads that law from the one place it is defined rather than
+# keeping a second copy. Same direction adapter/planner.py already imports in
+# (the stamps it encodes are the same curve); profile.py depends on nothing
+# here, so this stays a leaf.
+from dimos.navigation.motion.control.profile import (
+    FLOOR_CLEARANCE,
+    MAX_SPEED,
+    MIN_SPEED,
+    SPEED_CLEARANCE,
+    governor_speed,
+)
 from dimos.navigation.motion.embodiment import EMBODIMENTS, GO2, Embodiment
 
 
@@ -558,13 +571,17 @@ def se2_search(
 
         yaw_cost = emb.yaw_w * yaw_step
 
-        # Comfort: clearance under CLEAR_PREF is charged progressively (up
-        # to ~2.5x at contact) — swing wide when it's free, thread tight
-        # gaps only when the world demands it. Beyond CLEAR_PREF: no charge.
-        # Charged on the UNION clearance: a preference has to be comparable
-        # across edges, so it may not shift with the edge's own drift row.
-        pref = emb.comfort
-        tight = 1.0 + 1.5 * np.clip((pref - clr[:, UNION]) / pref, 0.0, 1.0)
+        # Tightness prices TIME, on the follower's own committed speed law: a
+        # metre at clearance c takes 1/governor_speed(c) seconds, so it costs
+        # MAX_SPEED/governor_speed(c) metres of open-space walking. Planner and
+        # follower then optimize the same clock instead of a tunable comfort
+        # ramp, and the multiplier composes with the gait factors, which are
+        # ratios of the same kind. It needs no artificial ceiling: the governor
+        # floors at MIN_SPEED, so the charge caps itself at
+        # MAX_SPEED/MIN_SPEED = 2.5x. Read on the UNION clearance — a
+        # preference has to be comparable across edges, so it may not shift
+        # with the edge's own drift row (feasibility stays per-heading).
+        tight = MAX_SPEED / governor_speed(clr[:, UNION])
         dist = np.full((yaw_bins, nx, ny), np.inf)
         prev = np.full((yaw_bins, nx, ny, 3), -1, dtype=np.int16)
         dist[sb, si, sj] = 0.0
@@ -696,9 +713,13 @@ def se2_path(
     """
     if margin is None:
         margin = emb.precision  # below control precision, clearance is fiction
+    # The governor curve prices every edge, so it is an input to the answer and
+    # therefore to the key: retuning the follower's speed law may not serve a
+    # gold that was searched under the old one.
+    law = (MAX_SPEED, MIN_SPEED, SPEED_CLEARANCE, FLOOR_CLEARANCE)
     key = hashlib.sha256(
         repr(
-            ("v10-judge-envelope-witness", boxes, start, goal, emb, margin, cell, yaw_bins, pad)
+            ("v11-governor-time", boxes, start, goal, emb, margin, cell, yaw_bins, pad, law)
         ).encode()
     ).hexdigest()
     memo: dict[str, np.ndarray | None] = {}

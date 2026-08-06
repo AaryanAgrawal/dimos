@@ -73,7 +73,43 @@ spec + gold + referee; phase 2 = the rust candidate re-earns.
      slow commands vs the field (gain 0.62 vs 0.80 at 0.35). Verify on the
      real robot (command 0.2, run the tracking pass + field.py gain) before
      raising min_speed to 0.35 — a strictly-dominated crawl is a follower
-     change that rides this same re-baseline if confirmed.
+     change that rides this same re-baseline if confirmed. The sim's low-speed
+     undershoot is a tuning item of its own now: `simulation/FINDINGS.md` §E.
+
+4. **Governor-time pricing in the gold cost** (adopted after phase 1.5; gold
+   side only until the candidate re-earns in phase 2). An edge's tightness
+   multiplier is `MAX_SPEED / governor_speed(clearance)` — what a metre there
+   costs in time under the follower's own committed speed law, normalized so
+   open space is 1.0 — and no longer a comfort ramp. Three reasons:
+
+   - Planner and follower optimize the **same clock**. The follower is
+     contractually slowed to `governor(clearance)` in tight places; a planner
+     that priced tightness by a separate preference was choosing detours
+     against a cost the robot never pays.
+   - `comfort` **leaves the cost entirely**. It stays a labelling radius and
+     the smoothing cap, and (with the spawn disk, same revision) it is finally
+     a knob that can be turned without re-baselining the battery.
+   - The charge **caps itself**: the governor floors at MIN_SPEED, so the
+     multiplier tops out at MAX_SPEED/MIN_SPEED = 2.5x at contact — the same
+     ceiling the comfort ramp had by hand, now derived. In between it is
+     cheaper: 1.65x vs 1.92x at 0.15 m of clearance, 1.00x vs 1.19x at 0.35 m,
+     and 2.50x vs 2.31x right at the precision floor, where fiction begins.
+
+   Clearance is still read on the **union** (a preference has to be comparable
+   across edges); feasibility stays per-heading. `control/profile.py` is the
+   one copy of the curve, imported by the search, and its constants are in the
+   gold cache key (`v11-governor-time`) — retuning the law may not serve a gold
+   searched under the old one.
+
+   *Measured, curated 16 + gen 40: doors and corridors thread more.
+   `corridor` (0.9 m gap) stops detouring — 5.77 m around → 3.96 m straight
+   through the middle, min truth clearance 0.242 m; `door_side` 5.55 → 3.85 m.
+   `narrow_gap` (0.26 m opening) still goes around and `boxed_in` still
+   refuses: pricing cannot reach what feasibility forbids. No veto flip, no
+   label flip, no DQ on any of the 56 worlds; gold's pillar stays 1.0 and its
+   gate goes 108.98 → 109.32 curated / 108.13 → 108.49 on the mixed roster.
+   The rust candidate, which still prices comfort, drops 97.50 → 92.68 — the
+   gap phase 2 exists to close.*
 
 ## Acceptance
 
@@ -104,7 +140,11 @@ The envelope only binds where clearance is small, and there both tracks obey
 `speed ≤ governor(clearance)` by contract. So: measure `envelope(mode, speed)`
 on a 2-D grid in the fitted sim (once, to prove monotonicity), then bake one
 runtime row per mode at the speeds the governor permits in tight corridors.
-The search stays speed-free; the planner keeps dealing only in tolerances.
+The search stays speed-free in the sense that matters — it never *chooses* a
+speed, and the envelope it plans with carries none. It does now *price* by one
+(change 4): the governor is a function of clearance, which the search already
+knows, so reading it costs the search nothing and buys agreement with the
+follower about what a tight metre is worth.
 Hole to close: yaw rate is not clearance-governed — measure the arc row at
 the deployed `max_yaw_rate`, or cap yaw rate in tight segments.
 
