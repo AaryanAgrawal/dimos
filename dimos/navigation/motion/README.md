@@ -90,6 +90,7 @@ Anything under `research/` is invisible to the referee, and
 
 Oneliners for everything: [tools.md](tools.md).
 
+Setting up a Go2 from scratch: [installation/go2.md](installation/go2.md).
 Putting the time-critical half on the robot: [deployment_plan.md](deployment_plan.md),
 and how to write the modules it needs: [native_module_recipe.md](native_module_recipe.md).
 
