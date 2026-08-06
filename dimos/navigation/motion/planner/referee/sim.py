@@ -275,6 +275,45 @@ def judge(
     )
 
 
+def densify_se2(se2: np.ndarray) -> np.ndarray:
+    """Shortcut-smoothed vertices to a dense pose sequence (yaw = shortest arc).
+
+    The gold's own validity check interpolates exactly this way, so a body
+    ridden along this is a body the oracle proved fits.
+    """
+    dense = [se2[0]]
+    for a, b in itertools.pairwise(se2):
+        dyaw = math.remainder(b[2] - a[2], 2 * math.pi)
+        n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.15), int(abs(dyaw) / 0.2))
+        for t in np.linspace(1.0 / n, 1.0, n):
+            dense.append(
+                np.array([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * dyaw])
+            )
+    return np.array(dense)
+
+
+def body_marks(se2: np.ndarray, e: Any, z: float, step: float = 0.35) -> list[np.ndarray]:
+    """Body-box outlines along a dense maneuver: every `step` m, and every turn."""
+    seg = np.linalg.norm(np.diff(se2[:, :2], axis=0), axis=1)
+    arcs = np.concatenate([[0.0], np.cumsum(seg)])
+    marks = np.unique(
+        np.concatenate(
+            [
+                np.searchsorted(arcs, np.arange(0.0, arcs[-1], step)),
+                np.flatnonzero(np.diff(se2[:, 2]) != 0.0),
+                [len(se2) - 1],
+            ]
+        )
+    )
+    outs = []
+    for k in marks:
+        x, y, yaw = se2[k]
+        cx = x + math.cos(yaw) * e.center_off
+        cy = y + math.sin(yaw) * e.center_off
+        outs.append(Box(cx, cy, e.length, e.width, yaw).outline(z))
+    return outs
+
+
 def geo_extent(sc: Scenario) -> tuple[float, float, float, float]:
     """(x0, x1, y0, y1) from world geometry alone — known BEFORE judging, so
     the grid streams case by case instead of waiting for the whole battery.
@@ -320,15 +359,7 @@ def render(
     if se2 is not None:
         # Densify the shortcut-smoothed vertices so body boxes ride the whole
         # maneuver (yaw = shortest arc, matching the validity check).
-        dense = [se2[0]]
-        for a, b in itertools.pairwise(se2):
-            dyaw = math.remainder(b[2] - a[2], 2 * math.pi)
-            n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.15), int(abs(dyaw) / 0.2))
-            for t in np.linspace(1.0 / n, 1.0, n):
-                dense.append(
-                    np.array([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * dyaw])
-                )
-        se2 = np.array(dense)
+        se2 = densify_se2(se2)
         gold = [255, 190, 40]
         line = np.column_stack([se2[:, :2], np.full(len(se2), 0.02)])
         rr.log(
@@ -336,26 +367,11 @@ def render(
             rr.LineStrips3D([line + off3], colors=[gold], radii=0.012),
             static=True,
         )
-        seg = np.linalg.norm(np.diff(se2[:, :2], axis=0), axis=1)
-        arcs = np.concatenate([[0.0], np.cumsum(seg)])
-        marks = np.unique(
-            np.concatenate(
-                [
-                    np.searchsorted(arcs, np.arange(0.0, arcs[-1], 0.35)),
-                    np.flatnonzero(np.diff(se2[:, 2]) != 0.0),
-                    [len(se2) - 1],
-                ]
-            )
-        )
-        outs = []
-        for k in marks:
-            x, y, yaw = se2[k]
-            cx = x + math.cos(yaw) * e.center_off
-            cy = y + math.sin(yaw) * e.center_off
-            outs.append(Box(cx, cy, e.length, e.width, yaw).outline(0.02) + off3)
         rr.log(
             f"{root}/ideal_se2_body",
-            rr.LineStrips3D(outs, colors=[gold], radii=0.004),
+            rr.LineStrips3D(
+                [o + off3 for o in body_marks(se2, e, 0.02)], colors=[gold], radii=0.004
+            ),
             static=True,
         )
         # Animated body on the "step" timeline: scrub to watch the maneuver.
