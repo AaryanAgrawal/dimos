@@ -431,6 +431,9 @@ def se2_search(
     all-gait union stays the fallback -- for embodiments with no measured
     envelope, for the standing start, and for the turn-in-place edges that have
     no drift direction at all. See planner/revision.md.
+
+    The seed is judged at the TRUE start pose rather than at the cell it snaps
+    to: a pose the robot actually occupies may always be departed.
     """
     fine = float(fgx[1] - fgx[0])
     x0, y0, x1, y1 = bounds
@@ -514,6 +517,14 @@ def se2_search(
 
     import heapq
 
+    def pose_clear(x: float, y: float, th: float, drift: float | None = None) -> float:
+        """Clearance of the body at an exact pose — no lattice snap anywhere."""
+        off = fp_offsets[footprint(drift)]
+        c_, s_ = math.cos(th), math.sin(th)
+        wx = x + c_ * off[:, 0] - s_ * off[:, 1]
+        wy = y + s_ * off[:, 0] + c_ * off[:, 1]
+        return float(np.min(lookup(wx, wy)))
+
     def cell_of(p: tuple[float, float]) -> tuple[int, int]:
         return (
             int(np.clip(round((p[0] - x0) / cell), 0, nx - 1)),
@@ -524,7 +535,17 @@ def se2_search(
     si, sj = cell_of(start[:2])
     gi, gj = cell_of(goal)
     result: np.ndarray | None = None
-    if free[sb, UNION, si, sj]:
+    # A pose the robot actually occupies may always be departed. The seed's
+    # feasibility is therefore read at the TRUE start pose, not at the cell it
+    # snaps to: the snap moves the body by up to half a cell diagonal (~85 mm),
+    # and a start whose real pose clears the margin can land in a cell that
+    # does not (door_side: 0.083 true, 0.043 snapped, margin 0.05). The cell
+    # still NAMES the seed node; it just no longer decides whether the robot is
+    # allowed to be where it already is. Standing has no direction of travel,
+    # so the row is the union -- the same reading the turn-in-place edges take,
+    # and the honest one when the departure gait is not yet chosen. A start
+    # genuinely inside an obstacle still reads negative and still refuses.
+    if pose_clear(*start) > margin:
         # Gait-real costs: walking forward is cheapest, strafing ~1.8x,
         # backing up ~1.5x — the ideal turns to face long legs instead of
         # crabbing through the whole world, yet still backs out of pockets.
@@ -611,13 +632,6 @@ def se2_search(
             # straight SE(2) interpolations (yaw = shortest arc) whenever every
             # interpolated body pose clears the margin — the staircase is
             # lattice quantization, not the optimum.
-            def pose_clear(x: float, y: float, th: float, drift: float | None = None) -> float:
-                off = fp_offsets[footprint(drift)]
-                c_, s_ = math.cos(th), math.sin(th)
-                wx = x + c_ * off[:, 0] - s_ * off[:, 1]
-                wy = y + s_ * off[:, 0] + c_ * off[:, 1]
-                return float(np.min(lookup(wx, wy)))
-
             def seg_free(a: np.ndarray, b: np.ndarray, floor: float) -> bool:
                 # A shortcut may never get closer to the world than the raw
                 # detour it replaces (capped at the comfort preference) —
@@ -684,7 +698,7 @@ def se2_path(
         margin = emb.precision  # below control precision, clearance is fiction
     key = hashlib.sha256(
         repr(
-            ("v9-anchored-envelope", boxes, start, goal, emb, margin, cell, yaw_bins, pad)
+            ("v10-judge-envelope-witness", boxes, start, goal, emb, margin, cell, yaw_bins, pad)
         ).encode()
     ).hexdigest()
     memo: dict[str, np.ndarray | None] = {}

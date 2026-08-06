@@ -89,6 +89,11 @@ spec + gold + referee; phase 2 = the rust candidate re-earns.
   6-27 mm. The control judge keeps the union as its pillar — it grades the
   follower, which is the thing that may leave the row — and reports the same
   metric as the share of ticks spent outside it.*
+- [x] **Start witness** (adopted phase 1.5): a pose the robot actually occupies
+  may always be departed. The seed's feasibility is read at the true start
+  pose, not at the cell it snaps to.
+  *`door_side` routes again (the snap cost it 0.083 -> 0.043 against a 0.05
+  margin); a start with negative true clearance still refuses.*
 - **Gold before/after review**: old vs new gold paths overlaid per world
   (curated 16 + gen 40) as a browsable artifact — Ivan reviews before phase 2.
 - Referee re-baselined; runtime planner re-earns via the lab on the new spec.
