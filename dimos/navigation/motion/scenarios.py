@@ -769,7 +769,10 @@ def generate(seed: int, rules: GenRules | None = None, emb: Embodiment = GO2) ->
     # Derived rules: no ambiguous slivers (gaps are passable-with-margin or
     # sealed), spawn/goal free for the body at any orientation.
     min_gap = emb.width + 2.0 * emb.precision + 0.15
-    spawn_clear = emb.half_diag + max(0.15, emb.comfort / 2.0)
+    # A fixed margin, NOT emb.comfort: spawning is about the body fitting, and
+    # comfort is a route preference that has to stay tunable without re-rolling
+    # every seeded world in the battery.
+    spawn_clear = emb.half_diag + 0.2
     r_con = emb.half_diag + emb.precision
     rng = np.random.default_rng(seed)
     x0, y0, x1, y1 = rules.bounds
