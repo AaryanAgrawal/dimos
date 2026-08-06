@@ -113,11 +113,23 @@ spec + gold + referee; phase 2 = the rust candidate re-earns.
 
 ## Acceptance
 
-- `test_grid_invariance.py` xfail flips to passing (phase 2, when the rust
+- [x] `test_grid_invariance.py` xfail flips to passing (phase 2, when the rust
   candidate re-anchors); add whole-voxel-translation bit-exactness and
   far-point invariance over the full battery.
-- Field scenarios: door.zenoh and door2.zenoh (recorded worlds) route through
+  *Flipped. Far-point invariance is bit-exact in the crate
+  (`a_far_point_cannot_move_the_answer`) because the anchored lattice indexes
+  absolutely — `k * FINE`, never `origin + i * FINE`. Whole-period translation
+  is route-exact, not bit-exact, and cannot be: 0.24 is not a dyadic rational,
+  so `(x + d) / FINE` and `x / FINE + d / FINE` differ in the last bit and a
+  sample on a rounding boundary may tip.*
+- [x] Field scenarios: door.zenoh and door2.zenoh (recorded worlds) route through
   the doorway with the forward envelope.
+  *door.zenoh replays at 2.17 m mean published arc against 6.99 m before (the
+  recorded run was 5.71 m), holds 14 -> 11; door2.zenoh 1.05 m against 2.24 m,
+  holds unchanged at 9/9 agreeing. Both deterministic. Plan wall time falls,
+  61.5 -> 54.1 ms/tick on door and 12.2 -> 11.5 on door2, so the finer pitch is
+  paid for by the union-first fast path — but door is still 2.7x over the 20 ms
+  budget, as it was before, and that is now the open item on this recording.*
 - [x] Judge gains a per-mode envelope-violation metric (planner-assumes vs
   follower-does mismatch shows up named, not just as wall contact).
   *Phase 1.5: the planner judge sweeps the drift row and reports `env_viol`
@@ -133,6 +145,14 @@ spec + gold + referee; phase 2 = the rust candidate re-earns.
 - **Gold before/after review**: old vs new gold paths overlaid per world
   (curated 16 + gen 40) as a browsable artifact — Ivan reviews before phase 2.
 - Referee re-baselined; runtime planner re-earns via the lab on the new spec.
+  *Phase 2 landed the port, not the re-earn: curated 94.65 → 107.62 (gold
+  pillar 0.842 → 0.976) and mixed gen40 92.85 → 102.22 (0.830 → 0.926) against
+  frozen gates of 109.32 / 108.49. What is left is not port drift — the crate
+  and `target-py` agree route-for-route on every offender (gen012 7.80 vs
+  7.75 m, gen039 11.26 vs 11.15, gen007 10.91 vs 11.05) — it is the honest
+  candidate's own handicap: gen012 and gen039 score ~10 because their cloud-built
+  field will not thread a gap gold's box-exact SDF walks, and both scored ~10
+  before this revision too. That is what the lab is for.*
 
 ## Speed: eliminated via the governor, not modelled
 
