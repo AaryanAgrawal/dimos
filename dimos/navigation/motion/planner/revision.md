@@ -27,12 +27,36 @@ one re-baseline, one autoresearch re-earn.
    it sits, and whole-voxel translation of a scene translates the answer
    bit-exactly. Voxel size is a config constant of the deployment (never
    sniffed from data); changing it is a new spec = new baseline.
-3. **Per-mode envelope.** `Embodiment.envelope[mode] → (length, width,
-   center_off)` for the edge classes the search already prices (forward /
-   strafe / reverse / arc). Feasibility uses the mode's envelope, not the
-   union; arcs get a yaw-rate inflation term. Rows measured in the fitted sim
-   as max swept outline over the gait cycle. `precision` (0.05) is untouched —
-   it is the measured follower tracking floor.
+3. **Per-heading envelope.** Feasibility uses the swept box for the edge's
+   body-frame drift angle, not the all-gait union; arcs add a yaw-rate
+   inflation term. Rows measured in the fitted sim as max swept outline over
+   the gait cycle. `precision` (0.05) is untouched — it is the measured
+   follower tracking floor.
+
+   Storage on `Embodiment` (frozen dataclass, plain floats — serializes into
+   the rust config blob as-is):
+
+   ```python
+   # (deg, length, width, center_off); |angle| — left/right symmetric,
+   # 0 = nose-first, 90 = strafe, 180 = reverse. EMPTY = the union
+   # length/width/center_off applies at every heading (today's behavior,
+   # and the fallback for any unmeasured embodiment).
+   envelope: tuple[tuple[float, float, float, float], ...] = ()
+   arc_inflate: float = 0.0  # extra width per rad of yaw change on an edge
+
+   def envelope_at(self, drift: float) -> tuple[float, float, float]: ...
+   def offsets(self, step=0.05, drift: float | None = None) -> np.ndarray: ...
+   ```
+
+   - `length/width/center_off` keep meaning the UNION: the judge's veto,
+     `half_diag`, the body carve and viz stay conservative; only the search's
+     feasibility check becomes heading-aware. Forgetting to pass a drift
+     angle is conservative, never unsafe.
+   - Rows sit at the lattice's own drift angles (0, 26.6, 45, 63.4, 90 +
+     reverse family) — nearest-row lookup is exact for every edge the search
+     generates, no interpolation semantics.
+   - No speed column: baked into the rows at measurement time (governor
+     section below).
 
 ## Acceptance
 
