@@ -157,6 +157,9 @@ fn thin_wall_not_hopped() {
         strafe: 1.8,
         reverse: 1.5,
         yaw_w: 0.25,
+        // no measured envelope: the union applies at every heading
+        envelope: Vec::new(),
+        arc_inflate: 0.0,
     };
     let mut pts = Vec::new();
     let mut y = -4.0;

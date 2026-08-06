@@ -14,28 +14,32 @@
 
 """An obstacle the route never approaches must not change the route.
 
-The working area — and with it the 0.12 m lattice and the 0.05 m distance
-field — is laid out from `min(goal, cloud) - PAD` (`build_world`). That corner
-is a continuous function of the cloud, so a single return past it, metres away
-from anything the route touches, slides the whole grid by an arbitrary sub-cell
-amount and the search answers a differently-sampled question. `build_world`
-quantises the pose-driven *growth* onto `GRID_PERIOD` for precisely this reason
-— "the grid only ever gains or loses whole rows at the edge" — but the corner
-it grows from is itself unquantised, so the same failure arrives via the cloud.
+The working area — and with it the 0.12 m lattice and the 0.04 m distance
+field — used to be laid out from `min(goal, cloud) - PAD` (`build_world`). That
+corner is a continuous function of the cloud, so a single return past it, metres
+away from anything the route touches, slid the whole grid by an arbitrary
+sub-cell amount and the search answered a differently-sampled question.
+`build_world` already quantised the pose-driven *growth* for precisely this
+reason — "the grid only ever gains or loses whole rows at the edge" — but the
+corner it grew from was itself unquantised, so the same failure arrived via the
+cloud. Both corners are now floored onto the world frame's own `PERIOD` lattice
+(0.24 m = 2 cells = 3 voxels = 6 fine samples) and every index downstream is an
+absolute count, so a distant point can add rows and nothing else.
 
 The world here is a 0.75 m doorway in a wall raked 60 deg off the lattice axes:
 0.08 m of slack per side against a 0.593 m body and a 0.05 m margin, comfortably
 threadable, and the planner does thread it. One point thirteen metres away,
-past the cloud's low corner, buys a 7.5 m detour instead. Points past the
-*high* corner are harmless — they add rows without moving the origin — which is
-what places the defect at the corner rather than in the point count or the
-field itself.
+past the cloud's low corner, used to buy a 7.5 m detour instead. Points past the
+*high* corner were always harmless — they add rows without moving the origin —
+which is what placed the defect at the corner rather than in the point count or
+the field itself.
 
 The gap and the far point both track the body: they were 0.66 m and
 (-11.71, -4.0) against the 0.50 m union planner/revision.md re-baselined away.
 The witness is a knife-edge by nature — a sub-cell grid shift deciding a
 marginal doorway — so a wider body needs the corner pushed further out to move
-the origin by as much.
+the origin by as much. Keep it that way: a witness that clears comfortably
+stops witnessing anything.
 
 Seen on the robot as a route flip through a doorway 5.4 m away, replaying
 `ml-trajectory-research/door.zenoh.mcap` at t=7.093 (13.27 m around, vs 1.96 m
@@ -46,7 +50,6 @@ from __future__ import annotations
 
 import dimos_motion2_target
 import numpy as np
-import pytest
 
 from dimos.navigation.motion.embodiment import EMBODIMENTS
 
@@ -78,6 +81,8 @@ def _route(points: np.ndarray) -> tuple[str, float]:
             EMB.strafe,
             EMB.reverse,
             EMB.yaw_w,
+            EMB.envelope,
+            EMB.arc_inflate,
         ),
         0.1,
     )
@@ -100,11 +105,6 @@ def test_the_doorway_is_threadable_at_all() -> None:
     assert arc < 4.0, f"threaded the door but wandered {arc:.2f} m"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="build_world lays the grid out from an unquantised min(goal, cloud) - PAD, "
-    "so a far point moves every lattice cell and every field sample",
-)
 def test_a_far_obstacle_does_not_change_the_route() -> None:
     wall = _wall()
     base_how, base_arc = _route(wall)

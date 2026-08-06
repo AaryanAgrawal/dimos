@@ -54,7 +54,32 @@ import dimos_motion2_target as ext  # noqa: E402
 from referee import scenarios as sc_mod  # noqa: E402
 from referee.scenarios import SCENARIOS, generated, se2_path  # noqa: E402
 
-GO2 = (0.883, 0.593, 0.002, 0.4, 0.05, 1.8, 1.5, 0.25)
+# embodiment.py::GO2 -- the all-gait union, then the measured per-heading
+# envelope rows (deg, length, width, off_x, off_y) and the curvature slope.
+# Spelled out rather than imported: this template is vendored beside a frozen
+# referee copy, and the union above has always been written the same way.
+GO2 = (
+    0.883,
+    0.593,
+    0.002,
+    0.4,
+    0.05,
+    1.8,
+    1.5,
+    0.25,
+    (
+        (0.0, 0.819, 0.416, -0.023, 0.000),
+        (26.6, 0.802, 0.436, -0.032, -0.008),
+        (45.0, 0.788, 0.472, -0.035, -0.018),
+        (63.4, 0.781, 0.500, -0.039, -0.016),
+        (90.0, 0.781, 0.507, -0.039, -0.009),
+        (116.6, 0.781, 0.497, -0.039, 0.000),
+        (135.0, 0.781, 0.463, -0.039, -0.001),
+        (153.4, 0.781, 0.422, -0.039, -0.003),
+        (180.0, 0.781, 0.416, -0.039, 0.000),
+    ),
+    0.0334,
+)
 REFEREE_LOCK = evo_root() / ".evo" / "referee.lock"
 
 problems: list[str] = []

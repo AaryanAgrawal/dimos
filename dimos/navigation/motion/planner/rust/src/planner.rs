@@ -36,9 +36,28 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::f64::consts::PI;
 
-pub const FINE: f64 = 0.05;
+/// Voxel size of the map this deployment plans on. A config constant of the
+/// deployment, never sniffed from data: changing it is a new spec and a new
+/// baseline (`planner/revision.md` §2).
+pub const VOXEL: f64 = 0.08;
+/// Fine distance-field pitch, half a voxel -- so every voxel centre lands
+/// exactly on a fine sample, a voxel pattern reads the same clearance wherever
+/// it sits, and whole-voxel translation of a scene translates the answer.
+pub const FINE: f64 = 0.04; // VOXEL / 2
 pub const PAD: f64 = 1.5;
-const CELL: f64 = 0.12;
+/// Lattice pitch: three fine samples.
+const CELL: f64 = 0.12; // 3 * FINE
+/// The pitch at which lattice, fine field and voxel grid are all commensurate
+/// -- 2 cells, 3 voxels, 6 fine samples. Every working-area corner is snapped
+/// DOWN onto multiples of it in the world frame, which is what makes
+/// a sample position ABSOLUTE: an obstacle appearing or vanishing can add whole
+/// rows at the edge, but it can never move a sample that was already inside, so
+/// a lidar return metres behind the robot cannot re-sample the question the
+/// search is answering.
+const PERIOD: f64 = 0.24; // 2 * CELL == 3 * VOXEL == 6 * FINE
+/// Free space kept around the working area, in whole periods: the search must
+/// be able to swing wide of the obstacles it is routing around.
+const GRID_PAD: f64 = 0.72; // 3 * PERIOD
 const YAW_BINS: usize = 16;
 const OFFSET_STEP: f64 = 0.05;
 /// Worst-case distance between the fine-grid snaps of two coincident points:
@@ -47,23 +66,39 @@ const OFFSET_STEP: f64 = 0.05;
 const SNAP: f64 = FINE * std::f64::consts::SQRT_2;
 /// Side of the point-index bucket, in metres.
 const BUCKET: f64 = 0.2;
-/// Common period of the lattice (`CELL`) and the fine field (`FINE`): 5 cells
-/// and 12 fine cells exactly. The working area may only grow by whole
-/// multiples of it, so growing it never moves a sample position that was
-/// already inside.
-const GRID_PERIOD: f64 = 0.6;
-/// `GRID_PERIOD` measured in cells and in fine cells. These are the counts,
-/// and they are used ONLY as integers: the correction below is `i64` addition
-/// and never round-trips through the float ratio, which is what makes it exact
-/// regardless of the pose. (In binary neither `5.0 * CELL` nor `12.0 * FINE`
-/// reproduces `GRID_PERIOD` to the last bit -- the second is off by 1 ulp --
-/// so reconstructing a sample's position still carries `mx * 1.1e-16` m of
-/// drift. That is 15 orders of magnitude below the fine grid and cannot reach
-/// any decision; the decisions are all made on the integer side.)
-const CELLS_PER_PERIOD: i64 = 5;
-const FINES_PER_PERIOD: i64 = 12;
 
-#[derive(Clone, Copy, Debug)]
+// ---- The follower's own speed law, `control/profile.py` ------------------
+//
+// An edge's tightness multiplier is what a metre there costs in TIME under the
+// speed the follower is contractually held to at that clearance, normalized so
+// open space is 1.0. Planner and follower then optimize the same clock instead
+// of the planner pricing a comfort preference the robot never pays. The charge
+// caps itself: the governor floors at MIN_SPEED, so the multiplier tops out at
+// MAX_SPEED / MIN_SPEED at contact. `comfort` leaves the cost entirely -- it
+// stays a labelling radius and the smoothing cap. See planner/revision.md §4.
+const MAX_SPEED: f64 = 0.5;
+const MIN_SPEED: f64 = 0.2;
+/// Room at which full speed is granted (m).
+const SPEED_CLEARANCE: f64 = 0.35;
+/// Embodiment precision floor (m); below it clearance is fiction.
+const FLOOR_CLEARANCE: f64 = 0.05;
+/// The multiplier at contact, `MAX_SPEED / MIN_SPEED`.
+const TIGHT_MAX: f64 = MAX_SPEED / MIN_SPEED;
+
+/// Clearance (m) -> speed ceiling (m/s): creep at the floor, cruise with room.
+fn governor_speed(clearance: f64) -> f64 {
+    MIN_SPEED
+        + (MAX_SPEED - MIN_SPEED)
+            * ((clearance - FLOOR_CLEARANCE) / (SPEED_CLEARANCE - FLOOR_CLEARANCE)).clamp(0.0, 1.0)
+}
+
+/// Metres of open-space walking one metre at this clearance costs.
+#[inline]
+fn tight_of(clearance: f64) -> f64 {
+    MAX_SPEED / governor_speed(clearance)
+}
+
+#[derive(Clone, Debug)]
 pub struct Emb {
     pub length: f64,
     pub width: f64,
@@ -73,20 +108,74 @@ pub struct Emb {
     pub strafe: f64,
     pub reverse: f64,
     pub yaw_w: f64,
+    /// Motion-conditioned envelope, one row per |drift| angle in degrees:
+    /// `(deg, length, width, off_x, off_y)`, 0 = nose-first, 180 = reverse.
+    /// `off_y` is stored for POSITIVE drift and mirrored by sign at lookup.
+    /// EMPTY = the union applies at every heading -- today's behaviour, and the
+    /// fallback for any unmeasured embodiment. See `embodiment.py`.
+    pub envelope: Vec<[f64; 5]>,
+    /// Extra swept WIDTH per rad-per-metre of curvature (edge dyaw / length).
+    pub arc_inflate: f64,
 }
 
+/// `embodiment.py::GO2_ENVELOPE`, baked over the governed slow band.
+pub const GO2_ENVELOPE: [[f64; 5]; 9] = [
+    [0.0, 0.819, 0.416, -0.023, 0.000],
+    [26.6, 0.802, 0.436, -0.032, -0.008],
+    [45.0, 0.788, 0.472, -0.035, -0.018],
+    [63.4, 0.781, 0.500, -0.039, -0.016],
+    [90.0, 0.781, 0.507, -0.039, -0.009],
+    [116.6, 0.781, 0.497, -0.039, 0.000],
+    [135.0, 0.781, 0.463, -0.039, -0.001],
+    [153.4, 0.781, 0.422, -0.039, -0.003],
+    [180.0, 0.781, 0.416, -0.039, 0.000],
+];
+
 impl Emb {
+    /// `embodiment.py::GO2` -- the all-gait union plus the measured rows.
     pub fn go2() -> Self {
         Emb {
-            length: 0.85,
-            width: 0.31,
-            center_off: -0.025,
+            length: 0.883,
+            width: 0.593,
+            center_off: 0.002,
             comfort: 0.4,
             precision: 0.05,
             strafe: 1.8,
             reverse: 1.5,
             yaw_w: 0.25,
+            envelope: GO2_ENVELOPE.to_vec(),
+            arc_inflate: 0.0334,
         }
+    }
+
+    /// The all-gait union: the veto shape, `half_diag`, the standing start and
+    /// the turn-in-place edges, and the fallback for an unmeasured embodiment.
+    fn union_box(&self) -> [f64; 4] {
+        [self.length, self.width, self.center_off, 0.0]
+    }
+
+    /// `(length, width, off_x, off_y)` for a body-frame drift angle in rad.
+    ///
+    /// Rows sit at the lattice's own drift angles, so nearest-row lookup is
+    /// exact for every edge the search generates -- no interpolation semantics.
+    fn envelope_at(&self, drift: f64) -> [f64; 4] {
+        if self.envelope.is_empty() {
+            return self.union_box();
+        }
+        let rel = rem_2pi(drift);
+        let deg = rel.abs().to_degrees();
+        // `min_by` keeps the FIRST of equal minima, as python's `min(key=)` does.
+        let row = self
+            .envelope
+            .iter()
+            .min_by(|a, b| (a[0] - deg).abs().total_cmp(&(b[0] - deg).abs()))
+            .expect("non-empty");
+        [
+            row[1],
+            row[2],
+            row[3],
+            if rel >= 0.0 { row[4] } else { -row[4] },
+        ]
     }
 }
 
@@ -105,8 +194,10 @@ fn arange_len(start: f64, stop: f64, step: f64) -> usize {
     }
 }
 
-fn offsets(emb: &Emb) -> Vec<(f64, f64)> {
-    let (hl, hw) = (emb.length / 2.0, emb.width / 2.0);
+/// Footprint sample points of one swept box `(length, width, off_x, off_y)`,
+/// dense enough that a thin slat cannot slip between them.
+fn offsets(b: &[f64; 4]) -> Vec<(f64, f64)> {
+    let (hl, hw) = (b[0] / 2.0, b[1] / 2.0);
     let xs = arange(-hl, hl + OFFSET_STEP / 2.0, OFFSET_STEP);
     let ys = arange(-hw, hw + OFFSET_STEP / 2.0, OFFSET_STEP);
     // Coarse-to-fine emission order. The set of samples is exactly the same
@@ -129,14 +220,14 @@ fn offsets(emb: &Emb) -> Vec<(f64, f64)> {
             while yi < nys {
                 if !seen[xi * nys + yi] {
                     seen[xi * nys + yi] = true;
-                    out.push((xs[xi] + emb.center_off, ys[yi]));
+                    out.push((xs[xi] + b[2], ys[yi] + b[3]));
                 }
                 yi += step;
             }
             // The far edge of each axis is a footprint corner: take it early.
             if !seen[xi * nys + nys - 1] {
                 seen[xi * nys + nys - 1] = true;
-                out.push((xs[xi] + emb.center_off, ys[nys - 1]));
+                out.push((xs[xi] + b[2], ys[nys - 1] + b[3]));
             }
             xi += step;
         }
@@ -146,6 +237,70 @@ fn offsets(emb: &Emb) -> Vec<(f64, f64)> {
         step /= 2;
     }
     out
+}
+
+/// The distinct swept boxes one embodiment can answer with, interned by
+/// geometry: id 0 is the all-gait union, the rest are the envelope's rows in
+/// both drift signs. The envelope answers every drift angle with one of a
+/// handful of boxes, so the clearance work is keyed by box rather than by edge.
+///
+/// The table is complete before the search starts -- `id` is a pure lookup that
+/// cannot grow it -- so the per-(bin, box) caches can be sized once.
+pub struct Fps {
+    keys: Vec<[i64; 4]>,
+    offs: Vec<Vec<(f64, f64)>>,
+}
+
+/// Box identity, rounded exactly as the python reference rounds it.
+fn fp_key(b: &[f64; 4]) -> [i64; 4] {
+    let q = |v: f64| (v * 1e9).round_even_i64();
+    [q(b[0]), q(b[1]), q(b[2]), q(b[3])]
+}
+
+impl Fps {
+    fn new(emb: &Emb) -> Self {
+        let mut f = Fps {
+            keys: Vec::new(),
+            offs: Vec::new(),
+        };
+        f.intern(&emb.union_box()); // id 0: the veto shape and every fallback
+        for row in &emb.envelope {
+            for s in [1.0f64, -1.0] {
+                f.intern(&[row[1], row[2], row[3], s * row[4]]);
+            }
+        }
+        f
+    }
+
+    fn intern(&mut self, b: &[f64; 4]) -> usize {
+        let k = fp_key(b);
+        match self.keys.iter().position(|x| *x == k) {
+            Some(i) => i,
+            None => {
+                self.keys.push(k);
+                self.offs.push(offsets(b));
+                self.keys.len() - 1
+            }
+        }
+    }
+
+    /// Which box an edge with this body-frame drift angle needs; `None` asks
+    /// for the union (a standing pose, or a turn in place, has no drift).
+    fn id(&self, emb: &Emb, drift: Option<f64>) -> usize {
+        let b = match drift {
+            None => emb.union_box(),
+            Some(d) => emb.envelope_at(d),
+        };
+        let k = fp_key(&b);
+        self.keys
+            .iter()
+            .position(|x| *x == k)
+            .expect("every reachable box is interned by Fps::new")
+    }
+
+    pub fn union(&self) -> &[(f64, f64)] {
+        &self.offs[0]
+    }
 }
 
 /// `x.round_ties_even() as i64`, without the call into libm and without the
@@ -368,44 +523,24 @@ impl PointBuckets {
 }
 
 pub struct World {
-    fx0: f64,
-    fy0: f64,
-    /// Un-grown fine-grid origin, and the growth in whole `GRID_PERIOD`s.
-    /// Snapping rounds against these and never against `fx0` -- see `lookup`.
-    frx: f64,
-    fry: f64,
-    mx: i64,
-    my: i64,
+    /// ABSOLUTE fine-grid index of the field's first column/row -- `fkx * FINE`
+    /// is where it sits in the world frame. Positions are reconstructed from
+    /// the absolute index and never from a stored origin: `x0 + i * FINE` is
+    /// the same number in arithmetic and a different one in binary depending on
+    /// how far down-left the working area happened to start, and a sample
+    /// landing exactly on a rounding boundary then picks its cell by a distant
+    /// obstacle. The index IS the position, so there is nothing left to drift.
+    fkx: i64,
+    fky: i64,
     nfx: usize,
     nfy: usize,
     sdf: Vec<f64>,
     pts: Option<PointBuckets>,
     cap: f64,
     pub bounds: (f64, f64, f64, f64),
-    /// The same reference origin and growth for the lattice, which
-    /// `se2_search` snaps against for exactly the same reason.
-    pub refx: f64,
-    pub refy: f64,
-    pub gx_off: i64,
-    pub gy_off: i64,
-    /// Reference origin of the *spec's* lattice -- the one the task statement
-    /// lays out, over `{pose, goal, obstacles}` padded by `PAD`. It is NOT the
-    /// origin this planner searches on (see `refx` and the note in
-    /// `build_world`: taking the pose into the origin makes every lattice cell
-    /// move with the robot, which is what the growth quantisation exists to
-    /// prevent). It is only ever read by `snap_pub`, to place the two
-    /// endpoints the published path is *required* to name.
-    pub pubx: f64,
-    pub puby: f64,
-}
-
-/// Position of `p` on the lattice `o + k * CELL`, `k` integer.
-///
-/// The spec lays its lattice out from the working area's low corner and takes
-/// `round((p - o) / CELL)`; this is that value, put back into metres.
-#[inline]
-fn snap_pub(o: f64, p: f64) -> f64 {
-    o + ((p - o) / CELL).round_even_i64() as f64 * CELL
+    /// Absolute LATTICE index of the working area's low corner, the same way.
+    pub kx: i64,
+    pub ky: i64,
 }
 
 impl World {
@@ -429,8 +564,8 @@ impl World {
         }
         let d = match &self.pts {
             Some(b) => b.nearest(
-                self.fx0 + i as f64 * FINE,
-                self.fy0 + j as f64 * FINE,
+                (self.fkx + i as i64) as f64 * FINE,
+                (self.fky + j as i64) as f64 * FINE,
                 self.cap,
             ),
             None => f64::INFINITY,
@@ -454,17 +589,16 @@ impl World {
     }
 
     #[inline]
+    /// The origin is on the world frame's own absolute lattice, so this rounds
+    /// against it directly: no growth correction is needed or possible, because
+    /// there is no growth -- a bigger area is the same samples plus more of
+    /// them. (Before anchoring, the origin tracked the cloud's low corner and
+    /// the pose-driven growth had to be quantised and applied as an integer to
+    /// keep the snapping decision still; the corner it grew from was itself
+    /// unquantised, so the same failure arrived via one distant lidar return.)
     fn lookup(&mut self, px: f64, py: f64) -> f64 {
-        // Round against the UN-GROWN origin, then correct by the exact integer
-        // number of fine cells the area was grown by. Rounding against `fx0`
-        // is the same value in arithmetic and a different one in binary --
-        // `2.7 / 0.12` is 22.500000000000004 -- so a coordinate lying exactly
-        // on a cell boundary picks its cell by how far the area happened to
-        // grow, which is a function of the pose.
-        let i = (((px - self.frx) / FINE).round_even_i64() + self.mx * FINES_PER_PERIOD)
-            .clamp(0, self.nfx as i64 - 1) as usize;
-        let j = (((py - self.fry) / FINE).round_even_i64() + self.my * FINES_PER_PERIOD)
-            .clamp(0, self.nfy as i64 - 1) as usize;
+        let i = ((px / FINE).round_even_i64() - self.fkx).clamp(0, self.nfx as i64 - 1) as usize;
+        let j = ((py / FINE).round_even_i64() - self.fky).clamp(0, self.nfy as i64 - 1) as usize;
         let k = self.xpart(i) + Self::ypart(j);
         self.at(i, j, k)
     }
@@ -477,71 +611,44 @@ pub fn build_world(
     cap: f64,
 ) -> World {
     let band: Vec<(f64, f64)> = points.iter().map(|p| (p[0], p[1])).collect();
-    // The working area is taken over {goal, cloud} and then grown to cover the
-    // pose in whole grid periods -- deliberately NOT over {pose, goal, cloud}.
+    // The working area is taken over {pose, goal, cloud} padded by `PAD`, and
+    // its LOW corner is then snapped down onto the world frame's own absolute
+    // lattice. The high corner only ever adds rows.
     //
-    // Everything downstream is laid out from this box's corner: `gx[i]` is
-    // `x0 + i * CELL` and the fine field starts at `x0 - 0.6`. So whenever the
-    // pose was one of the box's extrema -- which it is in most curated worlds
-    // and about a third of the generated ones -- the grid ORIGIN moved with
-    // the robot, and with it every lattice cell, every fine sample, and the
-    // goal cell the search aims at. Two replans of the same query were then
-    // aiming at points up to half a cell apart and had drifted before the
-    // search even started. Growing by GRID_PERIOD instead lets the pose decide
-    // how big the area is but never where its samples sit: the grid only ever
-    // gains or loses whole rows at the edge.
-    let mut x0 = goal.0;
-    let mut y0 = goal.1;
-    let mut x1 = goal.0;
-    let mut y1 = goal.1;
+    // That snap is the whole of the anchoring change. Everything downstream is
+    // laid out from this corner -- `gx[i]` is `x0 + i * CELL`, the fine field
+    // starts at `x0 - GRID_PAD` -- so an unquantised corner made every sample
+    // position a continuous function of whatever happened to be furthest
+    // down-left: the pose (every lattice cell moving with the robot between
+    // replans) or, just as effectively, a single lidar return metres behind it.
+    // Anchored, a point appearing or vanishing anywhere changes which samples
+    // exist, never where they are, and the search keeps answering the same
+    // question. See `referee/test_grid_invariance.py`.
+    let mut x0 = goal.0.min(pose.0);
+    let mut y0 = goal.1.min(pose.1);
+    let mut x1 = goal.0.max(pose.0);
+    let mut y1 = goal.1.max(pose.1);
     for &(x, y) in &band {
         x0 = x0.min(x);
         y0 = y0.min(y);
         x1 = x1.max(x);
         y1 = y1.max(y);
     }
-    let (refx, refy) = (x0 - PAD, y0 - PAD);
-    // The spec's own reference origin, which differs from `refx` in exactly one
-    // way: it takes the pose into the corner instead of only growing to cover
-    // it. Whenever the pose is not the low corner the two coincide bit for bit
-    // and nothing downstream moves; when it is, they disagree by whatever
-    // `pose - min(goal, cloud)` is modulo `CELL`, and that residual is the
-    // entire distance between where this planner names its endpoints and where
-    // the task says they are.
-    let (pubx, puby) = (x0.min(pose.0) - PAD, y0.min(pose.1) - PAD);
-    let (mut x1, mut y1) = (x1 + PAD, y1 + PAD);
-    // Cover the pose, in whole grid periods, counted as an INTEGER.
-    //
-    // Quantising the growth keeps the sample POSITIONS still; keeping the
-    // count as an integer is what keeps the snapping DECISION still, and both
-    // are needed. The decision half is the exact one -- it is integer
-    // addition; see CELLS_PER_PERIOD. Every snap downstream rounds against the un-grown reference
-    // origin and adds this integer, so which cell a point lands in cannot
-    // depend on how far the area was grown -- and therefore cannot depend on
-    // the pose. Doing it the other way round is exact in arithmetic but not in
-    // binary, and a goal sitting exactly on a cell boundary then tips to the
-    // other side between one replan and the next.
-    let periods = |r: f64, p: f64| -> i64 {
-        if p - PAD < r {
-            ((r - (p - PAD)) / GRID_PERIOD).ceil() as i64
-        } else {
-            0
-        }
-    };
-    let (mx, my) = (periods(refx, pose.0), periods(refy, pose.1));
-    let x0 = refx - mx as f64 * GRID_PERIOD;
-    let y0 = refy - my as f64 * GRID_PERIOD;
-    // The far side only sets how many rows exist, never where they sit.
-    if pose.0 + PAD > x1 {
-        x1 += ((pose.0 + PAD - x1) / GRID_PERIOD).ceil() * GRID_PERIOD;
-    }
-    if pose.1 + PAD > y1 {
-        y1 += ((pose.1 + PAD - y1) / GRID_PERIOD).ceil() * GRID_PERIOD;
-    }
-    let (x1, y1) = (x1, y1);
-    let (fx0, fy0) = (x0 - 0.6, y0 - 0.6);
-    let nfx = arange_len(fx0, x1 + 0.6, FINE);
-    let nfy = arange_len(fy0, y1 + 0.6, FINE);
+    // The corner in whole PERIODs, kept as the integer it is: every index
+    // downstream is an absolute count from the world frame's origin, so which
+    // fine cell or lattice cell a coordinate lands in is a function of the
+    // coordinate alone. Whole periods are whole cells (2) and whole fine
+    // samples (6), so no lattice is left phase-shifted by the arithmetic.
+    let (px, py) = (
+        ((x0 - PAD) / PERIOD).floor() as i64,
+        ((y0 - PAD) / PERIOD).floor() as i64,
+    );
+    let (x0, y0) = (px as f64 * PERIOD, py as f64 * PERIOD);
+    let (x1, y1) = (x1 + PAD, y1 + PAD);
+    let (fkx, fky) = ((px - 3) * 6, (py - 3) * 6); // GRID_PAD = 3 PERIODs = 18 fine
+    let (fx0, fy0) = (fkx as f64 * FINE, fky as f64 * FINE);
+    let nfx = arange_len(fx0, x1 + GRID_PAD, FINE);
+    let nfy = arange_len(fy0, y1 + GRID_PAD, FINE);
     let ncells = nfx * nfy;
     let (sdf, pts) = if band.is_empty() {
         (vec![f64::INFINITY; ncells], None)
@@ -549,24 +656,16 @@ pub fn build_world(
         (vec![-1.0; ncells], Some(PointBuckets::new(&band)))
     };
     World {
-        fx0,
-        fy0,
-        frx: refx - 0.6,
-        fry: refy - 0.6,
-        mx,
-        my,
+        fkx,
+        fky,
         nfx,
         nfy,
         sdf,
         pts,
         cap,
         bounds: (x0, y0, x1, y1),
-        refx,
-        refy,
-        gx_off: mx * CELLS_PER_PERIOD,
-        gy_off: my * CELLS_PER_PERIOD,
-        pubx,
-        puby,
+        kx: px * 2,
+        ky: py * 2,
     }
 }
 
@@ -623,8 +722,21 @@ impl PartialOrd for Node {
     }
 }
 
+/// Clearance of a body standing on a lattice cell, by yaw bin and swept box.
+///
+/// The UNION is the hot path and keeps the whole precomputed-index machinery:
+/// it is the shape every edge is priced on, and the one every open-space edge
+/// is cleared by. The envelope's narrower rows are consulted only where the
+/// union is blocked -- a doorway, and nothing else -- so they get a plain
+/// footprint scan behind a per-(bin, box) cache that is allocated the first
+/// time that pair is asked about, and never on an open world at all.
 struct Clear<'a> {
     w: &'a mut World,
+    /// Union clearance per (bin, cell): 0.0 = not evaluated, -1.0 = the body
+    /// does not fit, otherwise the footprint's minimum clearance -- or
+    /// `SPEED_CLEARANCE` for a cell certified clear without a scan, which is a
+    /// LOWER bound and the only thing the value is ever used for up there
+    /// (it prices at 1.0 and clears every threshold).
     t: Vec<f64>,
     nx: usize,
     ny: usize,
@@ -632,6 +744,14 @@ struct Clear<'a> {
     gy: Vec<f64>,
     rot: Vec<(f64, f64)>,
     noff: usize,
+    /// `(sin, cos)` per yaw bin, for the row scans.
+    cs: Vec<(f64, f64)>,
+    /// Footprint samples per interned box; id 0 is the union.
+    fp_offs: Vec<Vec<(f64, f64)>>,
+    nfp: usize,
+    /// Row clearance per (bin, box), same encoding as `t`. A plane is empty
+    /// until the first union-blocked cell asks that (bin, box) a question.
+    rowc: Vec<Vec<f64>>,
     /// Precomputed fine-field index halves, `[(bin, lattice line), sample]`,
     /// filled the first time a line is touched (`dx` / `dy` mark that). The
     /// raw cell indices are not kept alongside: `World::at_k` divides them out
@@ -643,11 +763,58 @@ struct Clear<'a> {
     dx: Vec<bool>,
     dy: Vec<bool>,
     margin: f64,
-    comfort: f64,
     certify: f64,
 }
 
-impl Clear<'_> {
+/// The lattice's yaw bins, in radians.
+fn yaw_bins() -> Vec<f64> {
+    (0..YAW_BINS)
+        .map(|k| -PI + k as f64 * (2.0 * PI / YAW_BINS as f64))
+        .collect()
+}
+
+impl<'a> Clear<'a> {
+    fn new(w: &'a mut World, fps: &Fps, margin: f64, gx: Vec<f64>, gy: Vec<f64>) -> Self {
+        let (nx, ny) = (gx.len(), gy.len());
+        let noff = fps.union().len();
+        let mut rot = Vec::with_capacity(YAW_BINS * noff);
+        let mut cs = Vec::with_capacity(YAW_BINS);
+        let mut reach: f64 = 0.0;
+        for th in yaw_bins() {
+            let (s, c) = th.sin_cos();
+            cs.push((s, c));
+            for &(ox, oy) in fps.union() {
+                let (rx, ry) = (c * ox - s * oy, s * ox + c * oy);
+                reach = reach.max(rx.hypot(ry));
+                rot.push((rx, ry));
+            }
+        }
+        let nfp = fps.offs.len();
+        Clear {
+            w,
+            t: vec![0.0f64; YAW_BINS * nx * ny],
+            nx,
+            ny,
+            gx,
+            gy,
+            rot,
+            noff,
+            cs,
+            fp_offs: fps.offs.clone(),
+            nfp,
+            rowc: vec![Vec::new(); YAW_BINS * nfp],
+            ix: vec![0u32; YAW_BINS * nx * noff],
+            iy: vec![0u32; YAW_BINS * ny * noff],
+            dx: vec![false; YAW_BINS * nx],
+            dy: vec![false; YAW_BINS * ny],
+            margin,
+            // Full speed is granted at `SPEED_CLEARANCE`, so that -- not
+            // `comfort`, which has left the cost -- is where a cell stops being
+            // worth scanning.
+            certify: SPEED_CLEARANCE + reach + SNAP,
+        }
+    }
+
     /// Fine-grid x indices of this yaw bin's footprint at lattice column `i`.
     ///
     /// `lookup` recomputes these from scratch on every sample of every state:
@@ -658,17 +825,13 @@ impl Clear<'_> {
     fn fill_x(&mut self, b: usize, i: usize, rx: usize) {
         let x = self.gx[i];
         let (base, o) = (b * self.noff, rx * self.noff);
-        let (frx, off, hi) = (
-            self.w.frx,
-            self.w.mx * FINES_PER_PERIOD,
-            self.w.nfx as i64 - 1,
-        );
+        let (fkx, hi) = (self.w.fkx, self.w.nfx as i64 - 1);
         let nfy = self.w.nfy;
         for (d, r) in self.ix[o..o + self.noff]
             .iter_mut()
             .zip(&self.rot[base..base + self.noff])
         {
-            let fi = (((x + r.0 - frx) / FINE).round_even_i64() + off).clamp(0, hi) as usize;
+            let fi = (((x + r.0) / FINE).round_even_i64() - fkx).clamp(0, hi) as usize;
             *d = (fi * nfy) as u32;
         }
         self.dx[rx] = true;
@@ -678,16 +841,12 @@ impl Clear<'_> {
     fn fill_y(&mut self, b: usize, j: usize, ry: usize) {
         let y = self.gy[j];
         let (base, o) = (b * self.noff, ry * self.noff);
-        let (fry, off, hi) = (
-            self.w.fry,
-            self.w.my * FINES_PER_PERIOD,
-            self.w.nfy as i64 - 1,
-        );
+        let (fky, hi) = (self.w.fky, self.w.nfy as i64 - 1);
         for (d, r) in self.iy[o..o + self.noff]
             .iter_mut()
             .zip(&self.rot[base..base + self.noff])
         {
-            let fj = (((y + r.1 - fry) / FINE).round_even_i64() + off).clamp(0, hi) as usize;
+            let fj = (((y + r.1) / FINE).round_even_i64() - fky).clamp(0, hi) as usize;
             *d = World::ypart(fj) as u32;
         }
         self.dy[ry] = true;
@@ -695,8 +854,8 @@ impl Clear<'_> {
 
     fn eval(&mut self, k: usize, b: usize, i: usize, j: usize) -> f64 {
         if self.w.lookup(self.gx[i], self.gy[j]) >= self.certify {
-            self.t[k] = 1.0;
-            return 1.0;
+            self.t[k] = SPEED_CLEARANCE;
+            return SPEED_CLEARANCE;
         }
         let rx = b * self.nx + i;
         if !self.dx[rx] {
@@ -733,20 +892,19 @@ impl Clear<'_> {
                 }
             }
         }
-        let v = 1.0 + 1.5 * ((self.comfort - m) / self.comfort).clamp(0.0, 1.0);
-        self.t[k] = v;
-        v
+        self.t[k] = m;
+        m
     }
 
     #[inline]
-    fn tight(&mut self, b: usize, i: usize, j: usize) -> f64 {
-        self.tight_at((b * self.nx + i) * self.ny + j, b, i, j)
+    fn clear(&mut self, b: usize, i: usize, j: usize) -> f64 {
+        self.clear_at((b * self.nx + i) * self.ny + j, b, i, j)
     }
 
-    /// `tight` for a caller that already holds the flat index -- which the
+    /// `clear` for a caller that already holds the flat index -- which the
     /// edge-relaxation loop does, having reached it by adding `Move::dk`.
     #[inline]
-    fn tight_at(&mut self, k: usize, b: usize, i: usize, j: usize) -> f64 {
+    fn clear_at(&mut self, k: usize, b: usize, i: usize, j: usize) -> f64 {
         let v = self.t[k];
         if v != 0.0 {
             return v;
@@ -754,9 +912,74 @@ impl Clear<'_> {
         self.eval(k, b, i, j)
     }
 
+    /// Time price of one metre entering this cell, on the UNION clearance.
+    ///
+    /// A preference has to be comparable across edges, so it may not shift with
+    /// the edge's own drift row -- feasibility stays per-heading, pricing does
+    /// not. A cell the union does not fit in prices at the governor's floor:
+    /// its clearance is at or below `margin`, and every embodiment's `margin`
+    /// is at or below `FLOOR_CLEARANCE`, where the law has already saturated.
+    #[inline]
+    fn price(v: f64) -> f64 {
+        if v < 0.0 {
+            TIGHT_MAX
+        } else {
+            tight_of(v)
+        }
+    }
+
+    /// Minimum clearance of swept box `fp` at (bin, cell), same encoding as
+    /// `t`. Scanned in full unless a sample falls at or below the margin, in
+    /// which case no threshold this box is ever tested against can pass.
+    fn row_clear(&mut self, b: usize, fp: usize, i: usize, j: usize) -> f64 {
+        if fp == 0 {
+            return self.clear(b, i, j);
+        }
+        let p = b * self.nfp + fp;
+        if self.rowc[p].is_empty() {
+            self.rowc[p] = vec![0.0; self.nx * self.ny];
+        }
+        let k = i * self.ny + j;
+        let cached = self.rowc[p][k];
+        if cached != 0.0 {
+            return cached;
+        }
+        let (s, c) = self.cs[b];
+        let (x, y) = (self.gx[i], self.gy[j]);
+        let margin = self.margin;
+        let Clear { w, fp_offs, .. } = self;
+        let mut m = f64::INFINITY;
+        for &(ox, oy) in &fp_offs[fp] {
+            let d = w.lookup(x + c * ox - s * oy, y + s * ox + c * oy);
+            if d < m {
+                m = d;
+                if m <= margin {
+                    m = -1.0;
+                    break;
+                }
+            }
+        }
+        self.rowc[p][k] = m;
+        m
+    }
+
+    /// Does swept box `fp` clear `thresh` at (bin, cell)?
+    ///
+    /// UNION FIRST, and that is the budget: every row is nested inside the
+    /// all-gait union, so a cell the fat box clears needs no second look, and
+    /// open space keeps paying exactly what it paid before the envelope
+    /// existed. Precision is bought only at the doorways that reject the union.
+    #[inline]
+    fn fits(&mut self, b: usize, fp: usize, i: usize, j: usize, thresh: f64) -> bool {
+        if self.clear(b, i, j) > thresh {
+            return true;
+        }
+        fp != 0 && self.row_clear(b, fp, i, j) > thresh
+    }
+
     #[inline]
     fn free(&mut self, b: usize, i: usize, j: usize) -> bool {
-        self.tight(b, i, j) > 0.0
+        self.clear(b, i, j) > 0.0
     }
 }
 
@@ -772,21 +995,34 @@ fn pose_clear(w: &mut World, offs: &[(f64, f64)], x: f64, y: f64, th: f64) -> f6
     m
 }
 
-fn seg_free(w: &mut World, offs: &[(f64, f64)], a: &[f64; 3], b: &[f64; 3], floor: f64) -> bool {
+/// Is the straight SE(2) interpolation from `a` to `b` clear of `floor`?
+///
+/// A chord is one long edge, so it gets the same treatment a lattice edge does:
+/// its own drift row, which turns with the interpolated yaw, widened by its own
+/// curvature. Judging it against the union instead would forbid every shortcut
+/// through a gap the lattice just proved the body walks down nose-first.
+fn seg_free(w: &mut World, fps: &Fps, emb: &Emb, a: &[f64; 3], b: &[f64; 3], floor: f64) -> bool {
     let dyaw = rem_2pi(b[2] - a[2]);
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let span = dx.hypot(dy);
+    let head = if span > 1e-9 {
+        Some(dy.atan2(dx))
+    } else {
+        None
+    };
+    let pad = if span > 1e-9 {
+        0.5 * emb.arc_inflate * dyaw.abs() / span
+    } else {
+        0.0
+    };
     let steps = 2usize
-        .max(((b[0] - a[0]).hypot(b[1] - a[1]) / 0.06) as usize)
+        .max((span / 0.06) as usize)
         .max((dyaw.abs() / 0.15) as usize);
     for k in 0..=steps {
         let t = k as f64 / steps as f64;
-        if pose_clear(
-            w,
-            offs,
-            a[0] + t * (b[0] - a[0]),
-            a[1] + t * (b[1] - a[1]),
-            a[2] + t * dyaw,
-        ) <= floor
-        {
+        let th = a[2] + t * dyaw;
+        let offs = &fps.offs[fps.id(emb, head.map(|h| h - th))];
+        if pose_clear(w, offs, a[0] + t * dx, a[1] + t * dy, th) <= floor + pad {
             return false;
         }
     }
@@ -795,54 +1031,33 @@ fn seg_free(w: &mut World, offs: &[(f64, f64)], a: &[f64; 3], b: &[f64; 3], floo
 
 pub fn se2_search(
     w: &mut World,
+    fps: &Fps,
     start: (f64, f64, f64),
     goal: (f64, f64),
     emb: &Emb,
     margin: f64,
 ) -> Option<Vec<[f64; 3]>> {
     let (x0, y0, x1, y1) = w.bounds;
-    let (refx, refy, gx_off, gy_off) = (w.refx, w.refy, w.gx_off, w.gy_off);
-    let offs = offsets(emb);
-    let gx = arange(x0, x1 + CELL, CELL);
-    let gy = arange(y0, y1 + CELL, CELL);
-    let (nx, ny) = (gx.len(), gy.len());
-    let thetas: Vec<f64> = (0..YAW_BINS)
-        .map(|k| -PI + k as f64 * (2.0 * PI / YAW_BINS as f64))
+    let offs = fps.union().to_vec();
+    let (kx, ky) = (w.kx, w.ky);
+    // Cell centres from their ABSOLUTE lattice index, for the same reason the
+    // fine field uses one: `x0 + i * CELL` reconstructs a position that depends
+    // on where the corner is, and the corner depends on the far end of the
+    // cloud. `k * CELL` does not.
+    let gx: Vec<f64> = (0..arange_len(x0, x1 + CELL, CELL))
+        .map(|i| (kx + i as i64) as f64 * CELL)
         .collect();
-
-    let noff = offs.len();
-    let mut rot = Vec::with_capacity(YAW_BINS * noff);
-    let mut reach: f64 = 0.0;
-    for &th in &thetas {
-        let (s, c) = th.sin_cos();
-        for &(ox, oy) in &offs {
-            let (rx, ry) = (c * ox - s * oy, s * ox + c * oy);
-            reach = reach.max(rx.hypot(ry));
-            rot.push((rx, ry));
-        }
-    }
-    let mut cl = Clear {
-        w,
-        t: vec![0.0f64; YAW_BINS * nx * ny],
-        nx,
-        ny,
-        gx,
-        gy,
-        rot,
-        noff,
-        ix: vec![0u32; YAW_BINS * nx * noff],
-        iy: vec![0u32; YAW_BINS * ny * noff],
-        dx: vec![false; YAW_BINS * nx],
-        dy: vec![false; YAW_BINS * ny],
-        margin,
-        comfort: emb.comfort,
-        certify: emb.comfort + reach + SNAP,
-    };
+    let gy: Vec<f64> = (0..arange_len(y0, y1 + CELL, CELL))
+        .map(|j| (ky + j as i64) as f64 * CELL)
+        .collect();
+    let (nx, ny) = (gx.len(), gy.len());
+    let thetas = yaw_bins();
+    let mut cl = Clear::new(w, fps, margin, gx, gy);
 
     let cell_of = |px: f64, py: f64| -> (usize, usize) {
         (
-            (((px - refx) / CELL).round_even_i64() + gx_off).clamp(0, nx as i64 - 1) as usize,
-            (((py - refy) / CELL).round_even_i64() + gy_off).clamp(0, ny as i64 - 1) as usize,
+            ((px / CELL).round_even_i64() - kx).clamp(0, nx as i64 - 1) as usize,
+            ((py / CELL).round_even_i64() - ky).clamp(0, ny as i64 - 1) as usize,
         )
     };
     let mut sb = 0;
@@ -858,17 +1073,23 @@ pub fn se2_search(
     let (gi, gj) = cell_of(goal.0, goal.1);
     // Entering the lattice, from a pose the robot is already standing in.
     //
-    // The snap can move that pose by half a cell diagonal -- far enough to
-    // land it inside an obstacle it is merely walking past -- and then no yaw
-    // bin fits and the planner refuses a route it has already published. That
-    // is a quantisation artifact, not a routing answer, and it is the most
-    // expensive answer available for consistency, because the referee's replan
-    // spot IS a pose this planner published: refusing there scores the world
-    // zero outright. Take the nearest lattice state that does fit, ordered by
-    // distance from the true pose and then by yaw error, and accept it only if
-    // the straight segment from the true pose to it is clear -- the robot has
-    // to be able to get there. Reachability still decides refusals: a sealed
-    // world has no goal state and still returns None.
+    // START WITNESS: a pose the robot actually occupies may always be departed,
+    // so the seed's feasibility is read at the TRUE start pose and not at the
+    // cell it snaps to. The snap moves the body by up to half a cell diagonal,
+    // and a start whose real pose clears the margin can land in a cell that does
+    // not (door_side: 0.083 true, 0.043 snapped, against a 0.05 margin). The
+    // cell still NAMES the seed; it no longer decides whether the robot is
+    // allowed to be where it already is. Standing has no direction of travel, so
+    // the reading is the union -- the honest shape when the departure gait is
+    // not yet chosen. A start genuinely inside an obstacle still reads negative.
+    //
+    // Below the witness the old repair still stands, and it is not the same
+    // question: the referee's replan spot IS a pose this planner published, and
+    // refusing there scores the world zero outright. Take the nearest lattice
+    // state that does fit, ordered by distance from the true pose and then by
+    // yaw error, and accept it only if the straight segment from the true pose
+    // to it is clear. Reachability still decides refusals: a sealed world has no
+    // goal state and still returns None.
     let fit_bin = |cl: &mut Clear, i: usize, j: usize| -> Option<usize> {
         for d in 0..=(YAW_BINS / 2) {
             for b in [(sb + d) % YAW_BINS, (sb + YAW_BINS - d) % YAW_BINS] {
@@ -879,7 +1100,12 @@ pub fn se2_search(
         }
         None
     };
-    let (sb, si, sj) = match fit_bin(&mut cl, si, sj) {
+    let witness = pose_clear(cl.w, &offs, start.0, start.1, start.2) > margin;
+    let (sb, si, sj) = match if witness {
+        Some(sb)
+    } else {
+        fit_bin(&mut cl, si, sj)
+    } {
         Some(b) => (b, si, sj),
         None => {
             let mut cands: Vec<(usize, usize)> = Vec::new();
@@ -902,7 +1128,7 @@ pub fn se2_search(
             for (i, j) in cands {
                 if let Some(b) = fit_bin(&mut cl, i, j) {
                     let there = [cl.gx[i], cl.gy[j], thetas[b]];
-                    if seg_free(cl.w, &offs, &here, &there, margin) {
+                    if seg_free(cl.w, fps, emb, &here, &there, margin) {
                         pick = Some((b, i, j));
                         break;
                     }
@@ -949,17 +1175,33 @@ pub fn se2_search(
     // cost once the clearance tables went lazy.
     let nmv = moves.len();
     let mut mcost = vec![0.0f64; YAW_BINS * nmv];
+    // Which swept box each (yaw bin, move) needs. Feasibility is
+    // motion-conditioned: an edge is tested against the box the body needs for
+    // THAT edge's drift angle -- the move's direction minus the body yaw it is
+    // judged at -- and the lattice's own drift angles are exactly the envelope's
+    // rows, so the nearest-row lookup is exact and the table is small.
+    let mut fp_move = vec![0usize; YAW_BINS * nmv];
     for (b, &th) in thetas.iter().enumerate() {
         for (mi, mv) in moves.iter().enumerate() {
-            let rel = (mv.dj as f64).atan2(mv.di as f64) - th;
+            let head = (mv.dj as f64).atan2(mv.di as f64);
+            let rel = head - th;
             let (f, l) = (rel.cos(), rel.sin());
             mcost[b * nmv + mi] = mv.base
                 * (1.0
                     + (emb.strafe - 1.0) * l.abs()
                     + if f < 0.0 { emb.reverse - 1.0 } else { 0.0 });
+            fp_move[b * nmv + mi] = fps.id(emb, Some(rel));
         }
     }
-    let yaw_cost = emb.yaw_w * (2.0 * PI / YAW_BINS as f64);
+    let yaw_step = 2.0 * PI / YAW_BINS as f64;
+    // Extra half-width one bin of turn costs a blend edge. `arc_inflate` is per
+    // rad-per-metre, so the edge's own length converts it, and half of the extra
+    // width is what a clearance test against the box centre-line gives up.
+    let arc_pad: Vec<f64> = moves
+        .iter()
+        .map(|mv| 0.5 * emb.arc_inflate * yaw_step / mv.base)
+        .collect();
+    let yaw_cost = emb.yaw_w * yaw_step;
     // Lattice soundness. Clearing only the endpoints of a move is sound only
     // while the body cannot fit BETWEEN two consecutive samples: an obstacle
     // thinner than the gap otherwise sits between two states that are both
@@ -970,8 +1212,15 @@ pub fn se2_search(
     // query a thin wall happened to fall on a column. It no longer is, and
     // the bound is a property of the lattice rather than of the roster. All
     // four scored embodiments are 1.4-2.7x wider than a diagonal cell, so
-    // this is inert on every scored and held-out world.
-    let dense_moves = emb.length.min(emb.width) < CELL * std::f64::consts::SQRT_2;
+    // this is inert on every scored and held-out world. Read on the NARROWEST
+    // box the envelope can hand out, not on the union: that is the one an edge
+    // may actually be cleared by.
+    let thinnest = emb
+        .envelope
+        .iter()
+        .map(|r| r[1].min(r[2]))
+        .fold(emb.length.min(emb.width), f64::min);
+    let dense_moves = thinnest < CELL * std::f64::consts::SQRT_2;
 
     // ---- The heuristic, taken from the free space instead of from a ruler --
     //
@@ -1017,17 +1266,23 @@ pub fn se2_search(
     //      total, and `mtop` adds all of it back. The relaxed set is
     //      therefore a strict SUPERSET of the reachable positions; it can only
     //      be too permissive, which weakens `h` and never breaks it.
+    //      The disc is the NARROWEST box the envelope can hand out, since that
+    //      is the one an edge may actually be cleared by: pricing the relaxed
+    //      set by the union instead would wall off exactly the doorways the
+    //      per-heading rows exist to open, and an infinite `h` is read as a
+    //      proof of unreachability rather than as a weak bound.
     //   2. Every edge is at least as expensive in SE(2) as in the relaxation.
     //      A real edge costs `mcost * tight` and both factors are bounded
     //      below cell-locally. `mcost >= base` because the gait weights
     //      `strafe` and `reverse` are >= 1. And `tight >= mul`, because `mul`
-    //      prices comfort against `mtop`, an UPPER bound on the footprint's
+    //      prices the governor against `mtop`, an UPPER bound on the footprint's
     //      minimum clearance in any yaw bin: the guaranteed disc lies inside
     //      the footprint, so the footprint's minimum is at most the field's
     //      minimum over that disc, which is `lookup(centre) - r_in` up to the
     //      snap terms. Over-stating the clearance under-states the price,
-    //      which is the safe direction. A yaw-only edge projects onto staying
-    //      put, cost 0.
+    //      which is the safe direction -- and the price is read on the UNION,
+    //      as the search reads it, so the union's own `r_in` is what bounds it.
+    //      A yaw-only edge projects onto staying put, cost 0.
     //
     // Together: every SE(2) path projects to a relaxed path no more expensive
     // than itself, so `d2` lower-bounds the true cost-to-go, and it dominates
@@ -1052,30 +1307,28 @@ pub fn se2_search(
     // for a settled u and unsettled v, `d2[u] <= tfin <= h(v) <= c + h(v)`;
     // for unsettled u and settled v, u being unsettled forces `c > tfin -
     // d2[v]`; and between two unsettled cells it is the triangle inequality.
-    let (mut ax0, mut ax1) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut ay0, mut ay1) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &(ox, oy) in &offs {
-        ax0 = ax0.min(ox);
-        ax1 = ax1.max(ox);
-        ay0 = ay0.min(oy);
-        ay1 = ay1.max(oy);
-    }
-    let r_in = (-ax0).min(ax1).min(-ay0).min(ay1).max(0.0);
-    // Guarded exactly as `Clear::eval` is not: `eval` divides by `comfort`
-    // only for states it already knows are free, whereas this runs over the
-    // relaxed set. A non-positive preference means "never charge comfort".
-    let comfort = if emb.comfort > 0.0 {
-        emb.comfort
-    } else {
-        f64::INFINITY
+    let inradius = |o: &[(f64, f64)]| -> f64 {
+        let (mut ax0, mut ax1) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut ay0, mut ay1) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(ox, oy) in o {
+            ax0 = ax0.min(ox);
+            ax1 = ax1.max(ox);
+            ay0 = ay0.min(oy);
+            ay1 = ay1.max(oy);
+        }
+        (-ax0).min(ax1).min(-ay0).min(ay1).max(0.0)
     };
+    // The union's disc prices the relaxed metre; the smallest box's disc decides
+    // what is in the relaxed set at all.
+    let r_price = inradius(&offs);
+    let r_pass = fps.offs.iter().map(|o| inradius(o)).fold(r_price, f64::min);
 
     let ncell = nx * ny;
     let mut d2 = vec![f64::INFINITY; ncell];
     // 0 = open, 1 = settled. Also the lazy-deletion filter for `heap2`.
     let mut done2 = vec![0u8; ncell];
     // Per-cell price of one relaxed metre: 0.0 = not yet tested, -1.0 = out of
-    // the relaxed free set, otherwise the cheapest comfort multiplier any yaw
+    // the relaxed free set, otherwise the cheapest governor multiplier any yaw
     // bin at that cell could carry.
     let mut mul = vec![0.0f64; ncell];
     let mut heap2: BinaryHeap<Node> = BinaryHeap::new();
@@ -1155,9 +1408,9 @@ pub fn se2_search(
                 // `mtop` is an upper bound on the footprint's minimum
                 // clearance at this cell, in ANY yaw bin, and both the
                 // blocked test and the comfort price are read off it.
-                let mtop = cl.w.lookup(px, py) + 1.5 * SNAP - r_in;
-                mul[kk] = if mtop > margin {
-                    1.0 + 1.5 * ((comfort - mtop) / comfort).clamp(0.0, 1.0)
+                let mtop = cl.w.lookup(px, py) + 1.5 * SNAP;
+                mul[kk] = if mtop - r_pass > margin {
+                    tight_of(mtop - r_price)
                 } else {
                     -1.0
                 };
@@ -1265,10 +1518,13 @@ pub fn se2_search(
             };
             let kbase = ((nb * nx + i) * ny + j) as i64;
             if pass > 0 {
+                // A turn in place has no direction of travel and therefore no
+                // drift row: the union is the honest shape for it, and it
+                // covers the measured turn-in-place box with room to spare.
                 let k = kbase as usize;
-                let tv = cl.tight_at(k, nb, i, j);
-                if tv > 0.0 {
-                    let yc = yaw_cost * tv;
+                let uv = cl.clear_at(k, nb, i, j);
+                if uv > 0.0 {
+                    let yc = yaw_cost * Clear::price(uv);
                     if d + yc < dist[k] {
                         dist[k] = d + yc;
                         prev[k] = from + 1;
@@ -1289,11 +1545,11 @@ pub fn se2_search(
                 let (ni, nj) = (ni as usize, nj as usize);
                 // `(nb * nx + ni) * ny + nj` by displacement -- see `Move::dk`.
                 let k = (kbase + mv.dk) as usize;
-                // The comfort multiplier is either the blocked sentinel or at
-                // least 1.0, so this is the cheapest the edge could possibly
-                // be. If even that does not improve on what the neighbour
-                // already has, the clearance there never has to be evaluated:
-                // one array read instead of a footprint scan.
+                // The governor multiplier is at least 1.0 everywhere, so this is
+                // the cheapest the edge could possibly be. If even that does not
+                // improve on what the neighbour already has, the clearance there
+                // never has to be evaluated: one array read instead of a
+                // footprint scan.
                 let cmin = mcost[crow + mi] + extra;
                 if d + cmin >= dist[k] {
                     continue;
@@ -1305,17 +1561,33 @@ pub fn se2_search(
                 if hn == f64::INFINITY {
                     continue;
                 }
-                let tv = cl.tight_at(k, nb, ni, nj);
-                if tv <= 0.0 {
-                    continue;
-                }
-                let c = cmin * tv;
+                // Price on the union, feasibility on the drift row. A straight
+                // edge keeps the body yaw and adds no curvature; a blend edge is
+                // judged at the yaw it arrives in and pays the splay one bin of
+                // turn costs over its own length.
+                let uv = cl.clear_at(k, nb, ni, nj);
+                let c = cmin * Clear::price(uv);
                 if d + c >= dist[k] {
                     continue;
                 }
+                let fp = fp_move[nb * nmv + mi];
+                let thresh = if pass > 0 {
+                    margin + arc_pad[mi]
+                } else {
+                    margin
+                };
+                if !(uv > thresh || cl.row_clear(nb, fp, ni, nj) > thresh) {
+                    continue;
+                }
                 let mut blocked = false;
-                for &(mi, mj) in &mv.mids {
-                    if !cl.free(nb, (i as i64 + mi) as usize, (j as i64 + mj) as usize) {
+                for &(mdi, mdj) in &mv.mids {
+                    if !cl.fits(
+                        nb,
+                        fp,
+                        (i as i64 + mdi) as usize,
+                        (j as i64 + mdj) as usize,
+                        thresh,
+                    ) {
                         blocked = true;
                         break;
                     }
@@ -1326,7 +1598,8 @@ pub fn se2_search(
                 if dense_moves
                     && !seg_free(
                         cl.w,
-                        &offs,
+                        fps,
+                        emb,
                         &[cl.gx[i], cl.gy[j], thetas[b]],
                         &[cl.gx[ni], cl.gy[nj], thetas[nb]],
                         margin,
@@ -1507,7 +1780,7 @@ pub fn se2_search(
         let mut j = 0usize;
         while j + 1 < k {
             let floor = chord_floor(&raw_clear, j, k);
-            if seg_free(w, &offs, &raw[j], &raw[k], floor) {
+            if seg_free(w, fps, emb, &raw[j], &raw[k], floor) {
                 break;
             }
             j += 1;
@@ -1536,7 +1809,7 @@ pub fn se2_search(
         }
         while r > j {
             let floor = chord_floor(&raw_clear, r, k);
-            if seg_free(w, &offs, &raw[r], &raw[k], floor) {
+            if seg_free(w, fps, emb, &raw[r], &raw[k], floor) {
                 break;
             }
             r -= 1;
@@ -1564,7 +1837,7 @@ pub fn se2_search(
         let mut f = hi;
         while f > lo {
             let floor = chord_floor(&raw_clear, 0, f);
-            if seg_free(w, &offs, &raw[0], &raw[f], floor) {
+            if seg_free(w, fps, emb, &raw[0], &raw[f], floor) {
                 break;
             }
             f -= 1;
@@ -1575,79 +1848,22 @@ pub fn se2_search(
             keep[1] = f;
         }
     }
-    let mut out: Vec<[f64; 3]> = keep.iter().map(|&k| raw[k]).collect();
-
-    // ---- Name the endpoints on the spec's lattice, not on this one ---------
+    // The endpoints need no re-naming any more. Deviation is measured by a
+    // coupling pinned at both ends -- the first published pose against the
+    // reference's first, the last against its last -- so whatever the two
+    // lattices disagree about there is a floor under the whole path's
+    // deviation, and it used to BE the score on a route nothing constrains
+    // (`empty` lost 0.039 publishing a perfectly straight path, exactly the
+    // endpoint gap over the reference length). That gap was the corner: this
+    // planner kept the pose out of it on purpose and the spec did not, so the
+    // two lattices sat at an arbitrary sub-cell offset, and a block here
+    // re-snapped the two named points onto the spec's lattice to close it.
     //
-    // Deviation is measured by a coupling that is pinned at both ends: the
-    // first published pose is always paired with the reference's first and the
-    // last with the reference's last. Whatever the two disagree about *there*
-    // is therefore a floor under the deviation of the whole path, and no amount
-    // of routing accuracy in between can get under it.
-    //
-    // On a route nothing constrains, that floor is the entire score. `empty`
-    // publishes a perfectly straight path across an obstacle-free world and
-    // still loses 0.039; `goal_by_wall` never approaches its one box and loses
-    // 0.059. Both numbers are exactly `endpoint gap / reference length /
-    // deviation scale`, to four decimals -- 0.08 m at the goal and 0.12 m at
-    // the start. Nothing is bowing: the published paths are straight and their
-    // lateral offset already matches the reference's. They are named from a
-    // lattice whose corner sits somewhere else.
-    //
-    // Both lattices have pitch `CELL` and both name a route by its cells. They
-    // differ only in where the low corner sits, because this planner keeps the
-    // pose out of the corner on purpose (`build_world`) and the spec does not.
-    // Re-snapping the two endpoints against `pubx`/`puby` closes that gap
-    // without moving the corner the search runs on: the route, its clearances,
-    // its costs and its replan stability are all untouched, and wherever the
-    // pose was not the low corner the two lattices coincide bit for bit and
-    // this is a no-op. It is bounded by construction -- a snap moves a vertex
-    // by under one cell -- and the vertex it moves is one this planner had
-    // already placed by rounding, to within half a cell of the same point.
-    //
-    // The endpoints are *extended onto*, never moved onto, the spec lattice --
-    // the searched chain is left bit-identical and the two named points are
-    // added outside it. That distinction is the whole design, and it is a
-    // replan property rather than a deviation one.
-    //
-    // `pubx`/`puby` follow the pose whenever the pose is the low corner, so on
-    // a replan the two ends pick up *different* residuals: walking a third of
-    // the way down an obstacle-free path moves the named start to y = -0.12
-    // and the named goal to y = 0.0 where both had been -0.06. Overwriting the
-    // chain's own endpoints with those hands that 0.12 m of disagreement to the
-    // whole chord as a tilt, and the previous answer's remainder -- which is
-    // flat -- sees the average of it. Measured: it is the difference between
-    // 0.0026 and 0.0376 of drift on `empty`. Appending instead confines the
-    // disagreement to the stubs themselves; every interior waypoint the
-    // remainder projects onto is exactly where it was, so the drift stays at
-    // the stub length over the near-field count and the tilt never exists.
-    //
-    // Guarded exactly like a shortcut, because that is what it is: the stub has
-    // to leave its chord at least as clear as the raw detour that chord stands
-    // for, or it is not published.
-    let n = out.len();
-    if n >= 2 {
-        let (pubx, puby) = (w.pubx, w.puby);
-        let (qx, qy) = (snap_pub(pubx, goal.0), snap_pub(puby, goal.1));
-        let last = out[n - 1];
-        if (qx - last[0]).abs() > 1e-9 || (qy - last[1]).abs() > 1e-9 {
-            let cand = [qx, qy, last[2]];
-            let floor = chord_floor(&raw_clear, keep[n - 2], keep[n - 1]);
-            if seg_free(w, &offs, &last, &cand, floor) {
-                out.push(cand);
-            }
-        }
-        let (qx, qy) = (snap_pub(pubx, start.0), snap_pub(puby, start.1));
-        let first = out[0];
-        if (qx - first[0]).abs() > 1e-9 || (qy - first[1]).abs() > 1e-9 {
-            let cand = [qx, qy, first[2]];
-            let floor = chord_floor(&raw_clear, 0, keep[1]);
-            if seg_free(w, &offs, &cand, &first, floor) {
-                out.insert(0, cand);
-            }
-        }
-    }
-    Some(out)
+    // ANCHORING removes the disagreement at its source. Both corners are now
+    // floored onto the world frame's own `PERIOD` lattice and `CELL` divides
+    // `PERIOD`, so the two lattices are the same set of points and a cell
+    // centre is the same metre in both. Nothing is left to re-snap.
+    Some(keep.iter().map(|&k| raw[k]).collect())
 }
 
 /// Largest yaw change any single published waypoint may command.
@@ -1826,11 +2042,15 @@ pub fn plan(
     emb: &Emb,
     resolution: f64,
 ) -> Option<Vec<[f64; 3]>> {
-    let offs = offsets(emb);
+    let fps = Fps::new(emb);
+    let offs = fps.union().to_vec();
     let reach = reach_of(&offs);
-    let cap = emb.comfort + reach + SNAP;
+    // The distance cap has to cover both consumers of an exact distance: the
+    // clearance certificate (which stops caring above `SPEED_CLEARANCE`) and the
+    // smoothing floor (capped at `comfort`).
+    let cap = emb.comfort.max(SPEED_CLEARANCE) + reach + SNAP;
     let mut w = build_world(points, pose, goal, cap);
-    let states = se2_search(&mut w, pose, goal, emb, emb.precision)?;
+    let states = se2_search(&mut w, &fps, pose, goal, emb, emb.precision)?;
     Some(densify(
         &mut w,
         &offs,
@@ -1959,7 +2179,7 @@ mod tests {
             MAX_STATION_YAW < 0.5,
             "station window reaches the referee's turn_yaw_eps"
         );
-        for reach in [0.1f64, reach_of(&offsets(&Emb::go2())), 0.9] {
+        for reach in [0.1f64, reach_of(Fps::new(&Emb::go2()).union()), 0.9] {
             let excursion = 2.0 * reach * (0.5 * MAX_STATION_YAW).sin();
             assert!(
                 sweep_slack(reach) - excursion >= SNAP + 0.05 - 1e-12,
@@ -2006,6 +2226,8 @@ mod tests {
             strafe: 1.8,
             reverse: 1.5,
             yaw_w: 0.25,
+            envelope: Vec::new(),
+            arc_inflate: 0.0,
         };
         let mut pts = Vec::new();
         let mut y = -4.0;
@@ -2030,62 +2252,34 @@ mod tests {
         assert!(plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &Emb::go2(), 0.1).is_none());
     }
 
-    /// The comfort multiplier is what makes the cheapest-cost pre-check
-    /// admissible: it is either the blocked sentinel or at least 1.0, never
-    /// anything in between, so the unmultiplied edge cost really is a lower
-    /// bound and the check can never discard a genuine improvement.
+    /// The governor price is what makes the cheapest-cost pre-check admissible:
+    /// it is either the blocked sentinel or at least 1.0, never anything in
+    /// between, so the unmultiplied edge cost really is a lower bound and the
+    /// check can never discard a genuine improvement. It caps itself at
+    /// `MAX_SPEED / MIN_SPEED`, which is where the follower's own speed law
+    /// floors -- no hand-set ceiling anywhere.
     #[test]
-    fn comfort_multiplier_is_never_below_one() {
+    fn governor_price_is_never_below_one() {
         let emb = Emb::go2();
+        let fps = Fps::new(&emb);
         let pts = ring(2.0, 0.0, 0.6, 0.03);
-        let cap = emb.comfort + reach_of(&offsets(&emb)) + SNAP;
+        let cap = emb.comfort.max(SPEED_CLEARANCE) + reach_of(fps.union()) + SNAP;
         let mut w = build_world(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), cap);
         let (x0, y0, x1, y1) = w.bounds;
-        let offs = offsets(&emb);
         let gx = arange(x0, x1 + CELL, CELL);
         let gy = arange(y0, y1 + CELL, CELL);
         let (nx, ny) = (gx.len(), gy.len());
-        let thetas: Vec<f64> = (0..YAW_BINS)
-            .map(|k| -PI + k as f64 * (2.0 * PI / YAW_BINS as f64))
-            .collect();
-        let noff = offs.len();
-        let mut rot = Vec::with_capacity(YAW_BINS * noff);
-        let mut reach: f64 = 0.0;
-        for &th in &thetas {
-            let (s, c) = th.sin_cos();
-            for &(ox, oy) in &offs {
-                let (rx, ry) = (c * ox - s * oy, s * ox + c * oy);
-                reach = reach.max(rx.hypot(ry));
-                rot.push((rx, ry));
-            }
-        }
-        let mut cl = Clear {
-            w: &mut w,
-            t: vec![0.0; YAW_BINS * nx * ny],
-            nx,
-            ny,
-            gx: gx.clone(),
-            gy: gy.clone(),
-            rot,
-            noff,
-            ix: vec![0u32; YAW_BINS * nx * noff],
-            iy: vec![0u32; YAW_BINS * ny * noff],
-            dx: vec![false; YAW_BINS * nx],
-            dy: vec![false; YAW_BINS * ny],
-            margin: emb.precision,
-            comfort: emb.comfort,
-            certify: emb.comfort + reach + SNAP,
-        };
+        let mut cl = Clear::new(&mut w, &fps, emb.precision, gx, gy);
         let (mut blocked, mut charged) = (0usize, 0usize);
         for b in 0..YAW_BINS {
             for i in 0..nx {
                 for j in 0..ny {
-                    let v = cl.tight(b, i, j);
+                    let v = Clear::price(cl.clear(b, i, j));
                     assert!(
-                        v == -1.0 || (1.0..=2.5).contains(&v),
-                        "multiplier {v} at bin {b}, cell ({i}, {j}) breaks the lower bound"
+                        (1.0..=TIGHT_MAX).contains(&v),
+                        "price {v} at bin {b}, cell ({i}, {j}) leaves the governor band"
                     );
-                    if v == -1.0 {
+                    if cl.clear(b, i, j) < 0.0 {
                         blocked += 1;
                     } else if v > 1.0 {
                         charged += 1;
@@ -2095,7 +2289,135 @@ mod tests {
         }
         // Not a vacuous pass: the fixture must exercise both branches.
         assert!(blocked > 0, "fixture saw no blocked state");
-        assert!(charged > 0, "fixture saw no comfort-charged state");
+        assert!(charged > 0, "fixture saw no tightness-charged state");
+    }
+
+    /// Every envelope row is nested inside the all-gait union -- which is what
+    /// makes the union-first fast path sound. An edge the fat box clears is one
+    /// the narrow box clears too, so `fits` may accept on the union alone and
+    /// only a cell the union REJECTS ever pays for a row scan.
+    #[test]
+    fn every_row_is_nested_inside_the_union() {
+        let emb = Emb::go2();
+        let u = emb.union_box();
+        let (ux0, ux1) = (u[2] - u[0] / 2.0, u[2] + u[0] / 2.0);
+        let (uy0, uy1) = (u[3] - u[1] / 2.0, u[3] + u[1] / 2.0);
+        for row in &emb.envelope {
+            for s in [1.0f64, -1.0] {
+                let r = [row[1], row[2], row[3], s * row[4]];
+                let (rx0, rx1) = (r[2] - r[0] / 2.0, r[2] + r[0] / 2.0);
+                let (ry0, ry1) = (r[3] - r[1] / 2.0, r[3] + r[1] / 2.0);
+                assert!(
+                    rx0 >= ux0 && rx1 <= ux1 && ry0 >= uy0 && ry1 <= uy1,
+                    "row at {} deg escapes the union: x [{rx0}, {rx1}] y [{ry0}, {ry1}]",
+                    row[0]
+                );
+            }
+        }
+    }
+
+    /// Lookup lands on the row the measurement was taken at, in both drift
+    /// signs, and `off_y` mirrors with the sign as the schema says it does.
+    #[test]
+    fn envelope_lookup_is_exact_at_the_lattice_drift_angles() {
+        let emb = Emb::go2();
+        for row in &emb.envelope {
+            let d = row[0].to_radians();
+            for s in [1.0f64, -1.0] {
+                let got = emb.envelope_at(s * d);
+                assert_eq!(got[0], row[1], "length at {} deg", s * row[0]);
+                assert_eq!(got[1], row[2], "width at {} deg", s * row[0]);
+                assert_eq!(got[2], row[3], "off_x at {} deg", s * row[0]);
+                // 0 and 180 fold onto themselves, so their off_y keeps its sign.
+                let want = if s < 0.0 && row[0] > 0.0 && row[0] < 180.0 {
+                    -row[4]
+                } else {
+                    row[4]
+                };
+                assert_eq!(got[3], want, "off_y at {} deg", s * row[0]);
+            }
+        }
+        // An embodiment with no measured rows reads the union at every heading.
+        let plain = Emb {
+            envelope: Vec::new(),
+            ..Emb::go2()
+        };
+        for deg in [0.0f64, 37.0, 90.0, 180.0, -140.0] {
+            assert_eq!(plain.envelope_at(deg.to_radians()), plain.union_box());
+        }
+    }
+
+    /// An obstacle the route never approaches may not move a sample position:
+    /// the grid is anchored to the world frame's own lattice, so a far point
+    /// can add rows and can never re-phase the field. Bit-exact, not close.
+    #[test]
+    fn a_far_point_cannot_move_the_answer() {
+        let emb = Emb::go2();
+        let pts = ring(2.0, 0.0, 0.45, 0.05);
+        let base = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route exists");
+        for far in [[-11.7, -6.0], [-40.3, 0.0], [0.0, -17.9]] {
+            let mut with = pts.clone();
+            with.push(far);
+            let got = plan(&with, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route exists");
+            assert_eq!(
+                got.len(),
+                base.len(),
+                "a point at {far:?} changed the path length"
+            );
+            for (k, (p, q)) in base.iter().zip(&got).enumerate() {
+                for c in 0..3 {
+                    assert_eq!(
+                        p[c].to_bits(),
+                        q[c].to_bits(),
+                        "a point at {far:?} moved pose {k} component {c}: {} vs {}",
+                        p[c],
+                        q[c]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Translating a whole scene by a whole `PERIOD` gives the same route back.
+    ///
+    /// The lattice, the fine field and the map's voxels are commensurate at that
+    /// pitch, so the scene lands on the same phase and every sample reads the
+    /// clearance it read before. Not bit-exact, and it cannot be: `PERIOD` is
+    /// not a dyadic rational, so `(x + d) / FINE` and `x / FINE + d / FINE`
+    /// differ in the last bit, and a sample sitting exactly on a rounding
+    /// boundary is free to tip. What the anchoring buys is that the ROUTE does
+    /// not move -- the far-point test above is where bit-exactness is pinned,
+    /// because there the translation is by whole indices and is exact.
+    #[test]
+    fn a_whole_period_translation_translates_the_answer() {
+        let emb = Emb::go2();
+        let pts = ring(2.0, 0.0, 0.45, 0.05);
+        let base = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route exists");
+        let d = 4.0 * PERIOD;
+        let moved: Vec<[f64; 2]> = pts.iter().map(|p| [p[0] + d, p[1] + d]).collect();
+        let got = plan(&moved, (d, d, 0.0), (4.0 + d, d), &emb, 0.1).expect("route exists");
+        let arc = |p: &[[f64; 3]]| -> f64 {
+            p.windows(2)
+                .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+                .sum()
+        };
+        assert!(
+            (arc(&base) - arc(&got)).abs() < CELL,
+            "translation changed the route length: {} vs {}",
+            arc(&base),
+            arc(&got)
+        );
+        // Every pose of the translated answer sits on the untranslated one.
+        for q in &got {
+            let near = base
+                .iter()
+                .map(|p| (q[0] - d - p[0]).hypot(q[1] - d - p[1]))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                near < CELL,
+                "translated pose {q:?} is {near:.3} m off the route"
+            );
+        }
     }
 
     /// The coarse-to-fine emission order is a permutation and nothing more:
@@ -2117,25 +2439,29 @@ mod tests {
                 ..Emb::go2()
             },
         ] {
-            let got = offsets(&emb);
-            let (hl, hw) = (emb.length / 2.0, emb.width / 2.0);
-            let xs = arange(-hl, hl + OFFSET_STEP / 2.0, OFFSET_STEP);
-            let ys = arange(-hw, hw + OFFSET_STEP / 2.0, OFFSET_STEP);
-            let mut want: Vec<(u64, u64)> = Vec::new();
-            for &x in &xs {
-                for &y in &ys {
-                    want.push(((x + emb.center_off).to_bits(), y.to_bits()));
+            let boxes = std::iter::once(emb.union_box())
+                .chain(emb.envelope.iter().map(|r| [r[1], r[2], r[3], r[4]]));
+            for bx in boxes {
+                let got = offsets(&bx);
+                let (hl, hw) = (bx[0] / 2.0, bx[1] / 2.0);
+                let xs = arange(-hl, hl + OFFSET_STEP / 2.0, OFFSET_STEP);
+                let ys = arange(-hw, hw + OFFSET_STEP / 2.0, OFFSET_STEP);
+                let mut want: Vec<(u64, u64)> = Vec::new();
+                for &x in &xs {
+                    for &y in &ys {
+                        want.push(((x + bx[2]).to_bits(), (y + bx[3]).to_bits()));
+                    }
                 }
+                let mut have: Vec<(u64, u64)> = got
+                    .iter()
+                    .map(|&(x, y)| (x.to_bits(), y.to_bits()))
+                    .collect();
+                assert_eq!(have.len(), want.len(), "sample count changed");
+                have.sort_unstable();
+                let mut want_sorted = want.clone();
+                want_sorted.sort_unstable();
+                assert_eq!(have, want_sorted, "sample set changed");
             }
-            let mut have: Vec<(u64, u64)> = got
-                .iter()
-                .map(|&(x, y)| (x.to_bits(), y.to_bits()))
-                .collect();
-            assert_eq!(have.len(), want.len(), "sample count changed");
-            have.sort_unstable();
-            let mut want_sorted = want.clone();
-            want_sorted.sort_unstable();
-            assert_eq!(have, want_sorted, "sample set changed");
         }
     }
 
@@ -2146,72 +2472,54 @@ mod tests {
     #[allow(clippy::needless_range_loop)] // (b, i, j) index every array in the body
     fn lazy_clearance_matches_full_footprint_scan() {
         let emb = Emb::go2();
+        let fps = Fps::new(&emb);
         let pts = ring(2.0, 0.0, 0.6, 0.03);
-        let cap = emb.comfort + reach_of(&offsets(&emb)) + SNAP;
+        let offs = fps.union().to_vec();
+        let cap = emb.comfort.max(SPEED_CLEARANCE) + reach_of(&offs) + SNAP;
         let mut w = build_world(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), cap);
         // Reference field: no cap, so every cell holds its exact distance.
         let mut wref = build_world(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), f64::INFINITY);
         let (x0, y0, x1, y1) = w.bounds;
-        let offs = offsets(&emb);
         let gx = arange(x0, x1 + CELL, CELL);
         let gy = arange(y0, y1 + CELL, CELL);
         let (nx, ny) = (gx.len(), gy.len());
-        let thetas: Vec<f64> = (0..YAW_BINS)
-            .map(|k| -PI + k as f64 * (2.0 * PI / YAW_BINS as f64))
-            .collect();
+        let thetas = yaw_bins();
         let noff = offs.len();
-        let mut rot = Vec::with_capacity(YAW_BINS * noff);
-        let mut reach: f64 = 0.0;
-        for &th in &thetas {
-            let (s, c) = th.sin_cos();
-            for &(ox, oy) in &offs {
-                let (rx, ry) = (c * ox - s * oy, s * ox + c * oy);
-                reach = reach.max(rx.hypot(ry));
-                rot.push((rx, ry));
-            }
-        }
         let margin = emb.precision;
-        let mut cl = Clear {
-            w: &mut w,
-            t: vec![0.0; YAW_BINS * nx * ny],
-            nx,
-            ny,
-            gx: gx.clone(),
-            gy: gy.clone(),
-            rot: rot.clone(),
-            noff,
-            ix: vec![0u32; YAW_BINS * nx * noff],
-            iy: vec![0u32; YAW_BINS * ny * noff],
-            dx: vec![false; YAW_BINS * nx],
-            dy: vec![false; YAW_BINS * ny],
-            margin,
-            comfort: emb.comfort,
-            certify: emb.comfort + reach + SNAP,
-        };
+        let mut cl = Clear::new(&mut w, &fps, margin, gx.clone(), gy.clone());
+        // Every row is checked too, against the same uncapped reference: the
+        // lazy per-(bin, box) planes are the door's half of the table.
         for b in 0..YAW_BINS {
+            let (s, c) = thetas[b].sin_cos();
             for i in 0..nx {
                 for j in 0..ny {
-                    let got = cl.tight(b, i, j);
-                    let mut m = f64::INFINITY;
-                    for s in 0..noff {
-                        let (rx, ry) = rot[b * noff + s];
-                        let d = wref.lookup(gx[i] + rx, gy[j] + ry);
-                        if d < m {
-                            m = d;
+                    for fp in 0..fps.offs.len() {
+                        let got = cl.row_clear(b, fp, i, j);
+                        let mut m = f64::INFINITY;
+                        for &(ox, oy) in &fps.offs[fp] {
+                            let d = wref.lookup(gx[i] + c * ox - s * oy, gy[j] + s * ox + c * oy);
+                            if d < m {
+                                m = d;
+                            }
                         }
+                        let want = if m > margin { m } else { -1.0 };
+                        // Above `SPEED_CLEARANCE` the value is a lower bound and
+                        // nothing can see the difference: the certificate stores
+                        // exactly that bound, the distance cap stops measuring,
+                        // and every consumer -- the price and every feasibility
+                        // threshold -- has already saturated.
+                        if got >= SPEED_CLEARANCE && want >= SPEED_CLEARANCE {
+                            continue;
+                        }
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "clearance mismatch at bin {b}, box {fp}, cell ({i}, {j})"
+                        );
                     }
-                    let want = if m > margin {
-                        1.0 + 1.5 * ((emb.comfort - m) / emb.comfort).clamp(0.0, 1.0)
-                    } else {
-                        -1.0
-                    };
-                    assert_eq!(
-                        got.to_bits(),
-                        want.to_bits(),
-                        "clearance mismatch at bin {b}, cell ({i}, {j})"
-                    );
                 }
             }
         }
+        assert!(noff > 0);
     }
 }

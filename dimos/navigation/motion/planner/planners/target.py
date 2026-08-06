@@ -29,12 +29,13 @@ import numpy as np
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.embodiment import Embodiment
 from dimos.navigation.motion.geometry import AvoidanceConfig
-from dimos.navigation.motion.scenarios import Scenario, se2_search
+from dimos.navigation.motion.scenarios import FINE, PERIOD, Scenario, anchor, se2_search
 
 from .gold import densify_states, pose_stamped
 
-FINE = 0.05
 PAD = 1.5
+# Free space around the working area, in whole periods -- se2_path's own.
+GRID_PAD = 3 * PERIOD
 
 BUILD_CMD = (
     "uv run maturin develop --uv --release -m dimos/navigation/motion/planner/rust/Cargo.toml"
@@ -58,10 +59,12 @@ class TargetEpisode:
 
         xs = [pose[0], goal[0]] + ([] if not len(band) else [band[:, 0].min(), band[:, 0].max()])
         ys = [pose[1], goal[1]] + ([] if not len(band) else [band[:, 1].min(), band[:, 1].max()])
-        x0, y0 = min(xs) - PAD, min(ys) - PAD
+        # Anchored on the world frame's own lattice, exactly as se2_path is: a
+        # return past the cloud's low corner may add rows, never move a sample.
+        x0, y0 = anchor(min(xs) - PAD), anchor(min(ys) - PAD)
         x1, y1 = max(xs) + PAD, max(ys) + PAD
-        fgx = np.arange(x0 - 0.6, x1 + 0.6, FINE)
-        fgy = np.arange(y0 - 0.6, y1 + 0.6, FINE)
+        fgx = np.arange(x0 - GRID_PAD, x1 + GRID_PAD, FINE)
+        fgy = np.arange(y0 - GRID_PAD, y1 + GRID_PAD, FINE)
         if len(band):
             FX, FY = np.meshgrid(fgx, fgy, indexing="ij")
             d, _ = cKDTree(band).query(np.column_stack([FX.ravel(), FY.ravel()]))
@@ -102,7 +105,18 @@ class RustTargetEpisode:
             pts,
             (float(pose[0]), float(pose[1]), float(pose[2])),
             (float(goal[0]), float(goal[1])),
-            (e.length, e.width, e.center_off, e.comfort, e.precision, e.strafe, e.reverse, e.yaw_w),
+            (
+                e.length,
+                e.width,
+                e.center_off,
+                e.comfort,
+                e.precision,
+                e.strafe,
+                e.reverse,
+                e.yaw_w,
+                e.envelope,
+                e.arc_inflate,
+            ),
             self._res,
         )
         if out is None or not len(out):

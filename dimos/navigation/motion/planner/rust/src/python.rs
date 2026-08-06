@@ -19,10 +19,18 @@ use pyo3::prelude::*;
 
 use crate::planner::{plan as plan_impl, Emb};
 
+/// The `Embodiment` fields the search reads, in declaration order: length,
+/// width, center_off, comfort, precision, strafe, reverse, yaw_w, envelope,
+/// arc_inflate. `envelope` is the measured per-heading rows,
+/// `(deg, length, width, off_x, off_y)` each; an empty sequence asks for the
+/// all-gait union at every heading, which is what an unmeasured embodiment
+/// gets. A tuple rather than a class because `planners/target.py` marshals it
+/// straight off the frozen dataclass, and the crossing is the spec.
+type EmbTuple = (f64, f64, f64, f64, f64, f64, f64, f64, Vec<[f64; 5]>, f64);
+
 /// One plan call. points: (N, 2) float64 obstacle xy in world frame -- every
 /// row is an obstacle, the caller's model already decided which (see
-/// `planner.rs`); emb: (length, width, center_off, comfort, precision, strafe,
-/// reverse, yaw_w). Returns an (M, 3) array of (x, y, yaw) at `resolution`, or
+/// `planner.rs`). Returns an (M, 3) array of (x, y, yaw) at `resolution`, or
 /// None to refuse.
 #[pyfunction]
 #[pyo3(signature = (points, pose, goal, emb, resolution))]
@@ -31,7 +39,7 @@ fn plan<'py>(
     points: PyReadonlyArray2<'py, f64>,
     pose: (f64, f64, f64),
     goal: (f64, f64),
-    emb: (f64, f64, f64, f64, f64, f64, f64, f64),
+    emb: EmbTuple,
     resolution: f64,
 ) -> PyResult<Option<Bound<'py, PyArray2<f64>>>> {
     if points.shape()[1] != 2 {
@@ -53,6 +61,8 @@ fn plan<'py>(
         strafe: emb.5,
         reverse: emb.6,
         yaw_w: emb.7,
+        envelope: emb.8,
+        arc_inflate: emb.9,
     };
     let out = py.allow_threads(|| plan_impl(&pts, pose, goal, &emb, resolution));
     Ok(out.map(|states| {
