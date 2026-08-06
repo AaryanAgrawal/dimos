@@ -19,6 +19,12 @@ and `motion-host.json` in sync.)
 
     scp target/dimos-bake/motion-host/target/aarch64-unknown-linux-gnu/release/motion-host \
         root@<robot>:/root/motion-host/
+    scp dimos/navigation/motion/motion-host.json root@<robot>:/root/motion-host/
+
+`motion-host.json` (this directory) is the AUTHORITATIVE deployed config —
+edit it here, push it with the binary, never hand-edit the robot's copy.
+Three diagnose sessions have burned time on config skew between the robot and
+a local guess; `diagnose --host-config` wants exactly this file.
 
 On the robot, install `dimos-motion-host.service` (this directory) — it carries
 the load-bearing zenoh wiring: go2web runs as the zenoh ROUTER on 7447, and the
