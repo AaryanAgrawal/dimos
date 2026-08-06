@@ -40,13 +40,18 @@ class Embodiment:
     """
 
     # Moving-body envelope measured in the fitted MuJoCo sim (union of all
-    # robot geometry over stand/fwd/reverse/strafe/spin/arc/crab commands,
-    # yaw-aligned base frame): the swinging legs, not the 0.31 m trunk, set
-    # the width. Measured 0.852 x 0.495, centre +x offset -0.009.
+    # robot geometry over the full 95-cell command protocol of
+    # simulation/envelope.py, yaw-aligned base frame): the swinging legs, not
+    # the 0.31 m trunk, set the width. Measured 0.883 x 0.593, centre +0.002.
+    # Re-baselined from 0.852 x 0.495 by planner/revision.md: that number came
+    # from a smaller command sweep and was NOT conservative for fast strafe or
+    # for slow tight arcs. The union's jobs -- judge veto, half_diag, body
+    # carve, and the fallback for embodiments with no measured `envelope` --
+    # are exactly where honest-conservative is the only acceptable property.
     tag: str = "go2"
-    length: float = 0.85
-    width: float = 0.50
-    center_off: float = -0.01  # body center relative to the pose point
+    length: float = 0.883
+    width: float = 0.593
+    center_off: float = 0.002  # body center relative to the pose point
     comfort: float = 0.4
     precision: float = 0.05
     # gait cost multipliers for the SE(2) reference (and any rollout later):
@@ -61,28 +66,78 @@ class Embodiment:
     steppable: float = 0.20  # legs negotiate obstacles below this -- at a cost (later)
     height: float = 0.45  # above this the body passes underneath; not an obstacle
     base_height: float = 0.29  # base origin above support; frame plumbing, not semantics
+    # Motion-conditioned envelope, one row per |drift| angle in degrees:
+    # (deg, length, width, off_x, off_y). 0 = nose-first, 90 = strafe,
+    # 180 = reverse. Rows sit at the lattice's own drift angles, so
+    # nearest-row lookup is exact for every edge the SE(2) search generates.
+    # off_y is stored for POSITIVE drift and mirrored by sign at lookup: the
+    # swept box lags the drift laterally, and a row that covers +theta covers
+    # -theta only when it is mirrored with it. EMPTY = the union
+    # length/width/center_off applies at every heading (the fallback for any
+    # unmeasured embodiment). See planner/revision.md.
+    envelope: tuple[tuple[float, float, float, float, float], ...] = ()
+    # Extra swept WIDTH per rad-per-metre of curvature (edge dyaw / edge
+    # length). Curvature, not per-edge yaw, so the number survives a lattice
+    # pitch change unmeasured.
+    arc_inflate: float = 0.0
 
     @property
     def half_diag(self) -> float:
         return math.hypot(self.length, self.width) / 2.0
 
-    def offsets(self, step: float = 0.05) -> np.ndarray:
-        """Footprint sample points, dense enough that thin slats can't slip."""
-        hl, hw = self.length / 2.0, self.width / 2.0
+    def envelope_at(self, drift: float) -> tuple[float, float, float, float]:
+        """(length, width, off_x, off_y) for a body-frame drift angle in rad."""
+        if not self.envelope:
+            return self.length, self.width, self.center_off, 0.0
+        rel = math.remainder(drift, 2.0 * math.pi)
+        deg = math.degrees(abs(rel))
+        row = min(self.envelope, key=lambda r: abs(r[0] - deg))
+        return row[1], row[2], row[3], row[4] if rel >= 0.0 else -row[4]
+
+    def offsets(self, step: float = 0.05, drift: float | None = None) -> np.ndarray:
+        """Footprint sample points, dense enough that thin slats can't slip.
+
+        ``drift`` None asks for the all-gait union; a body-frame drift angle
+        in rad asks for the swept box that heading actually needs.
+        """
+        length, width, off_x, off_y = (
+            (self.length, self.width, self.center_off, 0.0)
+            if drift is None
+            else self.envelope_at(drift)
+        )
+        hl, hw = length / 2.0, width / 2.0
         return np.array(
             [
-                (x + self.center_off, y)
+                (x + off_x, y + off_y)
                 for x in np.arange(-hl, hl + step / 2.0, step)
                 for y in np.arange(-hw, hw + step / 2.0, step)
             ]
         )
 
 
-GO2 = Embodiment()
+# Baked by `python -m dimos.navigation.motion.simulation.envelope --bake` over
+# the governed slow band (stand + 0.35 + 0.50 m/s); see
+# planner/envelope_results.md for the surface these fold out of.
+GO2_ENVELOPE: tuple[tuple[float, float, float, float, float], ...] = (
+    (0.0, 0.819, 0.416, -0.023, 0.000),
+    (26.6, 0.802, 0.436, -0.032, -0.008),
+    (45.0, 0.788, 0.472, -0.035, -0.018),
+    (63.4, 0.781, 0.500, -0.039, -0.016),
+    (90.0, 0.781, 0.507, -0.039, -0.009),
+    (116.6, 0.781, 0.497, -0.039, 0.000),
+    (135.0, 0.781, 0.463, -0.039, -0.001),
+    (153.4, 0.781, 0.422, -0.039, -0.003),
+    (180.0, 0.781, 0.416, -0.039, 0.000),
+)
+# Measured 0.0334 m of extra width per rad/m, residuals <= 12 mm.
+GO2_ARC_INFLATE = 0.0334
+
+GO2 = Embodiment(envelope=GO2_ENVELOPE, arc_inflate=GO2_ARC_INFLATE)
 EMBODIMENTS = {
     "go2": GO2,
-    # payload adds 8 cm in front: longer body, centre 4 cm further forward
-    "go2-payload": Embodiment(tag="go2-payload", length=0.93, center_off=0.03, comfort=0.5),
+    # payload adds 8 cm in front: longer body, centre 4 cm further forward.
+    # No measured envelope of its own: it falls back to the union everywhere.
+    "go2-payload": Embodiment(tag="go2-payload", length=0.963, center_off=0.042, comfort=0.5),
     "slim": Embodiment(tag="slim", length=2.0, width=0.24, comfort=0.3),
     # cannot crab, and has no legs to step over anything with
     "diffdrive": Embodiment(tag="diffdrive", strafe=50.0, reverse=3.0, steppable=0.0),

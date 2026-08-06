@@ -138,13 +138,16 @@ def cell(drift, speed, extent, yaw_rate=0.0):
     return Cell(drift, speed, yaw_rate, extent, (0.0, 0.0, 0.0), "")
 
 
-def test_fold_unions_both_signs_over_the_band():
+def test_a_row_covers_the_mirror_of_the_opposite_sign():
+    # planner/revision.md: rows are stored for POSITIVE drift and mirrored by
+    # sign at lookup, so -45's box has to fit inside the mirror of the row.
     cells = [
         cell(45.0, 0.35, box(-0.4, 0.35, -0.2, 0.2)),
         cell(-45.0, 0.35, box(-0.4, 0.35, -0.25, 0.15)),
         cell(45.0, 0.95, box(-0.9, 0.9, -0.9, 0.9)),  # out of band, ignored
     ]
-    assert fold(cells, (0.35,)) == [(45.0, 0.75, 0.45, -0.025)]
+    # y spans [-0.2, 0.2] for +45 and, mirrored, [-0.15, 0.25] for -45
+    assert fold(cells, (0.35,)) == [(45.0, 0.75, 0.45, -0.025, 0.025)]
 
 
 def test_fold_puts_a_stand_cell_in_every_row():
@@ -152,7 +155,7 @@ def test_fold_puts_a_stand_cell_in_every_row():
         cell(0.0, 0.0, box(-0.45, 0.35, -0.21, 0.21)),
         cell(90.0, 0.35, box(-0.4, 0.35, -0.25, 0.2)),
     ]
-    assert fold(cells, (0.0, 0.35)) == [(90.0, 0.8, 0.46, -0.05)]
+    assert fold(cells, (0.0, 0.35)) == [(90.0, 0.8, 0.5, -0.05, 0.0)]
 
 
 def test_fold_drops_arcs():
@@ -160,24 +163,25 @@ def test_fold_drops_arcs():
         cell(0.0, 0.35, box(-0.4, 0.35, -0.2, 0.2)),
         cell(0.0, 0.35, box(-0.9, 0.9, -0.9, 0.9), yaw_rate=1.4),
     ]
-    assert fold(cells, (0.35,)) == [(0.0, 0.75, 0.4, -0.025)]
+    assert fold(cells, (0.35,)) == [(0.0, 0.75, 0.4, -0.025, 0.0)]
 
 
 def test_arc_inflate_recovers_a_planted_slope():
-    # width grows by 0.05 m per rad/m of yaw-per-metre, on a 0.10 m edge
+    # width grows by 0.05 m per rad/m of yaw-per-metre; the stored number is
+    # that slope itself, not a per-edge conversion of it (planner/revision.md)
     cells = [cell(0.0, v, box(-0.4, 0.4, -0.2, 0.2)) for v in (0.35, 0.75)]
     for v in (0.35, 0.75):
         for w in (0.35, 0.7):
             half = 0.2 + 0.05 * (w / v) / 2.0
             cells.append(cell(0.0, v, box(-0.4, 0.4, -half, half), yaw_rate=w))
-    assert arc_inflate(cells, edge=0.10) == approx(0.5)
+    assert arc_inflate(cells) == approx(0.05)
 
 
 def test_arc_inflate_takes_the_worse_turn_direction():
     cells = [cell(0.0, 1.0, box(-0.4, 0.4, -0.2, 0.2))]
     cells.append(cell(0.0, 1.0, box(-0.4, 0.4, -0.2, 0.3), yaw_rate=1.0))
     cells.append(cell(0.0, 1.0, box(-0.4, 0.4, -0.2, 0.25), yaw_rate=-1.0))
-    assert arc_inflate(cells, edge=1.0) == approx(0.1)
+    assert arc_inflate(cells) == approx(0.1)
 
 
 def test_union_covers_every_cell():

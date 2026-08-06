@@ -60,9 +60,10 @@ BAND_TOP = 0.45
 BAND_HEIGHT = 0.6
 
 SCENE_MAX_Z = 1.5  # collision boxes above the floor; the ceiling is not a wall
-# Moving-body envelope (scenarios.GO2) plus its standing height: what the robot
-# sweeps, and therefore what its own lidar returns must be carved out of.
-BODY = (0.85, 0.50, 0.45)
+# Moving-body envelope (the GO2 union) plus its standing height: what the robot
+# sweeps, and therefore what its own lidar returns must be carved out of. Read
+# off the embodiment rather than restated: one re-baseline, one number.
+BODY = (GO2.length, GO2.width, GO2.height)
 # Clearance the swept footprint is granted on top of that envelope. The robot's
 # own returns bleed a voxel or so past its skin, so a carve of exactly the body
 # leaves the spawn pose touching a wall and every oracle refuses at step one.

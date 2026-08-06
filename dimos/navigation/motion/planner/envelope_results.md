@@ -187,6 +187,46 @@ Every row is shorter than today's 0.85 and all but the 63–116° crab rows are
 narrower than today's 0.50 — the doorway win is on the nose-first and reverse
 edges, which is exactly the door2 case.
 
+### What actually shipped, and why it differs
+
+Phase 1 of the revision takes the AGREED schema in
+[revision.md](revision.md), which answers Q1 and Q2 differently from the
+defaults proposed above. Re-baked from the same 95 cells (`--json`, identical
+protocol, union reproduces to the millimetre at 0.883 × 0.5928 @ +0.0019):
+
+```python
+envelope = (
+    (0.0, 0.819, 0.416, -0.023, 0.000),
+    (26.6, 0.802, 0.436, -0.032, -0.008),
+    (45.0, 0.788, 0.472, -0.035, -0.018),
+    (63.4, 0.781, 0.500, -0.039, -0.016),
+    (90.0, 0.781, 0.507, -0.039, -0.009),
+    (116.6, 0.781, 0.497, -0.039, 0.000),
+    (135.0, 0.781, 0.463, -0.039, -0.001),
+    (153.4, 0.781, 0.422, -0.039, -0.003),
+    (180.0, 0.781, 0.416, -0.039, 0.000),
+)
+arc_inflate = 0.0334
+```
+
+- **Q1 → option (a).** revision.md stores curvature, not per-edge yaw, so the
+  number is the raw slope 0.0334 m per rad/m and the search multiplies by the
+  edge's own `dyaw / length`. `envelope.arc_inflate()` lost its `edge`
+  argument accordingly; 0.279 was that slope divided by a `cell` the lattice
+  is now free to change.
+- **Q2 → option (a), in effect.** The schema gained `off_y`, so `fold()` no
+  longer unions ±θ into one laterally-symmetric box. A row is now
+  `+θ ∪ mirror(−θ)` (with the stand cell, and its mirror, in every row): it is
+  conservative for both signs by construction — verified row by row against
+  the measured −θ extents — and it keeps the lag instead of paying for it.
+- **Row deltas vs the table above** are ≤ 16 mm and go both ways: 0° and 180°
+  widen 0.409 → 0.416 (the stand cell's own ±6 mm asymmetry now has to be
+  covered), 90° narrows 0.523 → 0.507 and 45° 0.483 → 0.472 (the ± union that
+  used to inflate them is gone). Lengths are unchanged to the millimetre.
+
+The doorway conclusion is untouched: nose-first is 0.416 against the honest
+0.593 union, i.e. 88 mm more room per side.
+
 ## Questions
 
 **Q1: `arc_inflate` units.** The measurement collapses on yaw-per-metre, but

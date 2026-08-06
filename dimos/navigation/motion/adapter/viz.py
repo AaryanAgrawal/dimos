@@ -80,10 +80,10 @@ def plan_clearance(msg: Path) -> np.ndarray | None:
 
 def render_plan_body(
     msg: Path,
-    length: float = 0.85,
-    width: float = 0.50,
+    length: float = 0.883,  # GO2 union, re-baselined by planner/revision.md
+    width: float = 0.593,
     height: float = 0.32,
-    center_off: float = -0.01,
+    center_off: float = 0.002,
     precision: float = 0.05,
     stride_m: float = 0.35,
     line_radius: float = 0.012,

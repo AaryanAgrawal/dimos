@@ -146,15 +146,17 @@ class CollisionShape(BaseConfig):
 
 
 # Unitree Go2 moving-body envelope, measured in the fitted MuJoCo sim (union
-# of all robot geometry over stand/fwd/reverse/strafe/spin/arc/crab commands,
-# yaw-aligned base frame): 0.852 x 0.495, centre offset -0.009. The swinging
-# legs, not the 0.31 m trunk of the official spec, set the width — strafe and
-# spin splay them to ~0.50 m. Planner paths are ground-level (z=0), so the box
-# is lifted half its height to sit on the ground rather than straddle the
-# waypoint.
+# of all robot geometry over the 95-cell command protocol of
+# simulation/envelope.py, yaw-aligned base frame): 0.883 x 0.593, centre
+# +0.002. The swinging legs, not the 0.31 m trunk of the official spec, set
+# the width — fast strafe and slow tight arcs splay them to ~0.59 m. Planner
+# paths are ground-level (z=0), so the box is lifted half its height to sit on
+# the ground rather than straddle the waypoint.
+# Re-baselined from 0.85 x 0.50 by planner/revision.md: this box is the judge's
+# veto shape, where honest-conservative is the only acceptable property.
 GO2_BODY = CollisionShape(
-    primitive=SolidPrimitive.box(0.85, 0.50, 0.40),
-    pose=Pose(-0.01, 0.0, 0.20),
+    primitive=SolidPrimitive.box(0.883, 0.593, 0.40),
+    pose=Pose(0.002, 0.0, 0.20),
 )
 
 

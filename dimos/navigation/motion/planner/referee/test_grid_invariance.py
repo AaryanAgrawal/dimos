@@ -23,12 +23,19 @@ quantises the pose-driven *growth* onto `GRID_PERIOD` for precisely this reason
 — "the grid only ever gains or loses whole rows at the edge" — but the corner
 it grows from is itself unquantised, so the same failure arrives via the cloud.
 
-The world here is a 0.66 m doorway in a wall raked 60 deg off the lattice axes:
-0.08 m of slack per side against a 0.50 m body and a 0.05 m margin, comfortably
-threadable, and the planner does thread it. One point ten metres away, past the
-cloud's low corner, buys a 7.4 m detour instead. Points past the *high* corner
-are harmless — they add rows without moving the origin — which is what places
-the defect at the corner rather than in the point count or the field itself.
+The world here is a 0.75 m doorway in a wall raked 60 deg off the lattice axes:
+0.08 m of slack per side against a 0.593 m body and a 0.05 m margin, comfortably
+threadable, and the planner does thread it. One point thirteen metres away,
+past the cloud's low corner, buys a 7.5 m detour instead. Points past the
+*high* corner are harmless — they add rows without moving the origin — which is
+what places the defect at the corner rather than in the point count or the
+field itself.
+
+The gap and the far point both track the body: they were 0.66 m and
+(-11.71, -4.0) against the 0.50 m union planner/revision.md re-baselined away.
+The witness is a knife-edge by nature — a sub-cell grid shift deciding a
+marginal doorway — so a wider body needs the corner pushed further out to move
+the origin by as much.
 
 Seen on the robot as a route flip through a doorway 5.4 m away, replaying
 `ml-trajectory-research/door.zenoh.mcap` at t=7.093 (13.27 m around, vs 1.96 m
@@ -45,8 +52,8 @@ from dimos.navigation.motion.embodiment import EMBODIMENTS
 
 EMB = EMBODIMENTS["go2"]
 RAKE = np.radians(60.0)
-GAP = 0.66  # body is 0.50 wide, margin 0.05: 0.08 m of slack per side
-FAR = (-11.71, -4.0)  # past the cloud's low corner, ~10 m off the route
+GAP = 0.75  # body is 0.593 wide, margin 0.05: 0.08 m of slack per side
+FAR = (-11.7, -6.0)  # past the cloud's low corner, ~13 m off the route
 
 
 def _wall() -> np.ndarray:

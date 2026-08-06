@@ -54,7 +54,7 @@ import dimos_motion2_target as ext  # noqa: E402
 from referee import scenarios as sc_mod  # noqa: E402
 from referee.scenarios import SCENARIOS, generated, se2_path  # noqa: E402
 
-GO2 = (0.85, 0.50, -0.01, 0.4, 0.05, 1.8, 1.5, 0.25)
+GO2 = (0.883, 0.593, 0.002, 0.4, 0.05, 1.8, 1.5, 0.25)
 REFEREE_LOCK = evo_root() / ".evo" / "referee.lock"
 
 problems: list[str] = []

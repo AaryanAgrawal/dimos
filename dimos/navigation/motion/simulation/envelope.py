@@ -80,9 +80,6 @@ WINDOW = 4.0  # >= 4 cycles of the ~1.8 Hz trot
 # of the governed band. See planner/envelope_results.md.
 GOVERNED: tuple[float, ...] = (0.0, 0.35, 0.5)
 
-# Lattice edge the arc inflation is expressed per: cell = 3 * fine = 0.12.
-EDGE = 0.12
-
 # Validity gates. The drift angle and the yaw are what say the body did the
 # commanded motion; the speed ratio is reported per cell (the policy
 # undertracks everywhere, see planner/envelope_results.md) and only a body
@@ -128,6 +125,10 @@ class Extent:
     def __or__(self, other: Extent) -> Extent:
         return Extent(np.minimum(self.lo, other.lo), np.maximum(self.hi, other.hi))
 
+    def mirrored(self) -> Extent:
+        """The same outline reflected across the body's own x axis."""
+        return Extent(np.array([self.lo[0], -self.hi[1]]), np.array([self.hi[0], -self.lo[1]]))
+
     @property
     def empty(self) -> bool:
         return not bool(np.all(np.isfinite(self.lo)))
@@ -144,6 +145,11 @@ class Extent:
     def center_off(self) -> float:
         """Outline centre along body x, relative to the base frame origin."""
         return float((self.hi[0] + self.lo[0]) / 2.0)
+
+    @property
+    def lateral_off(self) -> float:
+        """Outline centre along body y: how far the swept box lags the drift."""
+        return float((self.hi[1] + self.lo[1]) / 2.0)
 
 
 class Outline:
@@ -290,15 +296,20 @@ def union(cells: list[Cell]) -> Extent:
     return out
 
 
-def fold(cells: list[Cell], speeds: tuple[float, ...] = GOVERNED) -> list[tuple[float, ...]]:
-    """`envelope` rows: per |drift|, the outline over a speed band, both signs.
+def fold(
+    cells: list[Cell], speeds: tuple[float, ...] = GOVERNED
+) -> list[tuple[float, float, float, float, float]]:
+    """`envelope` rows: per |drift|, the swept box that heading needs.
 
-    Left/right are measured apart and folded here by union: the swept box is
-    not centred on the pose point when the body drifts, and the schema has no
-    lateral offset to say so with. A stand cell in the band joins every row --
-    a follower can stop on any edge.
+    Rows are stored for POSITIVE drift and mirrored by sign at lookup, so a row
+    has to cover both what +|a| swept and the MIRROR of what -|a| swept: a box
+    that does not contain its own mirror image is not one the two signs can
+    share. That keeps the lateral lag (`off_y`) instead of unioning it away,
+    which is what the ± fold used to cost. A stand cell in the band joins every
+    row -- a follower can stop on any edge -- and joins it mirrored too, having
+    no drift sign of its own.
     """
-    banded: dict[float, Extent] = {}
+    fam: dict[float, Extent] = {}
     stand = Extent()
     for c in cells:
         if c.yaw_rate != 0.0 or c.speed not in speeds:
@@ -306,17 +317,31 @@ def fold(cells: list[Cell], speeds: tuple[float, ...] = GOVERNED) -> list[tuple[
         if c.speed == 0.0:
             stand = stand | c.extent
             continue
-        a = abs(c.drift)
-        banded[a] = banded.get(a, Extent()) | c.extent
-    rows = [(a, banded[a] | stand) for a in sorted(banded)]
-    return [(a, round(e.length, 3), round(e.width, 3), round(e.center_off, 3)) for a, e in rows]
+        fam[c.drift] = fam.get(c.drift, Extent()) | c.extent
+    stand = stand | stand.mirrored()
+    rows = []
+    for a in sorted({abs(d) for d in fam}):
+        plus = fam.get(a, Extent()) | stand
+        minus = (fam[-a] if -a in fam else fam[a]) | stand
+        e = plus | minus.mirrored()
+        rows.append(
+            (
+                a,
+                round(e.length, 3),
+                round(e.width, 3),
+                round(e.center_off, 3),
+                round(e.lateral_off, 3),
+            )
+        )
+    return rows
 
 
-def arc_inflate(cells: list[Cell], edge: float = EDGE) -> float:
-    """Extra width per rad of yaw change over an ``edge``-long lattice edge.
+def arc_inflate(cells: list[Cell]) -> float:
+    """Extra swept width per rad-per-metre of curvature.
 
-    The gait's turning splay scales with yaw per metre; an edge of fixed length
-    converts that into yaw per edge, which is the term the spec stores.
+    The gait's turning splay collapses on yaw per metre, not on yaw rate, so
+    this number survives a lattice pitch change unmeasured: the search
+    multiplies it by the edge's own yaw change over the edge's own length.
     """
     straight = {c.speed: c.extent.width for c in cells if c.yaw_rate == 0.0 and c.drift == 0.0}
     wide: dict[tuple[float, float], float] = {}
@@ -330,7 +355,7 @@ def arc_inflate(cells: list[Cell], edge: float = EDGE) -> float:
         x = w / v
         num += x * (width - straight[v])
         den += x * x
-    return (num / den) / edge if den else 0.0
+    return num / den if den else 0.0
 
 
 def table(cells: list[Cell], band: tuple[float, ...] = GOVERNED) -> str:
@@ -353,8 +378,8 @@ def table(cells: list[Cell], band: tuple[float, ...] = GOVERNED) -> str:
     )
     lines.append(f"\nenvelope rows baked over v in {band}:")
     for row in fold(cells, band):
-        lines.append("    ({:.1f}, {:.3f}, {:.3f}, {:+.3f}),".format(*row))
-    lines.append(f"arc_inflate = {arc_inflate(cells):.3f}  # per rad over a {EDGE:.2f} m edge")
+        lines.append("    ({:.1f}, {:.3f}, {:.3f}, {:+.3f}, {:+.3f}),".format(*row))
+    lines.append(f"arc_inflate = {arc_inflate(cells):.4f}  # extra width per rad/m of curvature")
     return "\n".join(lines)
 
 
