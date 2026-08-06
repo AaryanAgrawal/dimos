@@ -1,5 +1,5 @@
 [Unit]
-Description=dimos baked motion host (planner, follower, cmd_vel mux, odom leveling)
+Description=dimos baked motion host (planner, follower, cmd_vel mux, go2 tf)
 After=network-online.target
 Wants=network-online.target
 
