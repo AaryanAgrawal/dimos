@@ -298,6 +298,13 @@ def run_episode(
 
         viewer_cm = mj_viewer.launch_passive(model, data)
     viewer = viewer_cm.__enter__() if viewer_cm is not None else None
+    if viewer is not None:
+        # frame the whole scene, not the robot's launch default
+        xy = np.array([sc.start[:2], sc.goal] + [c for b in sc.boxes for c in b.outline(0.0)])
+        lo, hi = xy.min(axis=0), xy.max(axis=0)
+        viewer.cam.lookat[:] = [*(lo + hi) / 2.0, 0.0]
+        viewer.cam.distance = max(8.0, 1.6 * float(np.max(hi - lo)))
+        viewer.cam.elevation = -55.0
 
     try:
         wall_clock = _time.perf_counter()
