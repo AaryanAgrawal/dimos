@@ -60,3 +60,7 @@ the deployed `max_yaw_rate`, or cap yaw rate in tight segments.
   exceeds the forward envelope): rely on stamp-encoded slow-down + judge
   metric, or add an explicit constraint?
 - fine = 0.04 costs ~1.6× SDF precompute — measure against the 20 ms budget.
+- Yaw resolution at doors: 16 bins mean up to 11.25° misalignment =
+  0.85·sin ≈ 0.16 m of phantom width — more than the envelope recovers. More
+  bins (2×/4× precompute) vs local yaw refinement in tight cells only. Move
+  headings stay at 16 either way (envelope varies mm per bin).
