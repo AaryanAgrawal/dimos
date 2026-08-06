@@ -106,9 +106,15 @@ def render(plot: Plot, width: float = 10, height: float = 3.5) -> str:
     """Render a Plot to an SVG string via matplotlib."""
     with plt.style.context("dark_background"):
         fig, ax = plt.subplots(figsize=(width, height))
-        fig.patch.set_alpha(0.0)
+        # Solid, not transparent: the theme's text is white, and tick labels
+        # sit OUTSIDE the axes rectangle — on a light viewer they vanish.
+        fig.patch.set_facecolor("#0f1530")
         ax.set_facecolor("#16213e")
         ax.grid(True, color="#2a2a4a", linewidth=0.5)
+        if plot.xlabel:
+            ax.set_xlabel(plot.xlabel)
+        if plot.ylabel:
+            ax.set_ylabel(plot.ylabel)
 
         # Lazily create twin y-axes for any element with axis != None.
         # All twins share the primary x-axis (matplotlib `ax.twinx()`).

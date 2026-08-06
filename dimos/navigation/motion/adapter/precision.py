@@ -33,8 +33,10 @@ from pathlib import Path as FsPath
 import numpy as np
 
 from dimos.navigation.motion.adapter.diagnose import (
+    FLIP_M,
     Recording,
     _before,
+    divergence,
     is_hold,
     load_recording,
     parse_instant,
@@ -44,12 +46,28 @@ from dimos.navigation.motion.embodiment import EMBODIMENTS
 SPEED_BIN = 0.1  # m/s per bin
 MIN_SAMPLES = 25  # a bin with fewer samples is noise, not a measurement
 SMOOTH_HALF = 2  # central-difference half-window (odom samples, ~33 ms each)
+SETTLE_S = 1.5  # after a plan FLIP, this long is the planner's fault, not control's
 
 
-def frontier(rec: Recording) -> np.ndarray:
-    """(n, 2) [speed, cross-track error] for every sample with an active plan."""
+def flip_windows(rec: Recording) -> list[tuple[float, float]]:
+    """[start, end) spans right after a plan flipped by more than FLIP_M."""
+    out = []
+    for (_, a), (tb, b) in zip(rec.plans, rec.plans[1:], strict=False):
+        if not is_hold(a) and not is_hold(b) and divergence(a, b) > FLIP_M:
+            out.append((tb, tb + SETTLE_S))
+    return out
+
+
+def frontier(rec: Recording, steady: bool = True) -> tuple[np.ndarray, int]:
+    """([speed, cross-track] rows, samples dropped as flip transients).
+
+    ``steady`` drops samples inside SETTLE_S after a plan flip — the body
+    chasing a changed plan measures the planner's indecision, not control.
+    """
     plan_ts = np.array([t for t, _ in rec.plans])
+    windows = flip_windows(rec) if steady else []
     rows = []
+    dropped = 0
     n = len(rec.odom_ts)
     for i in range(n):
         pose, ts = rec.poses[i], rec.odom_ts[i]
@@ -57,6 +75,9 @@ def frontier(rec: Recording) -> np.ndarray:
             continue
         k = _before(ts, plan_ts)
         if k < 0 or is_hold(rec.plans[k][1]):
+            continue
+        if any(lo <= ts < hi for lo, hi in windows):
+            dropped += 1
             continue
         a, b = max(0, i - SMOOTH_HALF), min(n - 1, i + SMOOTH_HALF)
         pa, pb = rec.poses[a], rec.poses[b]
@@ -73,7 +94,7 @@ def frontier(rec: Recording) -> np.ndarray:
         )
         err = float(np.min(np.linalg.norm(p - (s0 + tt[:, None] * seg), axis=1)))
         rows.append((speed, err))
-    return np.array(rows).reshape(-1, 2)
+    return np.array(rows).reshape(-1, 2), dropped
 
 
 def binned(fr: np.ndarray) -> list[tuple[float, int, float, float, float]]:
@@ -105,6 +126,11 @@ def main() -> None:
     ap.add_argument("--base-frame", default="base_link")
     ap.add_argument("--embodiment", default="go2")
     ap.add_argument("--out", default="recordings/precision.svg", help="plot path")
+    ap.add_argument(
+        "--transients",
+        action="store_true",
+        help="keep the samples right after plan flips (default: steady-state only)",
+    )
     args = ap.parse_args()
 
     from dimos.memory2.vis import color
@@ -117,14 +143,21 @@ def main() -> None:
     palette = [color.blue, color.green, color.orange, color.purple, color.red]
 
     # x is SPEED, not time: raw numeric axis, or the formatter prints "0s".."1s"
-    p = Plot(time_axis=TimeAxis.raw)
+    p = Plot(
+        time_axis=TimeAxis.raw,
+        xlabel="speed (m/s)",
+        ylabel="cross-track error (m)",
+    )
     p.add(HLine(y=floor, color=color.red.hex(), opacity=0.6))
     for idx, path in enumerate(args.recordings):
         rec = load_recording(path, args.base_frame, 5.0, start, end)
-        fr = frontier(rec)
+        fr, dropped = frontier(rec, steady=not args.transients)
         rows = binned(fr)
         name = FsPath(path).stem.removesuffix(".zenoh")
-        print(f"\n{name}: {len(fr)} samples with an active plan")
+        print(
+            f"\n{name}: {len(fr)} samples with an active plan"
+            + (f", {dropped} dropped as flip transients" if dropped else "")
+        )
         print("  speed    n    p50    p90    p95")
         held = 0.0
         for centre, n, p50, p90, p95 in rows:
@@ -144,7 +177,6 @@ def main() -> None:
                 values=[r[4] for r in rows],
                 label=f"{name} p95",
                 color=c.hex(),
-                axis="cross-track (m) vs speed (m/s)",
             )
         )
         p.add(
@@ -154,7 +186,6 @@ def main() -> None:
                 label=f"{name} p50",
                 color=c.hex(),
                 opacity=0.45,
-                axis="cross-track (m) vs speed (m/s)",
             )
         )
     FsPath(args.out).parent.mkdir(parents=True, exist_ok=True)
