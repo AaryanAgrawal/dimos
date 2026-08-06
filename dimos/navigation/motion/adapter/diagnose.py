@@ -77,7 +77,7 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.helpers import resolve_msg_type
 from dimos.navigation.motion.adapter.follower import GoalLatch, path_clearance
-from dimos.navigation.motion.adapter.planner import carrot_along, route_changed
+from dimos.navigation.motion.adapter.planner import REPLAN_CARROT_M, carrot_along, replan_due
 from dimos.navigation.motion.control.controller import ControllerConfig, load as load_law
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
 from dimos.navigation.motion.control.tracks import TRACKS
@@ -284,9 +284,6 @@ class Tick:
     pose: tuple[float, ...]  # x, y, yaw, base z
     goal: tuple[float, float]
     recorded: np.ndarray  # the published plan, xy
-    # Bumped when the global route MOVED, so (imap, route_seq) is the pair
-    # MotionPlanner's replan gate keys on.
-    route_seq: int = 0
     # Per-waypoint clearance decoded from the plan's own stamps -- the precision
     # the planner asked for, not anything recomputed offline.
     stamped_clear: np.ndarray | None = None
@@ -434,11 +431,6 @@ def load_recording(
     rec.window = Window.between(start, end, rec.t0)
     map_ts = np.array([t for t, _ in maps])
     global_ts = np.array([t for t, _ in globals_])
-    # MLS republishes its route at ~1 Hz whether or not it moved; the module's
-    # gate keys on the route CHANGING, so number them the same way.
-    route_seq = [0]
-    for a, b in pairwise(globals_):
-        route_seq.append(route_seq[-1] + int(route_changed(a[1], b[1])))
     for n, (ts, xy) in enumerate(plans):
         i, j, k = _before(ts, map_ts), _before(ts, rec.odom_ts), _before(ts, global_ts)
         if min(i, j, k) < 0 or rec.poses[j] is None or not len(globals_[k][1]):
@@ -453,7 +445,6 @@ def load_recording(
                 pose=pose,
                 goal=goal,
                 recorded=xy,
-                route_seq=route_seq[k],
                 stamped_clear=stamped[n],
             )
         )
@@ -461,12 +452,17 @@ def load_recording(
     return rec
 
 
-def gated_ticks(ticks: list[Tick]) -> list[Tick]:
-    """The ticks a replan gate would keep: the first of each (map, route) pair."""
+def gated_ticks(ticks: list[Tick], carrot_m: float = REPLAN_CARROT_M) -> list[Tick]:
+    """The ticks a replan gate would keep: a new local map, or a moved carrot.
+
+    The map index stands in for the module's cloud counter, and the tick's own
+    carrot for the one the kept plan was made for -- :func:`planner.replan_due`
+    decides, so the replay cannot drift from the module.
+    """
     kept: list[Tick] = []
     for tick in ticks:
-        key = (tick.imap, tick.route_seq)
-        if not kept or (kept[-1].imap, kept[-1].route_seq) != key:
+        planned = (kept[-1].imap, kept[-1].goal) if kept else None
+        if replan_due(planned, tick.imap, tick.goal, carrot_m):
             kept.append(tick)
     return kept
 

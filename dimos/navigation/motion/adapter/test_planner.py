@@ -131,7 +131,7 @@ def test_hold_draws_the_veto_so_it_is_not_mistaken_for_a_dead_module():
 
 
 def _gated_planner(**config):
-    """A MotionPlanner with just enough wired up to call _due."""
+    """A MotionPlanner with just enough wired up to call _due and _retask."""
     planner = object.__new__(MotionPlanner)
     planner.config = MotionPlannerConfig(**config)
     planner._planned = None
@@ -140,41 +140,48 @@ def _gated_planner(**config):
 
 def test_a_tick_with_nothing_new_does_not_replan():
     planner = _gated_planner()
-    assert planner._due((7, 2))  # nothing planned yet
-    planner._planned = (7, 2)
-    assert not planner._due((7, 2))
+    assert planner._due(7, (2.0, 0.0))  # nothing planned yet
+    planner._planned = (7, (2.0, 0.0))
+    assert not planner._due(7, (2.0, 0.0))
 
 
-def test_a_new_map_or_a_new_route_replans():
+def test_a_new_map_or_a_moved_carrot_replans():
     planner = _gated_planner()
-    planner._planned = (7, 2)
-    assert planner._due((8, 2))
-    assert planner._due((7, 3))
+    planner._planned = (7, (2.0, 0.0))
+    assert planner._due(8, (2.0, 0.0))
+    assert planner._due(7, (2.3, 0.0))
+
+
+def test_a_republished_route_moves_the_carrot_by_nothing_and_is_not_a_replan():
+    # MLS trims the route head to the robot and re-solves the tail on every
+    # ~1 Hz republish: the waypoints move, the carrot does not
+    planner = _gated_planner()
+    planner._planned = (7, (2.0, 0.0))
+    assert not planner._due(7, (2.02, -0.01))
 
 
 def test_an_ungated_planner_replans_on_every_tick():
     planner = _gated_planner(replan_on_change=False)
-    planner._planned = (7, 2)
-    assert planner._due((7, 2))
+    planner._planned = (7, (2.0, 0.0))
+    assert planner._due(7, (2.0, 0.0))
 
 
-def test_a_route_republished_unchanged_is_not_a_change():
-    # MLS republishes at ~1 Hz and holds still for seconds at a time
-    route = np.array([[0.0, 0.0], [1.0, 0.0]])
-    assert not planner_module.route_changed(route, route.copy())
+def test_only_a_carrot_that_jumped_is_a_new_task():
+    planner = _gated_planner()
+    planner._planned = (7, (2.0, 0.0))
+    assert not planner._retask((2.3, 0.0))  # republish wobble, same task
+    assert planner._retask((6.6, 0.0))  # the door recording's reroute
+    # and nothing to compare against is not a jump
+    planner._planned = None
+    assert not planner._retask((6.6, 0.0))
 
 
-def test_a_route_that_moved_is_a_change():
-    route = np.array([[0.0, 0.0], [1.0, 0.0]])
-    assert planner_module.route_changed(route, np.array([[0.0, 0.0], [1.0, 0.1]]))
-    assert planner_module.route_changed(route, np.array([[0.0, 0.0]]))
-
-
-def test_a_route_appearing_or_going_away_is_a_change():
-    route = np.array([[0.0, 0.0], [1.0, 0.0]])
-    assert planner_module.route_changed(None, route)
-    assert planner_module.route_changed(route, None)
-    assert not planner_module.route_changed(None, None)
+def test_the_gate_is_the_one_the_diagnosis_replays():
+    # the free function is what diagnose.gated_ticks reconstructs the gate with
+    assert planner_module.replan_due(None, 7, (2.0, 0.0))
+    assert not planner_module.replan_due((7, (2.0, 0.0)), 7, (2.1, 0.0))
+    assert planner_module.replan_due((7, (2.0, 0.0)), 7, (2.4, 0.0))
+    assert planner_module.replan_due((7, (2.0, 0.0)), 8, (2.0, 0.0))
 
 
 # --- the obstacle model (motion/obstacles.py is the rule; this is the wiring)

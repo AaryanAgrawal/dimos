@@ -54,6 +54,7 @@ class MotionPlannerNativeConfig(NativeModuleConfig):
     world_frame: str = "odom"
     base_frame: str = "base_link"
     replan_on_change: bool = True
+    replan_carrot_m: float = 0.2
     obstacle_model: str = "body_band"
     max_map_age_s: float = 5.0
     viz_publish_hz: float = 2.0

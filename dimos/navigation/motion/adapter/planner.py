@@ -25,6 +25,7 @@ single-pose stub the follower reads as "hold" — while MLS reroutes globally.
 
 from __future__ import annotations
 
+import math
 from threading import Event, RLock, Thread
 import time
 from typing import Any
@@ -98,29 +99,49 @@ def carrot_along(
     return (float(xy[-1][0]), float(xy[-1][1]))
 
 
-def route_changed(old: np.ndarray | None, new: np.ndarray | None) -> bool:
-    """Is this a different global route, or the same one published again?
+REPLAN_CARROT_M = 0.2  # carrot move that earns a replan
+RESET_CARROT_M = 1.0  # carrot jump that means a different task
 
-    MLS republishes at ~1 Hz and holds still for seconds at a time. Re-solving
-    against a route the plan already accounts for is what the gate exists to
-    skip, so "changed" has to mean the waypoints moved, not that a message came.
+
+def replan_due(
+    planned: tuple[int, tuple[float, float]] | None,
+    cloud_seq: int,
+    carrot: tuple[float, float],
+    carrot_m: float = REPLAN_CARROT_M,
+) -> bool:
+    """Has an input the plan depends on moved since the plan was made?
+
+    The plan consumes the global route through exactly one quantity — the
+    carrot — so that is what the gate compares. Keying on the waypoint array
+    instead never dedups anything: MLS trims the route head to the robot on
+    every ~1 Hz republish and re-solves with tail wobble, so the array moves
+    every time while the carrot does not move at all.
     """
-    if old is None or new is None:
-        return old is not new
-    return old.shape != new.shape or not bool(np.array_equal(old, new))
+    if planned is None:
+        return True
+    seq, was = planned
+    return seq != cloud_seq or math.dist(was, carrot) > carrot_m
 
 
 class MotionPlannerConfig(ModuleConfig):
     planner: str = "target"  # referee registry name or "module:factory"
     embodiment: str = "go2"
-    # Plan when an input that MATTERS changed — a new local map, or a global
-    # route that is not the one already planned against — rather than on every
-    # tick of the clock. The planner ticks at 5 Hz over a 1 Hz map, so four
-    # ticks in five re-solve an unchanged world; between maps the plan is stable
-    # to 0.15 m, so those four are work whose only output is jitter. The
-    # follower tracks the published path as the robot moves and needs no
-    # republish to do it. False replans every tick, as it used to.
+    # Plan when an input that MATTERS changed — a new local map, or a carrot
+    # that moved — rather than on every tick of the clock. The planner ticks at
+    # 5 Hz over a 1 Hz map, so four ticks in five re-solve an unchanged world;
+    # between maps the plan is stable to 0.15 m, so those four are work whose
+    # only output is jitter. The follower tracks the published path as the robot
+    # moves and needs no republish to do it. False replans every tick.
     replan_on_change: bool = True
+    # How far the carrot has to move to be worth re-solving for. The route the
+    # carrot rides on is republished at ~1 Hz with its head trimmed to the robot
+    # and its tail re-solved, so the waypoints move every time and the carrot
+    # does not — gating on the array would dedup nothing.
+    replan_carrot_m: float = REPLAN_CARROT_M
+    # A carrot that jumped this far is a different task, and the episode's warm
+    # start and hysteresis are about the old one. Republish noise moves it ~0 m;
+    # a real reroute moved it 4.6 m in the door recording.
+    reset_carrot_m: float = RESET_CARROT_M
     # Odometry is stamped at the SENSOR (mid360_link on the go2), so the pose it
     # carries is the lidar's, not the robot's -- 0.30 m ahead and 0.16 m above on
     # this rig. tf resolves it into the body; ticks are dropped until it can.
@@ -164,10 +185,10 @@ class MotionPlanner(Module):
         self._cloud: PointCloud2 | None = None
         self._cloud_at: float | None = None
         self._stale = False
-        # Arrival counters, and the pair the published plan was made from.
+        # The cloud arrival counter, and the (cloud, carrot) the published plan
+        # was made from.
         self._cloud_seq = 0
-        self._route_seq = 0
-        self._planned: tuple[int, int] | None = None
+        self._planned: tuple[int, tuple[float, float]] | None = None
         self._pose: tuple[float, float, float] | None = None
         # Where the surface under the robot is, off the body rather than off
         # the scene: the base rides emb.base_height above it.
@@ -223,16 +244,8 @@ class MotionPlanner(Module):
         # MLS emits an empty path when it finds no route: no carrot, hold the
         # last local plan rather than chase a stale one.
         xy = np.array([[p.position.x, p.position.y] for p in msg.poses]).reshape(-1, 2)
-        route = xy if len(xy) else None
         with self._lock:
-            changed = route_changed(self._global_xy, route)
-            self._global_xy = route
-            if changed:
-                self._route_seq += 1
-        if changed and self._episode is not None:
-            # a new task: warm starts and hysteresis from the old route are
-            # stale (no-op for the stateless rust target)
-            self._episode.reset()
+            self._global_xy = xy if len(xy) else None
 
     def _plan_loop(self) -> None:
         period = 1.0 / self.config.replan_hz
@@ -241,7 +254,7 @@ class MotionPlanner(Module):
             with self._lock:
                 cloud, pose, global_xy = self._cloud, self._pose, self._global_xy
                 cloud_at, ground_z = self._cloud_at, self._ground_z
-                inputs = (self._cloud_seq, self._route_seq)
+                cloud_seq = self._cloud_seq
             age = None if cloud_at is None else time.monotonic() - cloud_at
             # Why a tick did nothing, in the planner's own words. Silence here
             # is the failure that looks like "the robot will not move" from the
@@ -263,18 +276,32 @@ class MotionPlanner(Module):
                 if self._stale:
                     self._stale = False
                     logger.info("local_map is live again, resuming planning")
-                if self._due(inputs):
-                    goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
+                # the carrot is the whole of the route the plan consumes, so it
+                # is computed every tick and the gate reads it, not the array
+                goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
+                if self._due(cloud_seq, goal):
+                    if self._retask(goal) and self._episode is not None:
+                        # a new task: warm starts and hysteresis from the old
+                        # one are stale (no-op for the stateless rust target)
+                        self._episode.reset()
                     # a pose implies a ground reference: both come off the same
                     # tf-resolved base, so this cannot be None here
                     if self._plan_once(cloud, pose, goal, 0.0 if ground_z is None else ground_z):
-                        self._planned = inputs
+                        self._planned = (cloud_seq, goal)
             elapsed = time.perf_counter() - started
             self._stop_event.wait(max(0.0, period - elapsed))
 
-    def _due(self, inputs: tuple[int, int]) -> bool:
-        """Has an input the plan depends on arrived since the plan was made?"""
-        return not self.config.replan_on_change or inputs != self._planned
+    def _due(self, cloud_seq: int, carrot: tuple[float, float]) -> bool:
+        """Has an input the plan depends on moved since the plan was made?"""
+        if not self.config.replan_on_change:
+            return True
+        return replan_due(self._planned, cloud_seq, carrot, self.config.replan_carrot_m)
+
+    def _retask(self, carrot: tuple[float, float]) -> bool:
+        """Did the carrot jump far enough to be a different task?"""
+        if self._planned is None:
+            return False
+        return math.dist(self._planned[1], carrot) > self.config.reset_carrot_m
 
     def _hold(self, pose: tuple[float, float, float], age: float) -> None:
         """Refuse the way the planner does — a single-pose stub reads as "stop"."""

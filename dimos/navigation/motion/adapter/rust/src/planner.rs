@@ -67,12 +67,21 @@ pub struct Config {
     /// lidar's, not the robot's. tf resolves it into the body; messages are
     /// dropped until the mount leg arrives.
     pub base_frame: String,
-    /// Plan when an input that MATTERS changed -- a new local map, or a global
-    /// route that is not the one already planned against -- rather than on
-    /// every tick of the clock. The planner ticks at 5 Hz over a 1 Hz map, so
-    /// four ticks in five re-solve an unchanged world; the follower tracks the
-    /// published path as the robot moves and needs no republish to do it.
+    /// Plan when an input that MATTERS changed -- a new local map, or a carrot
+    /// that moved -- rather than on every tick of the clock. The planner ticks
+    /// at 5 Hz over a 1 Hz map, so four ticks in five re-solve an unchanged
+    /// world; the follower tracks the published path as the robot moves and
+    /// needs no republish to do it.
     pub replan_on_change: bool,
+    /// How far the carrot has to move to be worth re-solving for. The route it
+    /// rides on is republished at ~1 Hz with its head trimmed to the robot and
+    /// its tail re-solved, so the waypoints move every time and the carrot does
+    /// not -- gating on the array would dedup nothing.
+    ///
+    /// The python's `reset_carrot_m` twin does not cross: it only decides when
+    /// to reset a stateful episode, and the rust target planner has no state.
+    #[validate(range(min = 0.0))]
+    pub replan_carrot_m: f64,
     /// What counts as an obstacle (`obstacles.rs`). "body_band" reads the cloud
     /// against the surface the feet stand on, which the embodiment knows the
     /// base's height above; "raw_band" is the absolute 0.05..0.45 slice the
@@ -115,9 +124,6 @@ struct Shared {
     /// scene: the base rides `Vert::base_height` above it.
     ground_z: Option<f64>,
     global_xy: Option<Vec<[f64; 2]>>,
-    /// Bumped only when the route actually MOVED, not per arrival: MLS
-    /// republishes at ~1 Hz and holds still for seconds at a time.
-    route_seq: u64,
 }
 
 #[derive(Module)]
@@ -210,12 +216,8 @@ impl MotionPlanner {
             .iter()
             .map(|p| [p.pose.position.x, p.pose.position.y])
             .collect();
-        let route = (!xy.is_empty()).then_some(xy);
         let mut s = self.shared.lock().expect("shared mutex");
-        if route_changed(s.global_xy.as_deref(), route.as_deref()) {
-            s.route_seq = s.route_seq.wrapping_add(1);
-        }
-        s.global_xy = route;
+        s.global_xy = (!xy.is_empty()).then_some(xy);
     }
 }
 
@@ -246,22 +248,29 @@ pub fn carrot_along(route: &[[f64; 2]], robot: (f64, f64), lookahead: f64) -> Op
     Some((last[0], last[1]))
 }
 
-/// Is this a different global route, or the same one published again?
+/// Has an input the plan depends on moved since the plan was made?
 ///
-/// MLS republishes at ~1 Hz and holds still for seconds at a time. Re-solving
-/// against a route the plan already accounts for is what the gate exists to
-/// skip, so "changed" has to mean the waypoints moved, not that a message came.
-pub fn route_changed(old: Option<&[[f64; 2]]>, new: Option<&[[f64; 2]]>) -> bool {
-    match (old, new) {
-        (Some(a), Some(b)) => a != b,
-        (None, None) => false,
-        _ => true,
+/// The plan consumes the global route through exactly one quantity -- the
+/// carrot -- so that is what the gate compares. Keying on the waypoint array
+/// instead never dedups anything: MLS trims the route head to the robot on
+/// every ~1 Hz republish and re-solves with tail wobble, so the array moves
+/// every time while the carrot does not move at all.
+pub fn replan_due(
+    gate: bool,
+    planned: Option<(u64, (f64, f64))>,
+    cloud_seq: u64,
+    carrot: (f64, f64),
+    carrot_m: f64,
+) -> bool {
+    if !gate {
+        return true;
     }
-}
-
-/// Has an input the plan depends on arrived since the plan was made?
-pub fn replan_due(gate: bool, inputs: (u64, u64), planned: Option<(u64, u64)>) -> bool {
-    !gate || planned != Some(inputs)
+    match planned {
+        None => true,
+        Some((seq, was)) => {
+            seq != cloud_seq || (was.0 - carrot.0).hypot(was.1 - carrot.1) > carrot_m
+        }
+    }
 }
 
 /// What one tick of the replan loop should do. The python `_plan_loop`'s
@@ -407,7 +416,6 @@ struct Snapshot {
     pose: Option<(f64, f64, f64)>,
     ground_z: Option<f64>,
     route: Option<Vec<[f64; 2]>>,
-    route_seq: u64,
 }
 
 impl Worker {
@@ -422,8 +430,8 @@ impl Worker {
         let mut gate = StaleGate::default();
         let mut viz = RateCap::new(self.config.viz_publish_hz);
         let mut points: Option<(u64, Arc<Vec<[f32; 3]>>)> = None;
-        // The (cloud, route) pair the published plan was made from.
-        let mut planned: Option<(u64, u64)> = None;
+        // The (cloud, carrot) the published plan was made from.
+        let mut planned: Option<(u64, (f64, f64))> = None;
 
         loop {
             ticker.tick().await;
@@ -455,17 +463,24 @@ impl Worker {
                     if gate.recover() {
                         info!("local_map is live again, resuming planning");
                     }
-                    let inputs = (snap.cloud_seq, snap.route_seq);
-                    if !replan_due(self.config.replan_on_change, inputs, planned) {
-                        continue;
-                    }
                     let pose = snap.pose.expect("Plan implies a pose");
                     let route = snap.route.expect("Plan implies a route");
+                    // the carrot is the whole of the route the plan consumes,
+                    // so it is taken every tick and the gate reads it
                     let Some(goal) =
                         carrot_along(&route, (pose.0, pose.1), self.config.goal_lookahead_m)
                     else {
                         continue; // an empty route is stored as None, so unreachable
                     };
+                    if !replan_due(
+                        self.config.replan_on_change,
+                        planned,
+                        snap.cloud_seq,
+                        goal,
+                        self.config.replan_carrot_m,
+                    ) {
+                        continue;
+                    }
                     let cloud = snap.cloud.expect("Plan implies a cloud");
                     // The search is the expensive call in this process, and it
                     // is synchronous. block_in_place keeps it off the runtime's
@@ -483,7 +498,7 @@ impl Worker {
                         ))
                     });
                     if let Some(produced) = produced {
-                        planned = Some(inputs);
+                        planned = Some((snap.cloud_seq, goal));
                         self.publish(&produced, now, &mut viz).await;
                     }
                 }
@@ -507,7 +522,6 @@ impl Worker {
             pose: s.pose,
             ground_z: s.ground_z,
             route: s.global_xy.clone(),
-            route_seq: s.route_seq,
         }
     }
 
@@ -715,6 +729,7 @@ mod tests {
             world_frame: "odom".into(),
             base_frame: "base_link".into(),
             replan_on_change: true,
+            replan_carrot_m: 0.2,
             obstacle_model: "body_band".into(),
             max_map_age_s: 5.0,
             viz_publish_hz: 2.0,
@@ -1019,47 +1034,63 @@ mod tests {
 
     // the replan gate
 
+    const CARROT_M: f64 = 0.2;
+
     #[test]
     fn a_tick_with_nothing_new_does_not_replan() {
-        assert!(!replan_due(true, (7, 2), Some((7, 2))));
+        assert!(!replan_due(
+            true,
+            Some((7, (2.0, 0.0))),
+            7,
+            (2.0, 0.0),
+            CARROT_M
+        ));
     }
 
     #[test]
-    fn a_new_map_or_a_new_route_replans() {
-        assert!(replan_due(true, (8, 2), Some((7, 2))));
-        assert!(replan_due(true, (7, 3), Some((7, 2))));
+    fn a_new_map_or_a_moved_carrot_replans() {
+        assert!(replan_due(
+            true,
+            Some((7, (2.0, 0.0))),
+            8,
+            (2.0, 0.0),
+            CARROT_M
+        ));
+        assert!(replan_due(
+            true,
+            Some((7, (2.0, 0.0))),
+            7,
+            (2.3, 0.0),
+            CARROT_M
+        ));
+    }
+
+    #[test]
+    fn a_republished_route_moves_the_carrot_by_nothing_and_is_not_a_replan() {
+        // MLS trims the route head to the robot and re-solves the tail on
+        // every ~1 Hz republish: the waypoints move, the carrot does not
+        assert!(!replan_due(
+            true,
+            Some((7, (2.0, 0.0))),
+            7,
+            (2.02, -0.01),
+            CARROT_M
+        ));
     }
 
     #[test]
     fn the_first_tick_replans_because_nothing_was_planned_yet() {
-        assert!(replan_due(true, (0, 0), None));
+        assert!(replan_due(true, None, 0, (0.0, 0.0), CARROT_M));
     }
 
     #[test]
     fn an_ungated_planner_replans_on_every_tick() {
-        assert!(replan_due(false, (7, 2), Some((7, 2))));
-    }
-
-    #[test]
-    fn a_route_republished_unchanged_is_not_a_change() {
-        let r = route(&[(0.0, 0.0), (1.0, 0.0)]);
-        assert!(!route_changed(Some(&r), Some(&r)));
-    }
-
-    #[test]
-    fn a_route_that_moved_is_a_change() {
-        let a = route(&[(0.0, 0.0), (1.0, 0.0)]);
-        let b = route(&[(0.0, 0.0), (1.0, 0.1)]);
-        assert!(route_changed(Some(&a), Some(&b)));
-        // and so is one that grew or shrank
-        assert!(route_changed(Some(&a), Some(&route(&[(0.0, 0.0)]))));
-    }
-
-    #[test]
-    fn a_route_appearing_or_going_away_is_a_change() {
-        let r = route(&[(0.0, 0.0), (1.0, 0.0)]);
-        assert!(route_changed(None, Some(&r)));
-        assert!(route_changed(Some(&r), None));
-        assert!(!route_changed(None, None));
+        assert!(replan_due(
+            false,
+            Some((7, (2.0, 0.0))),
+            7,
+            (2.0, 0.0),
+            CARROT_M
+        ));
     }
 }

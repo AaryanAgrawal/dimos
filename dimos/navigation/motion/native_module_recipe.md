@@ -481,7 +481,8 @@ remapped to `planner_path`; the follower track is `hinted`.
   | `goal_lookahead_m` | `5.0` | |
   | `world_frame` | `"odom"` | |
   | `base_frame` | `"base_link"` | tf resolves the sensor-stamped odometry into it |
-  | `replan_on_change` | `True` | plan on a new local map or a moved global route, not on every tick of the clock |
+  | `replan_on_change` | `True` | plan on a new local map or a moved carrot, not on every tick of the clock |
+  | `replan_carrot_m` | `0.2` | how far the carrot must move to earn a replan; the route array moves on every MLS republish and the carrot does not |
   | `obstacle_model` | `"body_band"` | which returns are obstacles (`motion/obstacles.py`); rust validates the name and builds the model from the embodiment's vertical geometry (`emb::vert_by_tag`) |
   | `max_map_age_s` | `5.0` | the staleness guard |
   | `viz_publish_hz` | `2.0` | rate-cap for `plan_body` |
