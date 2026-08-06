@@ -90,9 +90,11 @@ def test_executed_clearance_open_world_is_inf() -> None:
 def test_executed_clearance_beside_wall() -> None:
     r = _result(sc=WALLED)
     clear = executed_clearance(r)
-    # wall inner face at y=0.6, body edge at y=0.25:
-    # ~0.35 of true body clearance riding the corridor centre
-    assert 0.30 < float(np.min(clear)) < 0.40
+    # wall inner face at y=0.6, body edge at y=0.2965 (the GO2 union
+    # re-baselined from 0.50 to 0.593 wide by planner/revision.md): ~0.30 of
+    # true body clearance riding the corridor centre. The footprint sampler
+    # steps past the box edge by up to half a step, so it reads a shade under.
+    assert 0.25 < float(np.min(clear)) < 0.35
 
 
 def test_clean_run_scores_high() -> None:
