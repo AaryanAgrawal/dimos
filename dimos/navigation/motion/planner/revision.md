@@ -44,9 +44,18 @@ one re-baseline, one autoresearch re-earn.
   follower-does mismatch shows up named, not just as wall contact).
 - Referee re-baselined; runtime planner re-earns via the lab on the new spec.
 
+## Speed: eliminated via the governor, not modelled
+
+The envelope only binds where clearance is small, and there both tracks obey
+`speed ≤ governor(clearance)` by contract. So: measure `envelope(mode, speed)`
+on a 2-D grid in the fitted sim (once, to prove monotonicity), then bake one
+runtime row per mode at the speeds the governor permits in tight corridors.
+The search stays speed-free; the planner keeps dealing only in tolerances.
+Hole to close: yaw rate is not clearance-governed — measure the arc row at
+the deployed `max_yaw_rate`, or cap yaw rate in tight segments.
+
 ## Open questions
 
-- Envelope measurement protocol: which speeds per mode; how arcs bin by |wz|.
 - Follower mode discipline in tight segments (crab correction mid-doorway
   exceeds the forward envelope): rely on stamp-encoded slow-down + judge
   metric, or add an explicit constraint?
