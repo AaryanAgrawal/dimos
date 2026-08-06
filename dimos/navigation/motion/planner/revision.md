@@ -154,6 +154,44 @@ spec + gold + referee; phase 2 = the rust candidate re-earns.
   field will not thread a gap gold's box-exact SDF walks, and both scored ~10
   before this revision too. That is what the lab is for.*
 
+## Amendment: standing is not the union (adopted 2026-08-07)
+
+The envelope split feasibility per-heading but left every *seed-entry* test on
+the union: the witness (`scenarios.py` / `planner.rs`) and the rust repair's
+`free()` all ask "does the union fit" at a pose the route only ever justified
+with a drift row. So the planner threads a row-passable gap, the robot follows
+it in, and the next replan from mid-gap refuses — single-pose stub, follower
+holds, stuck until timeout. `--score --gen 40`: 6/40 fail (5 timeouts + 1
+collision); gen000 freezes at a pose reading union +0.033 < margin 0.05 while
+the nose row reads +0.121. Pre-envelope this was impossible: one shape meant
+"the plan accepted this pose" and "the witness accepts it" were the same test.
+
+The doctrine error is "standing has no direction of travel, so the union is
+the honest shape." Standing occupies the *static body*, not the union of all
+swept walking boxes. No new bake needed: use the **intersection of all
+envelope rows** — for GO2, 0.781 × 0.416 at off_x −0.039 (union is
+0.883 × 0.593). It is the largest shape nested in every row, so the invariant
+holds *by construction*: a pose whose row clears the margin also passes the
+witness — **replanning from your own emitted route can never refuse.**
+
+- Witness reads the intersection box (gold + rust); rust `fit_bin`/repair
+  predicate likewise. Derived from the envelope at construction, mirrored-`off_y`
+  union of each row's ± drift like `envelope_at` does; falls back to the
+  union box for embodiments with no measured envelope (nothing changes there).
+- Turn-in-place *edges* keep the union — that is real motion sweeping the full
+  shape, and it correctly forbids a pirouette mid-gap.
+- Gold cache version bumps (`v12-standing-witness`).
+
+Acceptance:
+
+- [ ] New pinned referee test: every k-th pose along every emitted path
+  (gold and candidate, curated + gen), replayed as the start of a fresh query,
+  yields a plan — refusal from your own route is a failure.
+- [ ] `--score --gen 40 -s 'gen*'`: 0 timeouts, 0 collisions (gen014's
+  collision inspected separately if it survives the fix).
+- [ ] Curated + gen batteries re-earn ≥ 107.62 / 102.22 through the unchanged
+  judge; gold gate moves only where refusals became routes.
+
 ## Speed: eliminated via the governor, not modelled
 
 The envelope only binds where clearance is small, and there both tracks obey
