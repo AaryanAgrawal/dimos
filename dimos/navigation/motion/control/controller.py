@@ -146,6 +146,11 @@ REGISTRY = {
     # the seed's names before the tracks split; kept so old invocations work
     "pursuit": "dimos.navigation.motion.control.laws.seed:make",
     "pursuit-rs": "dimos.navigation.motion.control.laws.seed:make_rust",
+    # The learned candidate. A string, not an import: this module stays
+    # ignorant of research (motion/test_layering.py), and `load` only resolves
+    # it when someone asks for it by name -- an untrained checkout gets the
+    # FileNotFoundError from the candidate, not an import error here.
+    "ml": "dimos.navigation.motion.control.research.ml.candidate:make",
 }
 
 BUILD_CMD = (

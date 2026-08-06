@@ -28,6 +28,10 @@ python -m dimos.navigation.motion.control --view -s slalom --policy ml-trajector
 uv run maturin develop --uv --release -m dimos/navigation/motion/control/rust/Cargo.toml
 python -m dimos.navigation.motion.control --score --controller seed-rs
 
+# the learned candidate (PPO; research/ml/README.md) -- train first, then score
+python -m dimos.navigation.motion.control.research.ml.train --jobs 12
+python -m dimos.navigation.motion.control --score --controller ml
+
 # domain randomization (per-episode mechanism draws)
 python -m dimos.navigation.motion.control --score --dr --seed 3
 
