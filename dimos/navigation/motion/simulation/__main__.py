@@ -69,6 +69,12 @@ def main() -> None:
         help="use the best-known configuration from FINDINGS (physics, command "
         "delay, actuator lag); --physics entries override individual keys",
     )
+    ap.add_argument(
+        "--preset",
+        default=None,
+        help="named physics: 'fitted' (the validated tune), 'stock', or a path "
+        "to a preset JSON written by search.py --save-preset",
+    )
     ap.add_argument("--command-delay", type=float, default=None, help="seconds")
     ap.add_argument("--actuator-tau", type=float, default=None, help="seconds")
     ap.add_argument(
@@ -93,10 +99,11 @@ def main() -> None:
     )
     delay = args.command_delay
     tau = args.actuator_tau
-    if args.fitted:
-        overrides = {**ev.FITTED_PHYSICS, **overrides}
-        delay = ev.FITTED_COMMAND_DELAY if delay is None else delay
-        tau = ev.FITTED_ACTUATOR_TAU if tau is None else tau
+    if args.fitted or args.preset:
+        preset = ev.load_preset(args.preset)
+        overrides = {**preset.physics, **overrides}
+        delay = preset.command_delay if delay is None else delay
+        tau = preset.actuator_tau if tau is None else tau
     delay = 0.0 if delay is None else delay
     tau = 0.0 if tau is None else tau
 

@@ -26,6 +26,11 @@ difference clearly exceeds that noise, so :class:`Report` carries the ratio.
 hook a parameter search drives:
 
     evaluate(DATASET, POLICY, physics={"armature": 0.03, "damping": 2.0})
+
+A named bundle of those overrides is a :class:`Preset`. ``fitted`` is the
+validated tune and the default everywhere; a search writes its winner out under
+a new name rather than over it, so a refit against messy data can never cost us
+a working simulator.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 import contextlib
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +166,113 @@ FITTED_ACTUATOR_TAU = 0.01510
 
 # The searched parameter space; apply_physics/_physics accept nothing else.
 PHYSICS_KEYS = frozenset(FITTED_PHYSICS)
+
+
+@dataclass(frozen=True)
+class Preset:
+    """A named physics configuration: everything a rollout needs to be reproducible.
+
+    Presets are pluggable so a refit against messy data cannot cost us a
+    validated tune. :data:`BUILTIN_PRESETS` holds the ones that live in code and
+    are immutable; a search writes its winner to JSON under a NEW name, which
+    ``--preset <path>.json`` then selects alongside them.
+    """
+
+    name: str
+    physics: dict[str, float] = field(default_factory=dict)
+    command_delay: float = 0.0
+    actuator_tau: float = 0.0
+
+    @classmethod
+    def from_params(cls, name: str, params: dict[str, float]) -> Preset:
+        """Build one from a search's flat parameter dict."""
+        rest = dict(params)
+        delay = float(rest.pop("command_delay", 0.0))
+        tau = float(rest.pop("actuator_tau", 0.0))
+        unknown = set(rest) - PHYSICS_KEYS
+        if unknown:
+            raise ValueError(f"unknown physics parameter(s): {sorted(unknown)}")
+        return cls(name=name, physics=rest, command_delay=delay, actuator_tau=tau)
+
+    def params(self) -> dict[str, float]:
+        """The flat dict a search suggests, the inverse of :meth:`from_params`."""
+        return {
+            **self.physics,
+            "command_delay": self.command_delay,
+            "actuator_tau": self.actuator_tau,
+        }
+
+    def save(self, path: str | Path) -> Path:
+        """Write the preset as JSON. Refuses to write under a built-in name.
+
+        That refusal is the whole point: a search that beats the current tune on
+        its own recordings has not necessarily beaten it anywhere else, so it
+        gets a new name and stands next to the old one rather than replacing it.
+        """
+        if self.name in BUILTIN_PRESETS:
+            raise ValueError(
+                f"{self.name!r} is a built-in preset and cannot be overwritten. "
+                "Name the search's result something new, e.g. 'field_20260806'."
+            )
+        out = Path(path)
+        out.write_text(
+            json.dumps(
+                {
+                    "name": self.name,
+                    "physics": self.physics,
+                    "command_delay": self.command_delay,
+                    "actuator_tau": self.actuator_tau,
+                },
+                indent=2,
+            )
+        )
+        return out
+
+    @classmethod
+    def load(cls, path: str | Path) -> Preset:
+        d = json.loads(Path(path).read_text())
+        return cls(
+            name=d.get("name", Path(path).stem),
+            physics=dict(d.get("physics", {})),
+            command_delay=float(d.get("command_delay", 0.0)),
+            actuator_tau=float(d.get("actuator_tau", 0.0)),
+        )
+
+
+# Stock menagerie physics, i.e. no overrides at all -- the thing --fitted is
+# visibly better than.
+STOCK = Preset(name="stock")
+
+# The validated two-recording joint fit. This is the tune everything defaults
+# to; it is never rewritten by a search.
+FITTED = Preset(
+    name="fitted",
+    physics=dict(FITTED_PHYSICS),
+    command_delay=FITTED_COMMAND_DELAY,
+    actuator_tau=FITTED_ACTUATOR_TAU,
+)
+
+BUILTIN_PRESETS: dict[str, Preset] = {p.name: p for p in (STOCK, FITTED)}
+DEFAULT_PRESET = "fitted"
+
+
+def load_preset(name: str | None = None) -> Preset:
+    """A preset by built-in name, or from a JSON file a search wrote.
+
+    ``None`` is :data:`DEFAULT_PRESET`, so every entry point defaults to the
+    validated tune without repeating the name.
+    """
+    if name is None:
+        name = DEFAULT_PRESET
+    if name in BUILTIN_PRESETS:
+        return BUILTIN_PRESETS[name]
+    path = Path(name)
+    if path.is_file():
+        return Preset.load(path)
+    raise ValueError(
+        f"unknown preset {name!r}: expected one of {sorted(BUILTIN_PRESETS)} "
+        "or a path to a preset JSON written by search.py --save-preset"
+    )
 
 
 def virtual_tracker(

@@ -2,7 +2,9 @@
 
 MuJoCo Go2 fitted to real-robot recordings (VR-tracker pose + the executor's
 commanded joint targets), close enough to train against. `FITTED_*` in
-`evaluate.py` is the validated physics; `FINDINGS.md` is the full story.
+`evaluate.py` is the validated physics, exposed as the `fitted` preset and the
+default everywhere; a search writes its winner under a new name beside it,
+never over it. `FINDINGS.md` is the full story.
 Self-contained: this repo's venv only, data via
 `get_data("ml-trajectory-research/...")`.
 

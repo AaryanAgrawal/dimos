@@ -207,3 +207,70 @@ def test_empty_physics_is_a_no_op():
         assert go2_model.load is original
     with _physics({}):
         assert go2_model.load is original
+
+
+# ----------------------------------------------------------------- presets --
+
+
+def test_the_default_preset_is_the_validated_tune():
+    from dimos.navigation.motion.simulation.evaluate import (
+        FITTED_ACTUATOR_TAU,
+        FITTED_COMMAND_DELAY,
+        FITTED_PHYSICS,
+        load_preset,
+    )
+
+    p = load_preset()
+    assert p.name == "fitted"
+    assert p.physics == FITTED_PHYSICS
+    assert p.command_delay == FITTED_COMMAND_DELAY
+    assert p.actuator_tau == FITTED_ACTUATOR_TAU
+
+
+def test_a_search_cannot_write_over_a_builtin_preset(tmp_path):
+    """The whole point of the registry: a refit on messy data must not be able
+    to cost us a tune that was validated on good data."""
+    from dimos.navigation.motion.simulation.evaluate import Preset
+
+    winner = Preset.from_params("fitted", {"armature": 0.5, "command_delay": 0.2})
+    with pytest.raises(ValueError, match="cannot be overwritten"):
+        winner.save(tmp_path / "fitted.json")
+
+
+def test_a_new_preset_round_trips_and_loads_by_path(tmp_path):
+    from dimos.navigation.motion.simulation.evaluate import Preset, load_preset
+
+    params = {"armature": 0.02, "damping": 0.4, "command_delay": 0.05, "actuator_tau": 0.01}
+    out = Preset.from_params("field_20260806", params).save(tmp_path / "field.json")
+    back = load_preset(str(out))
+    assert back.name == "field_20260806"
+    assert back.physics == {"armature": 0.02, "damping": 0.4}
+    assert back.command_delay == pytest.approx(0.05)
+    assert back.params() == pytest.approx(params)
+
+
+def test_params_and_from_params_are_inverses():
+    from dimos.navigation.motion.simulation.evaluate import FITTED, Preset
+
+    assert Preset.from_params("fitted", FITTED.params()) == FITTED
+
+
+def test_an_unknown_preset_name_names_the_alternatives():
+    from dimos.navigation.motion.simulation.evaluate import load_preset
+
+    with pytest.raises(ValueError, match="unknown preset"):
+        load_preset("no_such_tune")
+
+
+def test_a_search_result_with_a_junk_key_is_refused():
+    from dimos.navigation.motion.simulation.evaluate import Preset
+
+    with pytest.raises(ValueError, match="unknown physics parameter"):
+        Preset.from_params("x", {"armature": 0.02, "mass": 3.0})
+
+
+def test_stock_is_selectable_and_overrides_nothing():
+    from dimos.navigation.motion.simulation.evaluate import load_preset
+
+    assert load_preset("stock").physics == {}
+    assert load_preset("stock").command_delay == 0.0

@@ -51,7 +51,21 @@ python -m dimos.navigation.motion.simulation.search data/ml-trajectory-research/
 ```
 
 `--seed-fitted` enqueues the current preset as trial 0, so the search has to
-beat it, not rediscover it.
+beat it, not rediscover it. `--seed-preset <name|path.json>` seeds from any
+other preset instead.
+
+**Presets** — named physics, `fitted` (the validated two-recording tune) by
+default everywhere, `stock` for bare menagerie. A search writes its winner to a
+NEW name and never over a built-in:
+
+```bash
+python -m dimos.navigation.motion.simulation.search ... --seed-preset fitted --save-preset field_20260806
+python -m dimos.navigation.motion.simulation --preset field_20260806.json --eval ...
+```
+
+`Preset.save()` refuses a built-in name outright. Field data is messy and a
+refit that wins on one pair may lose everywhere else, so a new tune stands
+*next to* the old one and has to earn the swap.
 
 **Replay the recorded lowcmd** — drop `--policy`. The robot collapses in
 seconds; that is what open-loop replay of a closed loop's commands does, and

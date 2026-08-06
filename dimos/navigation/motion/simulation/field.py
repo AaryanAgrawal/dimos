@@ -23,9 +23,10 @@ side carries what the nav stack commanded (``cmd_vel``, 11 Hz) and where
 Point-LIO says the body went (``odometry``, 30 Hz, stamped on the *sensor*
 frame and resolved to ``base_link`` through the recorded tf); the sidecar
 carries ``sportmodestate`` (300 Hz on-board body-velocity estimate) and
-``lowstate``, which on an Air is uninitialized bytes rather than leg state --
-see :func:`joint_fault`. There is no ``control_log`` with velocities and no
-``vive_pose``, so :mod:`evaluate` cannot read one of these.
+``lowstate`` (500 Hz real joint angles, velocities and torques -- but only once
+the LowState CDR frame is right; :func:`joint_fault` is the guard). There is no
+``control_log`` with velocities and no ``vive_pose``, so :mod:`evaluate` cannot
+read one of these.
 
 The LIO stream is timestamped when the recorder *received* it, which is later
 than the pose it describes. :func:`clock_offset` measures that lag by
@@ -227,21 +228,30 @@ def joint_limits() -> np.ndarray:
 def joint_fault(q: np.ndarray, dq: np.ndarray, tau: np.ndarray, limits: np.ndarray) -> str | None:
     """Why a recorded joint stream cannot be scored, or ``None`` when it can.
 
-    A Go2 Air fills ``motor_state`` with uninitialized bytes rather than leaving
-    it empty: the angles are nonzero, so a presence check passes, but they are
-    noise centred on zero with no velocity or torque beside them. Scoring that
-    yields a large RMS that reads exactly like a wrong motor permutation, so
-    check the physics instead -- an angle outside the joint's own travel is not
-    a mapping bug, it is not an angle.
+    This guard exists because it caught a real one. The dimos CDR decoder used
+    to align nested structs to their widest member, which CDR does not do -- a
+    struct starts where the previous field ended and its first primitive does
+    the aligning. That put ``motor_state`` four bytes late, so ``q`` read as the
+    recorded ``dq``: nonzero, so a presence check passed, and noise-shaped, so
+    the resulting RMS read exactly like a wrong motor permutation. The mapping
+    was never wrong.
+
+    So the test is physical rather than statistical: an angle outside the
+    joint's own travel is not a mis-mapped angle, it is not an angle. Silence
+    from ``dq`` and ``tau_est`` beside it says the frame is off, not the robot.
     """
     out = float(((q < limits[:, 0]) | (q > limits[:, 1])).mean())
     if not np.any(dq) and not np.any(tau):
         return (
-            f"motor_state carries no joint velocity or torque, and {out:.0%} of its "
-            "angles lie outside the joint travel — this unit does not log leg state"
+            f"motor_state carries no joint velocity or torque and {out:.0%} of its "
+            "angles lie outside the joint travel — suspect the LowState CDR frame, "
+            "not the robot"
         )
     if out > OUT_OF_RANGE_MAX:
-        return f"{out:.0%} of recorded joint angles lie outside the Go2 joint travel"
+        return (
+            f"{out:.0%} of recorded joint angles lie outside the Go2 joint travel — "
+            "suspect the LowState CDR frame or the motor permutation"
+        )
     return None
 
 
@@ -593,6 +603,7 @@ class FieldReport:
     joint_fault: str | None = None
     window: WindowStats | None = None
     fell_at: float | None = None  # rollout time the sim base first sank, s
+    preset: str = "stock"  # the named tune the rollout ran under
     physics: dict[str, float] = dc_field(default_factory=dict)
 
     @property
@@ -604,15 +615,16 @@ class FieldReport:
         agg = [b for b in self.bins if b.name == "aggressive"]
         worst = max((b.ratio for b in agg), default=float("nan"))
         verdict = (
-            "fit covers the aggressive regime"
+            f"{self.preset!r} covers the aggressive regime"
             if math.isfinite(worst) and worst < REFIT_RATIO
             else "REFIT: the sim misses the aggressive commands differently than the robot does"
         )
+        name = f"field_{Path(self.pair.zenoh).name.split('.')[0].split('-')[0]}"
         return "\n".join(
             [
                 f"verdict: {verdict} (worst aggressive sim/real error ratio {worst:.2f})",
                 "",
-                "to include this run in a refit:",
+                "to refit including this run -- as a NEW preset, never over 'fitted':",
                 "  python -m dimos.navigation.motion.simulation.search \\",
                 "      data/ml-trajectory-research/unitree_himloco01.mcap \\",
                 "      data/ml-trajectory-research/freewalk_mcf.bin \\",
@@ -620,7 +632,12 @@ class FieldReport:
                 "             data/ml-trajectory-research/v11_final.bin \\",
                 f"      --also {self.pair.zenoh} \\",
                 "             data/ml-trajectory-research/freewalk_mcf.bin \\",
-                "      --seed-fitted --trials 300 --start 0",
+                "      --seed-preset fitted --trials 300 --start 0 \\",
+                f"      --save-preset {name}",
+                "",
+                "then compare the two side by side, and keep both:",
+                f"  python -m dimos.navigation.motion.simulation.field {self.pair.zenoh} \\",
+                f"      --policy data/ml-trajectory-research/freewalk_mcf.bin --preset {name}.json",
                 "",
                 "blocked: search scores through evaluate(), which reads control_log",
                 "and vive_pose. A field pair has neither -- wire load_pair() in as an",
@@ -641,7 +658,8 @@ class FieldReport:
         ]
         if self.physics:
             head.append(
-                "physics " + " ".join(f"{k}={v:g}" for k, v in sorted(self.physics.items()))
+                f"preset {self.preset!r}: "
+                + " ".join(f"{k}={v:g}" for k, v in sorted(self.physics.items()))
             )
 
         if self.fell_at is not None:
@@ -823,6 +841,7 @@ def report(
     physics: dict[str, float] | None = None,
     command_delay: float = 0.0,
     actuator_tau: float = 0.0,
+    preset: str = "stock",
     slew: bool = True,
     view: bool = False,
     ghost: bool = False,
@@ -904,6 +923,7 @@ def report(
         joint_fault=pair.joint_fault,
         window=win,
         fell_at=float(track.t[sank[0]]) if len(sank) else None,
+        preset=preset,
         physics={
             **(physics or {}),
             **({"command_delay": command_delay} if command_delay else {}),
@@ -934,7 +954,13 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=None, help="rollout length")
     ap.add_argument("--lag", type=float, default=None, help="force the LIO clock correction, s")
     ap.add_argument("--physics", default="", help="overrides, e.g. armature=0.03,damping=2.0")
-    ap.add_argument("--fitted", action="store_true", help="the FITTED_* preset from FINDINGS")
+    ap.add_argument("--fitted", action="store_true", help="the validated 'fitted' preset")
+    ap.add_argument(
+        "--preset",
+        default=None,
+        help="named physics: 'fitted' (default tune), 'stock', or a path to a "
+        "preset JSON written by search.py --save-preset",
+    )
     ap.add_argument("--command-delay", type=float, default=None)
     ap.add_argument("--actuator-tau", type=float, default=None)
     ap.add_argument("--no-slew", action="store_true", help="skip the hardware command ramp")
@@ -949,10 +975,12 @@ def main() -> None:
         (k, float(v)) for k, v in (p.split("=", 1) for p in args.physics.split(",") if p)
     )
     delay, tau = args.command_delay, args.actuator_tau
-    if args.fitted:
-        overrides = {**ev.FITTED_PHYSICS, **overrides}
-        delay = ev.FITTED_COMMAND_DELAY if delay is None else delay
-        tau = ev.FITTED_ACTUATOR_TAU if tau is None else tau
+    preset = None
+    if args.fitted or args.preset:
+        preset = ev.load_preset(args.preset)
+        overrides = {**preset.physics, **overrides}
+        delay = preset.command_delay if delay is None else delay
+        tau = preset.actuator_tau if tau is None else tau
 
     pair = load_pair(
         args.zenoh,
@@ -971,6 +999,7 @@ def main() -> None:
             physics=overrides,
             command_delay=0.0 if delay is None else delay,
             actuator_tau=0.0 if tau is None else tau,
+            preset=preset.name if preset is not None else "stock",
             slew=not args.no_slew,
             view=args.view,
             ghost=args.ghost,

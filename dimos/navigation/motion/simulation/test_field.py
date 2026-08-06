@@ -219,8 +219,8 @@ def test_a_plausible_standing_posture_is_accepted():
     assert joint_fault(q, dq, tau, joint_limits()) is None
 
 
-def test_uninitialized_motor_state_is_rejected_rather_than_scored():
-    """The Air fills motor_state with noise: nonzero angles, no dq, no torque.
+def test_a_misframed_decode_is_rejected_rather_than_scored():
+    """A four-byte-late CDR frame reads q off dq: nonzero angles, no dq, no torque.
 
     A presence check passes it and the resulting joint RMS reads exactly like a
     wrong motor permutation, so the check is physical, not statistical.
@@ -231,6 +231,15 @@ def test_uninitialized_motor_state_is_rejected_rather_than_scored():
     fault = joint_fault(q, zero, zero, joint_limits())
     assert fault is not None
     assert "no joint velocity or torque" in fault
+    assert "CDR frame" in fault
+
+
+def test_a_real_standing_recording_passes_the_guard():
+    """The 063428 sidecar's actual stance, once the CDR frame is right."""
+    q = np.tile([0.033, 0.717, -1.566] * 4, (100, 1))
+    alive = np.tile([0.03, -0.01, 0.05] * 4, (100, 1))
+    tau = np.tile([-0.89, -0.05, 7.44] * 4, (100, 1))
+    assert joint_fault(q, alive, tau, joint_limits()) is None
 
 
 def test_out_of_travel_angles_are_rejected_even_with_telemetry_beside_them():

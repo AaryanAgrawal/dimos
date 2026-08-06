@@ -409,24 +409,35 @@ def main() -> None:
     ap.add_argument(
         "--seed-fitted",
         action="store_true",
-        help="start from the FITTED_* preset, so the search must beat it",
+        help="start from the 'fitted' preset, so the search must beat it",
+    )
+    ap.add_argument(
+        "--seed-preset",
+        default=None,
+        help="start from this preset instead: a built-in name or a preset JSON",
+    )
+    ap.add_argument(
+        "--save-preset",
+        default=None,
+        help="write the winner as a NEW named preset, <name>.json. Built-in "
+        "names are refused -- a validated tune is never overwritten by a search",
     )
     args = ap.parse_args()
 
-    if args.also:
-        from dimos.navigation.motion.simulation.evaluate import (
-            FITTED_ACTUATOR_TAU,
-            FITTED_COMMAND_DELAY,
-            FITTED_PHYSICS,
-        )
+    from dimos.navigation.motion.simulation.evaluate import Preset, load_preset
 
+    def save_winner(params: dict[str, float]) -> None:
+        """Persist a search result as a preset that stands next to the built-ins."""
+        if not args.save_preset:
+            return
+        out = Preset.from_params(args.save_preset, params).save(f"{args.save_preset}.json")
+        print(f"\nwrote preset {args.save_preset!r} -> {out}")
+        print(f"run it with:  --preset {out}")
+
+    if args.also:
         seed = (
-            {
-                **FITTED_PHYSICS,
-                "command_delay": FITTED_COMMAND_DELAY,
-                "actuator_tau": FITTED_ACTUATOR_TAU,
-            }
-            if args.seed_fitted
+            load_preset(args.seed_preset).params()
+            if (args.seed_fitted or args.seed_preset)
             else None
         )
         result = run_joint(
@@ -442,6 +453,7 @@ def main() -> None:
         print("params:", json.dumps(result["best_params"], indent=2))
         if args.json:
             Path(args.json).write_text(json.dumps(result, indent=2))
+        save_winner(result["best_params"])
         return
 
     if args.multi:
@@ -473,6 +485,7 @@ def main() -> None:
     print("params:", json.dumps(result["best_params"], indent=2))
     if args.json:
         Path(args.json).write_text(json.dumps(result, indent=2))
+    save_winner(result["best_params"])
 
 
 if __name__ == "__main__":
