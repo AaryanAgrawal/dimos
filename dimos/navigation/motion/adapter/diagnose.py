@@ -15,13 +15,16 @@
 """Why did the local plan change its mind? Offline post-mortem of a recording.
 
 Reads a recording of the go2-zenoh-motion graph (local_map, odometry, tf,
-planner_path, path, nav_cmd_vel, stop_movement) and runs five passes:
+planner_path, path, nav_cmd_vel, stop_movement) and runs six passes:
 
   churn     what the local map does to the planner's world, frame to frame,
             split into crop-boundary (the map window moved) and interior
             (obstacles flickering in place) — the second kind is the bad kind
   plans     when the published plan flipped, holds, and whether the flips land
             on the frames where a new local map arrived
+  tracking  how precisely the body held the plan it was following: cross-track
+            error at every odometry sample, split into a SUSTAINED offset
+            (rolling median) and the gait-bounce bumps riding on it
   replay    the planner re-run on the recorded inputs (same tf-resolved pose and
             carrot the module used), then a one-input-at-a-time ablation that
             attributes each flip to the cloud, the pose, or the carrot
@@ -731,6 +734,69 @@ def plans(rec: Recording) -> list[dict[str, float]]:
     return rows
 
 
+# ----------------------------------------------------------------- tracking --
+
+BUMP_WIN_S = 0.7  # gait-bounce timescale; a rolling median this wide irons it out
+
+
+def tracking(rec: Recording) -> list[dict[str, float]]:
+    """Cross-track error: the odometry track against the plan it was following.
+
+    Raw is the distance to the active plan's polyline at every odometry sample;
+    SUSTAINED is a rolling median over ``BUMP_WIN_S``, so a gait bounce or a
+    one-step stumble reads as a bump while a real offset survives the filter.
+    Holds have no active plan and are skipped.
+    """
+    rows: list[dict[str, float]] = []
+    plan_ts = np.array([t for t, _ in rec.plans])
+    for ts, pose in zip(rec.odom_ts, rec.poses, strict=True):
+        if pose is None or ts not in rec.window:
+            continue
+        k = _before(ts, plan_ts)
+        if k < 0:
+            continue
+        xy = rec.plans[k][1]
+        if is_hold(xy):
+            continue
+        p = np.array(pose[:2])
+        a, b = xy[:-1, :2], xy[1:, :2]
+        ab = b - a
+        tt = np.clip(
+            np.einsum("ij,ij->i", p - a, ab) / (np.einsum("ij,ij->i", ab, ab) + 1e-12), 0, 1
+        )
+        err = float(np.min(np.linalg.norm(p - (a + tt[:, None] * ab), axis=1)))
+        rows.append({"ts": ts, "err": err})
+    if not rows:
+        print("\n=== tracking === no odometry with an active plan in the window")
+        return rows
+    ts_a = np.array([r["ts"] for r in rows])
+    err_a = np.array([r["err"] for r in rows])
+    dt = float(np.median(np.diff(ts_a))) if len(ts_a) > 1 else 0.033
+    half = max(1, round(BUMP_WIN_S / max(dt, 1e-3) / 2))
+    sustained = np.array(
+        [np.median(err_a[max(0, i - half) : i + half + 1]) for i in range(len(err_a))]
+    )
+    for r, s in zip(rows, sustained, strict=True):
+        r["sustained"] = float(s)
+    bump = err_a - sustained
+    worst = np.argsort(sustained)[-3:][::-1]
+    print(f"\n=== tracking ({len(rows)} odom samples against the active plan) ===")
+    print(
+        f"cross-track raw: median {np.median(err_a):.3f} m  p90 "
+        f"{np.percentile(err_a, 90):.3f}  p95 {np.percentile(err_a, 95):.3f}  "
+        f"max {err_a.max():.3f}\n"
+        f"sustained ({BUMP_WIN_S:.1f} s median): median {np.median(sustained):.3f} m  "
+        f"p95 {np.percentile(sustained, 95):.3f}  max {sustained.max():.3f}\n"
+        f"bumps over the sustained floor: p95 {np.percentile(bump, 95):.3f} m  "
+        f"max {bump.max():.3f}"
+    )
+    print(
+        "worst sustained: "
+        + "  ".join(f"{sustained[i]:.3f} m at t={ts_a[i] - rec.t0:.1f}" for i in worst)
+    )
+    return rows
+
+
 # ------------------------------------------------------------------- replay --
 
 
@@ -1393,6 +1459,7 @@ def follower(
 def write_plots(
     churn_rows: list[dict[str, float]],
     plan_rows: list[dict[str, float]],
+    tracking_rows: list[dict[str, float]],
     latency_rows: list[dict[str, float]],
     follower_rows: list[Command],
     out: FsPath,
@@ -1449,6 +1516,26 @@ def write_plots(
             if r["hold"]:
                 p.add(VLine(x=r["ts"], color=color.red.hex(), opacity=0.3))
         p.to_svg(str(out / "plans.svg"))
+    if tracking_rows:
+        p = Plot()
+        p.add(
+            Series(
+                ts=[r["ts"] for r in tracking_rows],
+                values=[r["err"] for r in tracking_rows],
+                label="cross-track (m)",
+                color=color.blue.hex(),
+                opacity=0.5,
+            )
+        )
+        p.add(
+            Series(
+                ts=[r["ts"] for r in tracking_rows],
+                values=[r["sustained"] for r in tracking_rows],
+                label="sustained (m)",
+                color=color.green.hex(),
+            )
+        )
+        p.to_svg(str(out / "tracking.svg"))
     if latency_rows:
         p = Plot()
         for key, label, c in (
@@ -1501,7 +1588,9 @@ def write_plots(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("recording", help="path to the .mcap recording")
-    ap.add_argument("--only", default="churn,plans,replay,latency,follower", help="passes to run")
+    ap.add_argument(
+        "--only", default="churn,plans,tracking,replay,latency,follower", help="passes to run"
+    )
     ap.add_argument(
         "--from",
         dest="start",
@@ -1662,6 +1751,7 @@ def main() -> None:
         churn(rec, args.voxel, load_model("raw_band", emb), rr) if "churn" in passes else []
     )
     plan_rows = plans(rec) if "plans" in passes else []
+    tracking_rows = tracking(rec) if "tracking" in passes else []
     if "replay" in passes:
         model = obstacle_model() or "body_band"
         if replanner is None:
@@ -1679,7 +1769,14 @@ def main() -> None:
                 f"says {room_model} -- measuring the room hint off {room_model} (--model overrides)"
             )
         follower_rows = follower(rec, setup, room_model, args.threshold)
-    write_plots(churn_rows, plan_rows, latency_rows, follower_rows, FsPath(args.plots or str(stem)))
+    write_plots(
+        churn_rows,
+        plan_rows,
+        tracking_rows,
+        latency_rows,
+        follower_rows,
+        FsPath(args.plots or str(stem)),
+    )
     if not args.spawn:
         print(f"rerun: {rrd}")
 
