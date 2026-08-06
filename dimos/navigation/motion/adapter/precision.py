@@ -50,10 +50,14 @@ SETTLE_S = 1.5  # after a plan FLIP, this long is the planner's fault, not contr
 
 
 def flip_windows(rec: Recording) -> list[tuple[float, float]]:
-    """[start, end) spans right after a plan flipped by more than FLIP_M."""
+    """[start, end) spans right after the active plan CHANGED under the body:
+    a flip of more than FLIP_M, or a fresh plan after a hold (the fan phase
+    pivoting onto a new route is a start transient, not tracking)."""
     out = []
     for (_, a), (tb, b) in zip(rec.plans, rec.plans[1:], strict=False):
-        if not is_hold(a) and not is_hold(b) and divergence(a, b) > FLIP_M:
+        if is_hold(b):
+            continue
+        if is_hold(a) or divergence(a, b) > FLIP_M:
             out.append((tb, tb + SETTLE_S))
     return out
 
