@@ -202,7 +202,7 @@ SCENARIOS = [
         [Box(2.0, 1.13, 0.15, 2.0), Box(2.0, -1.13, 0.15, 2.0)],
         goal=(4.0, 0.0),
         expect="safe",
-        note="0.26 m opening, body is 0.50: around or stop, never squeeze",
+        note="0.26 m opening, body is 0.59: around or stop, never squeeze",
     ),
     Scenario(
         "zigzag_room",
@@ -383,8 +383,30 @@ def _write_atomic(path: FilePath, payload: bytes) -> None:
 
 
 # The true body footprint, sampled densely enough that a 4 cm slat cannot
-# slip between sample points (GO2 box 0.85 x 0.50, centered -0.01).
+# slip between sample points (the embodiment's own swept box, per heading).
 _SE2_CACHE = _CACHE_BASE / ".se2_cache.pkl"
+
+# Lattice pitch, as planner/revision.md fixes it. VOXEL is a config constant of
+# the deployment (the map's voxel size, never sniffed from data); FINE is half
+# of it, so every voxel centre lands exactly on a fine sample; CELL is 3 fine
+# samples. PERIOD is the pitch at which all three are commensurate -- 2 cells,
+# 3 voxels, 6 fine samples -- and every grid corner is snapped DOWN onto
+# multiples of it in the scenario's own frame. That is what makes sample
+# positions absolute: an obstacle appearing or vanishing can add whole rows at
+# the edge, but it can never move a sample position, so a lidar return metres
+# behind the robot cannot re-sample the question the search is answering.
+VOXEL = 0.08
+FINE = 0.04  # VOXEL / 2
+CELL = 0.12  # 3 * FINE
+PERIOD = 0.24  # 2 * CELL == 3 * VOXEL == 6 * FINE
+# Free space kept around the working area, in whole periods: the search must be
+# able to swing wide of the obstacles it is routing around.
+_GRID_PAD = 3 * PERIOD  # 0.72
+
+
+def anchor(v: float, period: float = PERIOD) -> float:
+    """Snap a grid corner down onto the frame's own absolute lattice."""
+    return math.floor(v / period) * period
 
 
 def se2_search(
@@ -396,15 +418,22 @@ def se2_search(
     goal: tuple[float, float],
     emb: Embodiment,
     margin: float,
-    cell: float = 0.12,
+    cell: float = CELL,
     yaw_bins: int = 16,
 ) -> np.ndarray | None:
     """The SE(2) lattice search on a prebuilt fine SDF grid — shared by the
     gold oracle (box-exact grid) and any candidate that builds its grid from
-    the cloud. Returns (N, 3) smoothed states or None."""
+    the cloud. Returns (N, 3) smoothed states or None.
+
+    Feasibility is motion-conditioned: an edge is tested against the swept box
+    the embodiment needs for THAT edge's drift angle (move direction minus body
+    yaw), widened by the gait's turning splay when the edge also rotates. The
+    all-gait union stays the fallback -- for embodiments with no measured
+    envelope, for the standing start, and for the turn-in-place edges that have
+    no drift direction at all. See planner/revision.md.
+    """
     fine = float(fgx[1] - fgx[0])
     x0, y0, x1, y1 = bounds
-    offsets = emb.offsets()
     gx = np.arange(x0, x1 + cell, cell)
     gy = np.arange(y0, y1 + cell, cell)
     nx, ny = len(gx), len(gy)
@@ -415,16 +444,72 @@ def se2_search(
         j = np.clip(np.round((py - fgy[0]) / fine).astype(int), 0, len(fgy) - 1)
         return np.asarray(sdf_grid[i, j])
 
-    X, Y = np.meshgrid(gx, gy, indexing="ij")
-    clr = np.zeros((yaw_bins, nx, ny), dtype=np.float32)
+    # Footprint table. The envelope answers every drift angle with one of a
+    # handful of distinct boxes, so they are interned by geometry: the
+    # clearance stack is built once per box, not once per edge.
+    fp_ids: dict[tuple[float, ...], int] = {}
+    fp_offsets: list[np.ndarray] = []
+
+    def footprint(drift: float | None) -> int:
+        box = (
+            (emb.length, emb.width, emb.center_off, 0.0)
+            if drift is None
+            else emb.envelope_at(drift)
+        )
+        key = tuple(round(v, 9) for v in box)
+        if key not in fp_ids:
+            fp_ids[key] = len(fp_offsets)
+            fp_offsets.append(emb.offsets(drift=drift))
+        return fp_ids[key]
+
+    UNION = footprint(None)  # id 0: the veto shape and every fallback
+
+    # 16 directions (8-connected + knight steps, ~26.6 deg resolution).
+    # Knight steps span 2 cells, so their midpoint cells are checked too —
+    # the oracle must not commit the very thin-wall hop it exists to catch.
+    moves = []
+    for di in range(-2, 3):
+        for dj in range(-2, 3):
+            if (di, dj) == (0, 0) or math.gcd(abs(di), abs(dj)) == 2:
+                continue
+            mids = []
+            if max(abs(di), abs(dj)) == 2:
+                mids = [
+                    (math.floor(di / 2.0), math.floor(dj / 2.0)),
+                    (math.ceil(di / 2.0), math.ceil(dj / 2.0)),
+                ]
+            moves.append((di, dj, math.hypot(di, dj) * cell, mids, math.atan2(dj, di)))
+
+    # Per (yaw bin, move): which swept box, and how much extra half-width a
+    # blend edge's curvature costs. `arc_inflate` is per rad-per-metre, so the
+    # edge's own length converts it; half of the extra width is what a
+    # clearance test against the box centre-line has to give up.
+    yaw_step = 2.0 * math.pi / yaw_bins
+    fp_move = [[footprint(head - th) for _, _, _, _, head in moves] for th in thetas]
+    arc_pad = [0.5 * emb.arc_inflate * yaw_step / base for _, _, base, _, _ in moves]
+
+    # Cell centres as fine-grid indices. Both grids hang off the same anchored
+    # corner and cell is a whole number of fine samples, so a footprint offset
+    # is an INTEGER shift of the field — the whole precompute is gathers on
+    # shifted views, and the envelope's extra footprints cost a gather each
+    # rather than a fresh round of coordinate arithmetic.
+    ci = np.round((gx - fgx[0]) / fine).astype(np.intp)
+    cj = np.round((gy - fgy[0]) / fine).astype(np.intp)
+    nfx, nfy = len(fgx), len(fgy)
+    clr = np.full((yaw_bins, len(fp_offsets), nx, ny), -np.inf, dtype=np.float32)
     for bi, th in enumerate(thetas):
         c, s = math.cos(th), math.sin(th)
-        clear = np.full(nx * ny, np.inf)
-        for ox, oy in offsets:
-            wx = X.ravel() + c * ox - s * oy
-            wy = Y.ravel() + s * ox + c * oy
-            clear = np.minimum(clear, lookup(wx, wy))
-        clr[bi] = clear.reshape(nx, ny)
+        for fp in {UNION, *fp_move[bi]}:
+            shifts = {
+                (round((c * ox - s * oy) / fine), round((s * ox + c * oy) / fine))
+                for ox, oy in fp_offsets[fp].tolist()
+            }
+            clear = np.full((nx, ny), np.inf)
+            for di_, dj_ in sorted(shifts):
+                ii = np.clip(ci + di_, 0, nfx - 1)
+                jj = np.clip(cj + dj_, 0, nfy - 1)
+                np.minimum(clear, sdf_grid[np.ix_(ii, jj)], out=clear)
+            clr[bi, fp] = clear
     free = clr > margin
 
     import heapq
@@ -439,40 +524,26 @@ def se2_search(
     si, sj = cell_of(start[:2])
     gi, gj = cell_of(goal)
     result: np.ndarray | None = None
-    if free[sb, si, sj]:
+    if free[sb, UNION, si, sj]:
         # Gait-real costs: walking forward is cheapest, strafing ~1.8x,
         # backing up ~1.5x — the ideal turns to face long legs instead of
         # crabbing through the whole world, yet still backs out of pockets.
-        # 16 directions (8-connected + knight steps, ~26.6 deg resolution).
-        # Knight steps span 2 cells, so their midpoint cells are checked too —
-        # the oracle must not commit the very thin-wall hop it exists to catch.
-        moves = []
-        for di in range(-2, 3):
-            for dj in range(-2, 3):
-                if (di, dj) == (0, 0) or math.gcd(abs(di), abs(dj)) == 2:
-                    continue
-                mids = []
-                if max(abs(di), abs(dj)) == 2:
-                    mids = [
-                        (math.floor(di / 2.0), math.floor(dj / 2.0)),
-                        (math.ceil(di / 2.0), math.ceil(dj / 2.0)),
-                    ]
-                moves.append((di, dj, math.hypot(di, dj) * cell, mids))
-
-        def move_cost(base: float, di: int, dj: int, th: float) -> float:
-            rel = math.atan2(dj, di) - th
+        def move_cost(base: float, head: float, th: float) -> float:
+            rel = head - th
             f, l = math.cos(rel), math.sin(rel)
             return base * (
                 1.0 + (emb.strafe - 1.0) * abs(l) + ((emb.reverse - 1.0) if f < 0 else 0.0)
             )
 
-        yaw_cost = emb.yaw_w * (2 * math.pi / yaw_bins)
+        yaw_cost = emb.yaw_w * yaw_step
 
         # Comfort: clearance under CLEAR_PREF is charged progressively (up
         # to ~2.5x at contact) — swing wide when it's free, thread tight
         # gaps only when the world demands it. Beyond CLEAR_PREF: no charge.
+        # Charged on the UNION clearance: a preference has to be comparable
+        # across edges, so it may not shift with the edge's own drift row.
         pref = emb.comfort
-        tight = 1.0 + 1.5 * np.clip((pref - clr) / pref, 0.0, 1.0)
+        tight = 1.0 + 1.5 * np.clip((pref - clr[:, UNION]) / pref, 0.0, 1.0)
         dist = np.full((yaw_bins, nx, ny), np.inf)
         prev = np.full((yaw_bins, nx, ny, 3), -1, dtype=np.int16)
         dist[sb, si, sj] = 0.0
@@ -485,33 +556,44 @@ def se2_search(
             if (i, j) == (gi, gj):
                 goal_state = (b_, i, j)
                 break
-            for di, dj, base, mids in moves:
+            # Straight edges keep the body yaw, so the drift row is fixed by
+            # the bin the edge leaves from and no curvature is added.
+            fps = fp_move[b_]
+            for m, (di, dj, base, mids, head) in enumerate(moves):
                 ni, nj = i + di, j + dj
-                if not (0 <= ni < nx and 0 <= nj < ny and free[b_, ni, nj]):
+                fp = fps[m]
+                if not (0 <= ni < nx and 0 <= nj < ny and free[b_, fp, ni, nj]):
                     continue
-                if any(not free[b_, i + mi, j + mj] for mi, mj in mids):
+                if any(not free[b_, fp, i + mi, j + mj] for mi, mj in mids):
                     continue
-                c_ = move_cost(base, di, dj, thetas[b_]) * float(tight[b_, ni, nj])
+                c_ = move_cost(base, head, thetas[b_]) * float(tight[b_, ni, nj])
                 if d + c_ < dist[b_, ni, nj]:
                     dist[b_, ni, nj] = d + c_
                     prev[b_, ni, nj] = (b_, i, j)
                     heapq.heappush(q, (d + c_, b_, ni, nj))
             for nb in ((b_ + 1) % yaw_bins, (b_ - 1) % yaw_bins):
                 yc = yaw_cost * float(tight[nb, i, j])
-                if free[nb, i, j] and d + yc < dist[nb, i, j]:
+                # A turn in place has no direction of travel and therefore no
+                # drift row: the union is the honest shape for it (and covers
+                # the measured turn-in-place box with room to spare).
+                if free[nb, UNION, i, j] and d + yc < dist[nb, i, j]:
                     dist[nb, i, j] = d + yc
                     prev[nb, i, j] = (b_, i, j)
                     heapq.heappush(q, (d + yc, nb, i, j))
                 # Blend edges: walk and turn in the same step, discounted —
                 # without these the lattice can only express turn-THEN-walk,
-                # so it rotated in place even in open space.
-                for di, dj, base, mids in moves:
+                # so it rotated in place even in open space. Judged at the yaw
+                # they arrive in, as their cells always were, and widened by
+                # the splay one bin of turn over their own length costs.
+                nfps = fp_move[nb]
+                for m, (di, dj, base, mids, head) in enumerate(moves):
                     ni, nj = i + di, j + dj
-                    if not (0 <= ni < nx and 0 <= nj < ny and free[nb, ni, nj]):
+                    fp, pad = nfps[m], arc_pad[m]
+                    if not (0 <= ni < nx and 0 <= nj < ny and clr[nb, fp, ni, nj] > margin + pad):
                         continue
-                    if any(not free[nb, i + mi, j + mj] for mi, mj in mids):
+                    if any(clr[nb, fp, i + mi, j + mj] <= margin + pad for mi, mj in mids):
                         continue
-                    c_ = (move_cost(base, di, dj, thetas[b_]) + 0.5 * yaw_cost) * float(
+                    c_ = (move_cost(base, head, thetas[b_]) + 0.5 * yaw_cost) * float(
                         tight[nb, ni, nj]
                     )
                     if d + c_ < dist[nb, ni, nj]:
@@ -529,30 +611,41 @@ def se2_search(
             # straight SE(2) interpolations (yaw = shortest arc) whenever every
             # interpolated body pose clears the margin — the staircase is
             # lattice quantization, not the optimum.
-            def pose_clear(x: float, y: float, th: float) -> float:
+            def pose_clear(x: float, y: float, th: float, drift: float | None = None) -> float:
+                off = fp_offsets[footprint(drift)]
                 c_, s_ = math.cos(th), math.sin(th)
-                wx = x + c_ * offsets[:, 0] - s_ * offsets[:, 1]
-                wy = y + s_ * offsets[:, 0] + c_ * offsets[:, 1]
+                wx = x + c_ * off[:, 0] - s_ * off[:, 1]
+                wy = y + s_ * off[:, 0] + c_ * off[:, 1]
                 return float(np.min(lookup(wx, wy)))
 
             def seg_free(a: np.ndarray, b: np.ndarray, floor: float) -> bool:
                 # A shortcut may never get closer to the world than the raw
                 # detour it replaces (capped at the comfort preference) —
                 # else smoothing re-cuts the corners the cost paid to avoid.
+                # A shortcut is one long edge, so it gets the same treatment
+                # the lattice's edges do: its own drift row, widened by its
+                # own curvature. Judging it against the union instead would
+                # forbid every shortcut through a gap the lattice just proved
+                # the body walks down nose-first.
                 dyaw = math.remainder(b[2] - a[2], 2 * math.pi)
-                steps = max(
-                    2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.06), int(abs(dyaw) / 0.15)
-                )
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                span = math.hypot(dx, dy)
+                head = math.atan2(dy, dx) if span > 1e-9 else None
+                pad = 0.5 * emb.arc_inflate * abs(dyaw) / span if span > 1e-9 else 0.0
+                steps = max(2, int(span / 0.06), int(abs(dyaw) / 0.15))
                 for t in np.linspace(0.0, 1.0, steps + 1):
+                    th = a[2] + t * dyaw
                     if (
                         pose_clear(
-                            a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * dyaw
+                            a[0] + t * dx, a[1] + t * dy, th, None if head is None else head - th
                         )
-                        <= floor
+                        <= floor + pad
                     ):
                         return False
                 return True
 
+            # The raw states' own clearance is the reference the shortcut has
+            # to hold: a standing pose has no drift, so it is a union reading.
             raw_clear = np.array([pose_clear(x, y, th) for x, y, th in raw])
             keep = [0]
             while keep[-1] < len(raw) - 1:
@@ -577,7 +670,7 @@ def se2_path(
     goal: tuple[float, float],
     emb: Embodiment = GO2,
     margin: float | None = None,
-    cell: float = 0.12,
+    cell: float = CELL,
     yaw_bins: int = 16,
     pad: float = 1.5,
 ) -> np.ndarray | None:
@@ -590,7 +683,9 @@ def se2_path(
     if margin is None:
         margin = emb.precision  # below control precision, clearance is fiction
     key = hashlib.sha256(
-        repr(("v8-shared-search", boxes, start, goal, emb, margin, cell, yaw_bins, pad)).encode()
+        repr(
+            ("v9-anchored-envelope", boxes, start, goal, emb, margin, cell, yaw_bins, pad)
+        ).encode()
     ).hexdigest()
     memo: dict[str, np.ndarray | None] = {}
     if _SE2_CACHE.exists():
@@ -607,12 +702,15 @@ def se2_path(
         o = b.outline(0.0)
         xs.extend(o[:, 0])
         ys.extend(o[:, 1])
-    x0, y0 = min(xs) - pad, min(ys) - pad
+    # The working area's LOW corner is snapped down onto the scenario frame's
+    # own absolute lattice; the high corner only ever adds rows. So a box
+    # appearing or vanishing anywhere changes which samples exist, never where
+    # they are, and the search keeps answering the same question.
+    x0, y0 = anchor(min(xs) - pad), anchor(min(ys) - pad)
     x1, y1 = max(xs) + pad, max(ys) + pad
 
-    fine = 0.05
-    fgx = np.arange(x0 - 0.6, x1 + 0.6, fine)
-    fgy = np.arange(y0 - 0.6, y1 + 0.6, fine)
+    fgx = np.arange(x0 - _GRID_PAD, x1 + _GRID_PAD, FINE)
+    fgy = np.arange(y0 - _GRID_PAD, y1 + _GRID_PAD, FINE)
     FX, FY = np.meshgrid(fgx, fgy, indexing="ij")
     P = np.column_stack([FX.ravel(), FY.ravel()])
     sdf = np.full(len(P), np.inf)
