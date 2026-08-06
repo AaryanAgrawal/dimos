@@ -258,7 +258,31 @@ sensor-space trick only cancels to first order. Ten minutes on the robot.
 * `speed_lag` is the weakest surviving statistic (sim 0.12 vs real 0.08 s,
   the one residual above 1 after the collapse in absolute terms).
 
-## E. Now: train against it
+## E. Tune the low-speed command gain — the sim undertracks, the robot does not
+
+The fitted sim undershoots the command systematically at the slow end of the
+band. The robot does not. On the field pair `20260806-063428` the on-board
+estimator reads gain 0.82 at command 0.31, 0.81 at 0.44, 0.80 at 0.61 — flat.
+The sim reads 0.57–0.70 at 0.35 and 0.69–0.79 at 0.50, converging on reality
+only by ~0.5 (the whole grid is in `planner/envelope_results.md`).
+
+It matters where it is worst. The slow end is exactly the band the governor
+commands in tight places, so anything measured there — the envelope rows a
+plan's feasibility rides on, a learned follower's crawl — is measured on a
+robot that does not exist: a sim cell commanded 0.35 is a robot doing 0.22.
+It is also why `envelope.py --bake` uses stand + 0.35 + 0.50 and treats 0.35
+as the slowest *executable* row rather than trusting a 0.2 cell.
+
+`speed_gain` is already a fitted statistic, so this is not the fit ignoring the
+error — it is the fit never having been shown it. Both VR recordings live in a
+1.5 m box at walking pace, so the gain is fitted where sim and robot already
+agree and extrapolates below it. The tuning move is therefore data first, not
+parameters: report `speed_gain` **per command bucket** (`metrics._gain` fits one
+slope over the whole run today) and refit with a deliberately slow recording in
+the set — §C's "longer straight lines", walked at 0.2–0.35. Bending the current
+fit toward one end of a band it was never shown would just move the error.
+
+## F. Now: train against it
 
 The project goal, and A is green. The matched sim is the environment; the
 fitted config is the domain-randomization centre, and the noise-floor
