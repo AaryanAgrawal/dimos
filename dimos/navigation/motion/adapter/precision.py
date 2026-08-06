@@ -58,14 +58,22 @@ def flip_windows(rec: Recording) -> list[tuple[float, float]]:
     return out
 
 
-def frontier(rec: Recording, steady: bool = True) -> tuple[np.ndarray, int]:
-    """([speed, cross-track] rows, samples dropped as flip transients).
+def frontier(rec: Recording, by: str = "commanded", steady: bool = True) -> tuple[np.ndarray, int]:
+    """([binned speed, achieved speed, cross-track] rows, flip-transient drops).
 
+    ``by`` picks the x-axis speed — the question being asked:
+      commanded  the follower's own twist: "asked for v, how precise?"
+      achieved   the body's actual speed (self-selected: slow hides errors)
+      ceiling    the plan stamps' permission: "allowed v, how precise?"
     ``steady`` drops samples inside SETTLE_S after a plan flip — the body
     chasing a changed plan measures the planner's indecision, not control.
     """
+    from dimos.navigation.motion.control.profile import decode_ceilings
+
     plan_ts = np.array([t for t, _ in rec.plans])
+    twist_ts = np.array([t for t, _ in rec.twists])
     windows = flip_windows(rec) if steady else []
+    ceilings: dict[int, np.ndarray | None] = {}
     rows = []
     dropped = 0
     n = len(rec.odom_ts)
@@ -84,7 +92,7 @@ def frontier(rec: Recording, steady: bool = True) -> tuple[np.ndarray, int]:
         if pa is None or pb is None or rec.odom_ts[b] <= rec.odom_ts[a]:
             continue
         step = np.array(pb[:2]) - np.array(pa[:2])
-        speed = float(np.linalg.norm(step) / (rec.odom_ts[b] - rec.odom_ts[a]))
+        achieved = float(np.linalg.norm(step) / (rec.odom_ts[b] - rec.odom_ts[a]))
         xy = rec.plans[k][1]
         p = np.array(pose[:2])
         s0, s1 = xy[:-1, :2], xy[1:, :2]
@@ -92,20 +100,38 @@ def frontier(rec: Recording, steady: bool = True) -> tuple[np.ndarray, int]:
         tt = np.clip(
             np.einsum("ij,ij->i", p - s0, seg) / (np.einsum("ij,ij->i", seg, seg) + 1e-12), 0, 1
         )
-        err = float(np.min(np.linalg.norm(p - (s0 + tt[:, None] * seg), axis=1)))
-        rows.append((speed, err))
-    return np.array(rows).reshape(-1, 2), dropped
+        d2 = np.linalg.norm(p - (s0 + tt[:, None] * seg), axis=1)
+        err = float(np.min(d2))
+        if by == "achieved":
+            x = achieved
+        elif by == "commanded":
+            j = _before(ts, twist_ts)
+            if j < 0:
+                continue
+            vx, vy, _ = rec.twists[j][1]
+            x = float(np.hypot(vx, vy))
+        else:  # ceiling
+            if k not in ceilings:
+                ceilings[k] = decode_ceilings(rec.plan_msgs[k])
+            ceil = ceilings[k]
+            if ceil is None:
+                continue
+            wp = min(int(np.argmin(d2)), len(ceil) - 1)
+            x = float(ceil[wp])
+        rows.append((x, achieved, err))
+    return np.array(rows).reshape(-1, 3), dropped
 
 
-def binned(fr: np.ndarray) -> list[tuple[float, int, float, float, float]]:
-    """Per speed bin: (centre, n, p50, p90, p95) for bins with enough samples."""
+def binned(fr: np.ndarray) -> list[tuple[float, int, float, float, float, float]]:
+    """Per speed bin: (centre, n, p50, p90, p95, utilization = achieved/x)."""
     out = []
     edges = np.arange(0.0, fr[:, 0].max() + SPEED_BIN, SPEED_BIN) if len(fr) else np.array([0.0])
     for lo in edges[:-1]:
         m = (fr[:, 0] >= lo) & (fr[:, 0] < lo + SPEED_BIN)
         if m.sum() < MIN_SAMPLES:
             continue
-        e = fr[m, 1]
+        e, x, v = fr[m, 2], fr[m, 0], fr[m, 1]
+        util = float(np.median(v / np.maximum(x, 1e-6))) if lo > 0 else float("nan")
         out.append(
             (
                 float(lo + SPEED_BIN / 2),
@@ -113,6 +139,7 @@ def binned(fr: np.ndarray) -> list[tuple[float, int, float, float, float]]:
                 float(np.percentile(e, 50)),
                 float(np.percentile(e, 90)),
                 float(np.percentile(e, 95)),
+                util,
             )
         )
     return out
@@ -131,6 +158,12 @@ def main() -> None:
         action="store_true",
         help="keep the samples right after plan flips (default: steady-state only)",
     )
+    ap.add_argument(
+        "--by",
+        choices=("commanded", "achieved", "ceiling"),
+        default="commanded",
+        help="x-axis speed: the follower's command (default), the body's actual, or the stamp ceiling",
+    )
     args = ap.parse_args()
 
     from dimos.memory2.vis import color
@@ -145,26 +178,27 @@ def main() -> None:
     # x is SPEED, not time: raw numeric axis, or the formatter prints "0s".."1s"
     p = Plot(
         time_axis=TimeAxis.raw,
-        xlabel="speed (m/s)",
+        xlabel=f"{args.by} speed (m/s)",
         ylabel="cross-track error (m)",
     )
     p.add(HLine(y=floor, color=color.red.hex(), opacity=0.6))
     for idx, path in enumerate(args.recordings):
         rec = load_recording(path, args.base_frame, 5.0, start, end)
-        fr, dropped = frontier(rec, steady=not args.transients)
+        fr, dropped = frontier(rec, by=args.by, steady=not args.transients)
         rows = binned(fr)
         name = FsPath(path).stem.removesuffix(".zenoh")
         print(
             f"\n{name}: {len(fr)} samples with an active plan"
             + (f", {dropped} dropped as flip transients" if dropped else "")
         )
-        print("  speed    n    p50    p90    p95")
+        print("  speed    n    p50    p90    p95   util")
         held = 0.0
-        for centre, n, p50, p90, p95 in rows:
+        for centre, n, p50, p90, p95, util in rows:
             mark = "  <- floor" if p95 <= floor else ""
             if p95 <= floor:
                 held = centre + SPEED_BIN / 2
-            print(f"  {centre:5.2f} {n:5d}  {p50:.3f}  {p90:.3f}  {p95:.3f}{mark}")
+            u = f"{util:5.2f}" if np.isfinite(util) else "    -"
+            print(f"  {centre:5.2f} {n:5d}  {p50:.3f}  {p90:.3f}  {p95:.3f}  {u}{mark}")
         print(
             f"  holds the {floor:.2f} m floor (p95) up to {held:.2f} m/s"
             if held
