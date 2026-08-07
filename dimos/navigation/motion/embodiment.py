@@ -94,25 +94,52 @@ class Embodiment:
         row = min(self.envelope, key=lambda r: abs(r[0] - deg))
         return row[1], row[2], row[3], row[4] if rel >= 0.0 else -row[4]
 
+    def box(self, drift: float | None) -> tuple[float, float, float, float]:
+        """The swept box a heading needs; ``None`` asks for the all-gait union."""
+        if drift is None:
+            return self.length, self.width, self.center_off, 0.0
+        return self.envelope_at(drift)
+
+    def stand_box(self) -> tuple[float, float, float, float]:
+        """The STANDING body: the largest box nested in every envelope row.
+
+        Standing is not the union of the swept walking boxes — it is the static
+        body, and every gait's sweep contains it. The rows are intersected in
+        BOTH drift signs, exactly as `envelope_at` mirrors them, so the result
+        is nested in whatever shape an edge may actually have been cleared by:
+        a pose whose row clears the margin clears this too, which is what makes
+        replanning from a route this planner emitted unable to refuse. No
+        measured envelope means no rows to intersect and the union is all there
+        is — nothing changes for those bodies. See planner/revision.md.
+        """
+        if not self.envelope:
+            return self.length, self.width, self.center_off, 0.0
+        lo = max(r[3] - r[1] / 2.0 for r in self.envelope)
+        hi = min(r[3] + r[1] / 2.0 for r in self.envelope)
+        # Mirroring folds a row's y interval onto |off_y| .. w/2 - |off_y|.
+        half_w = min(r[2] / 2.0 - abs(r[4]) for r in self.envelope)
+        return hi - lo, 2.0 * half_w, (lo + hi) / 2.0, 0.0
+
     def offsets(self, step: float = 0.05, drift: float | None = None) -> np.ndarray:
         """Footprint sample points, dense enough that thin slats can't slip.
 
         ``drift`` None asks for the all-gait union; a body-frame drift angle
         in rad asks for the swept box that heading actually needs.
         """
-        length, width, off_x, off_y = (
-            (self.length, self.width, self.center_off, 0.0)
-            if drift is None
-            else self.envelope_at(drift)
-        )
-        hl, hw = length / 2.0, width / 2.0
-        return np.array(
-            [
-                (x + off_x, y + off_y)
-                for x in np.arange(-hl, hl + step / 2.0, step)
-                for y in np.arange(-hw, hw + step / 2.0, step)
-            ]
-        )
+        return box_offsets(self.box(drift), step)
+
+
+def box_offsets(box: tuple[float, float, float, float], step: float = 0.05) -> np.ndarray:
+    """Footprint sample points of one swept box `(length, width, off_x, off_y)`."""
+    length, width, off_x, off_y = box
+    hl, hw = length / 2.0, width / 2.0
+    return np.array(
+        [
+            (x + off_x, y + off_y)
+            for x in np.arange(-hl, hl + step / 2.0, step)
+            for y in np.arange(-hw, hw + step / 2.0, step)
+        ]
+    )
 
 
 # Baked by `python -m dimos.navigation.motion.simulation.envelope --bake` over

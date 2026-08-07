@@ -51,7 +51,7 @@ from dimos.navigation.motion.control.profile import (
     SPEED_CLEARANCE,
     governor_speed,
 )
-from dimos.navigation.motion.embodiment import EMBODIMENTS, GO2, Embodiment
+from dimos.navigation.motion.embodiment import EMBODIMENTS, GO2, Embodiment, box_offsets
 
 
 @dataclass
@@ -442,11 +442,13 @@ def se2_search(
     the embodiment needs for THAT edge's drift angle (move direction minus body
     yaw), widened by the gait's turning splay when the edge also rotates. The
     all-gait union stays the fallback -- for embodiments with no measured
-    envelope, for the standing start, and for the turn-in-place edges that have
-    no drift direction at all. See planner/revision.md.
+    envelope, and for the turn-in-place edges, which are real motion sweeping
+    the full shape. See planner/revision.md.
 
     The seed is judged at the TRUE start pose rather than at the cell it snaps
-    to: a pose the robot actually occupies may always be departed.
+    to: a pose the robot actually occupies may always be departed. It is judged
+    STANDING -- the static body, the intersection of the envelope's rows -- not
+    on the union of the swept boxes it is not moving through.
     """
     fine = float(fgx[1] - fgx[0])
     x0, y0, x1, y1 = bounds
@@ -466,19 +468,14 @@ def se2_search(
     fp_ids: dict[tuple[float, ...], int] = {}
     fp_offsets: list[np.ndarray] = []
 
-    def footprint(drift: float | None) -> int:
-        box = (
-            (emb.length, emb.width, emb.center_off, 0.0)
-            if drift is None
-            else emb.envelope_at(drift)
-        )
+    def footprint(box: tuple[float, float, float, float]) -> int:
         key = tuple(round(v, 9) for v in box)
         if key not in fp_ids:
             fp_ids[key] = len(fp_offsets)
-            fp_offsets.append(emb.offsets(drift=drift))
+            fp_offsets.append(box_offsets(box))
         return fp_ids[key]
 
-    UNION = footprint(None)  # id 0: the veto shape and every fallback
+    UNION = footprint(emb.box(None))  # id 0: the veto shape and every fallback
 
     # 16 directions (8-connected + knight steps, ~26.6 deg resolution).
     # Knight steps span 2 cells, so their midpoint cells are checked too —
@@ -501,7 +498,7 @@ def se2_search(
     # edge's own length converts it; half of the extra width is what a
     # clearance test against the box centre-line has to give up.
     yaw_step = 2.0 * math.pi / yaw_bins
-    fp_move = [[footprint(head - th) for _, _, _, _, head in moves] for th in thetas]
+    fp_move = [[footprint(emb.box(head - th)) for _, _, _, _, head in moves] for th in thetas]
     arc_pad = [0.5 * emb.arc_inflate * yaw_step / base for _, _, base, _, _ in moves]
 
     # Cell centres as fine-grid indices. Both grids hang off the same anchored
@@ -530,9 +527,9 @@ def se2_search(
 
     import heapq
 
-    def pose_clear(x: float, y: float, th: float, drift: float | None = None) -> float:
+    def pose_clear(x: float, y: float, th: float, fp: int = UNION) -> float:
         """Clearance of the body at an exact pose — no lattice snap anywhere."""
-        off = fp_offsets[footprint(drift)]
+        off = fp_offsets[fp]
         c_, s_ = math.cos(th), math.sin(th)
         wx = x + c_ * off[:, 0] - s_ * off[:, 1]
         wy = y + s_ * off[:, 0] + c_ * off[:, 1]
@@ -555,10 +552,18 @@ def se2_search(
     # does not (door_side: 0.083 true, 0.043 snapped, margin 0.05). The cell
     # still NAMES the seed node; it just no longer decides whether the robot is
     # allowed to be where it already is. Standing has no direction of travel,
-    # so the row is the union -- the same reading the turn-in-place edges take,
-    # and the honest one when the departure gait is not yet chosen. A start
-    # genuinely inside an obstacle still reads negative and still refuses.
-    if pose_clear(*start) > margin:
+    # and the shape it occupies is the STATIC BODY, not the union of every
+    # swept walking box: the intersection of the envelope's rows, which is
+    # nested in each of them, so a pose that any edge was cleared by clears the
+    # witness too and replanning from this planner's own emitted route can
+    # never refuse. On the union it did -- the route threads a gap only a drift
+    # row fits, the robot walks in, and the next replan from mid-gap refuses
+    # forever (gen000 froze at union +0.033 against a 0.05 margin while the
+    # nose row read +0.121). A start genuinely inside an obstacle still reads
+    # negative and still refuses. Interned HERE rather than up with the moving
+    # rows: it is read at one exact pose, so it never wants a clearance plane.
+    STAND = footprint(emb.stand_box())
+    if pose_clear(*start, STAND) > margin:
         # Gait-real costs: walking forward is cheapest, strafing ~1.8x,
         # backing up ~1.5x — the ideal turns to face long legs instead of
         # crabbing through the whole world, yet still backs out of pockets.
@@ -666,12 +671,8 @@ def se2_search(
                 steps = max(2, int(span / 0.06), int(abs(dyaw) / 0.15))
                 for t in np.linspace(0.0, 1.0, steps + 1):
                     th = a[2] + t * dyaw
-                    if (
-                        pose_clear(
-                            a[0] + t * dx, a[1] + t * dy, th, None if head is None else head - th
-                        )
-                        <= floor + pad
-                    ):
+                    fp = UNION if head is None else footprint(emb.box(head - th))
+                    if pose_clear(a[0] + t * dx, a[1] + t * dy, th, fp) <= floor + pad:
                         return False
                 return True
 
@@ -719,7 +720,7 @@ def se2_path(
     law = (MAX_SPEED, MIN_SPEED, SPEED_CLEARANCE, FLOOR_CLEARANCE)
     key = hashlib.sha256(
         repr(
-            ("v11-governor-time", boxes, start, goal, emb, margin, cell, yaw_bins, pad, law)
+            ("v12-standing-witness", boxes, start, goal, emb, margin, cell, yaw_bins, pad, law)
         ).encode()
     ).hexdigest()
     memo: dict[str, np.ndarray | None] = {}
