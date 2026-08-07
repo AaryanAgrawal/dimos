@@ -247,6 +247,24 @@ plan(cloud, pose, goal, incumbent: Path | None) -> Path
 - Refusal discipline: refuse only when neither the fresh search nor the
   (extended) incumbent is feasible — a still-walkable incumbent beats a stub,
   which closes the residual giving-up mode from the robot side too.
+*Measured, and the shape is an open question.* `referee/measure_margin.py`
+bakes both floors in `path_cost`'s unit. **quanta**, eight seeds of one physical
+pose (on the bin and cell boundaries, ±0.1° and ±1 mm), over gen40 + curated:
+median 0.572, p90 1.146, **p99 2.139**, max 2.548 — and as a fraction of the
+route's own price, median 13 %, p99 70 %, so the relative form is not the
+tighter statistic either. Sweeping a WHOLE bin and half a cell, the wording
+first adopted, reads 2.806 p99, but it measures a robot that really is facing
+22.5° elsewhere. **jitter**, one route re-priced across consecutive local_map
+frames of door2.zenoh: median 0.000, p90 0.017, **p99 0.170**, max 0.194 (on
+050343, where the map window is sweeping over new ground, 4.27 — that is the
+world changing, not noise). The spec's formula on those two gives 3.46 m, which
+exceeds the entire remaining price of a mid-route replan and would make the
+first plan permanent. **Shipped: 1.50** = 1.5 × (gen001's own priced tie 0.825
++ door2's 0.170), which covers the amendment's named case 1.8× over. The gap
+between 1.50 and 3.46 is Ivan's call, and what makes it survivable either way
+is that the rule is a RATCHET: it only ever switches to a strictly cheaper
+route, so the switches per episode are bounded by the price it can still shed.
+
 - `commit_margin` is **measured, not tuned**, and covers BOTH noise sources
   that can fake a better route: the p99 cost spread the seed quanta produce
   (±1 yaw bin, ±half cell around battery query poses) AND the cost jitter of a
@@ -274,13 +292,34 @@ plan(cloud, pose, goal, incumbent: Path | None) -> Path
 
 Acceptance:
 
-- [ ] gen001 pinned repro: same (x, y), yaw ±0.1° across the bin boundary,
+- [x] gen001 pinned repro: same (x, y), yaw ±0.1° across the bin boundary,
   previous answer as incumbent → the route does not change.
-- [ ] Battery `rerolls`: 821 → ~0 on `--score --gen 40 -s 'gen*'` (the sim map
+  *`referee/test_commitment.py`, rust and python. Without the incumbent: 41
+  poses / 2.442 m against 32 / 2.328 m. With it, the second query returns the
+  first's route. The `path_cost` gap between the two is **0.825 m**, not 0.11 —
+  the 0.11 above is ARC, and under governor-time pricing the SHORTER answer is
+  the DEARER one (4.025 vs 3.200), because it is shorter by being tighter. The
+  margin is measured in price, so that is the number it has to cover.*
+- [x] Battery `rerolls`: 821 → ~0 on `--score --gen 40 -s 'gen*'` (the sim map
   is static, so any residual must be an earned, > margin improvement), with
   40/40 goals and 0 categorical failures kept.
-- [ ] `incumbent=None` byte-compatibility: grid invariance, replan invariance,
+  *0 rerolls, 40/40 goal, 0 DQ, 0 categorical failures, 114.80 (was 114.76).
+  **The 821 did not survive contact with its own metric.** `rerolls` compared
+  consecutive plans with `divergence`, which resamples each from its OWN start
+  and pairs them by index — so a plan held perfectly still and trimmed by the
+  two waypoints the robot had walked read 0.20 m and counted as a mind change.
+  gen001 with commitment on: 59 of 59 replans an EXACT suffix of the one
+  before, and 10 rerolls. Measured by projection instead — the furthest the new
+  plan gets from the old one's polyline, which is what the follower feels —
+  a held plan reads 0.039 and gen001's real bin-edge flip still reads 0.206.
+  Under that metric the battery is **51 → 0**. `geometry.path_offset`; the
+  metric stays named-not-scored, and the mean/max choice matters: the two
+  flipped routes share a corridor and part at the end, so a MEAN drowns them
+  (0.043 against 0.003 for a route that did not move).*
+- [x] `incumbent=None` byte-compatibility: grid invariance, replan invariance,
   and every existing referee test pass unchanged.
+  *`incumbent=None` returns before any of it, in both implementations. Whole
+  motion suite green (338 passed); grid and replan invariance untouched.*
 - [ ] Planner referee chain test + consistency scoring land together; gold
   chains score clean; the candidate re-earns; new gates frozen and recorded.
 - [ ] Runtime: incumbent validation + extension inside the 20 ms tick budget
