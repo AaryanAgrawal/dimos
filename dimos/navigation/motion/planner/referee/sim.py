@@ -870,7 +870,7 @@ def main() -> None:
 
     hdr = (
         f"{'scenario':<14}{'side':>6}{'lat_max':>9}{'scored':>9}{'truth':>9}{'envio':>7}"
-        f"{'veto':>6}{'fans':>6}{'flicker':>9}{'consist':>9}{'ms':>7}{'gold':>7}  note"
+        f"{'veto':>6}{'fans':>6}{'flicker':>9}{'consist':>9}{'unrn':>5}{'ms':>7}{'gold':>7}  note"
     )
     if not args.quiet and not args.json:
         print(hdr)
