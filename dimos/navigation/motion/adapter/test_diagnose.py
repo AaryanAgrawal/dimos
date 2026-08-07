@@ -29,16 +29,15 @@ from dimos.navigation.motion.adapter.diagnose import (
     Window,
     arclen,
     classify,
-    divergence,
     host_setup,
     is_hold,
     parse_instant,
     payload_ts,
-    resample,
     stamp_dialect,
     voxel_centers,
     voxel_keys,
 )
+from dimos.navigation.motion.geometry import divergence, resample
 
 
 def test_resample_walks_even_arc_length():

@@ -2224,7 +2224,7 @@ fn committed(
     pose: (f64, f64, f64),
     goal: (f64, f64),
     margin: f64,
-) -> Option<Vec<[f64; 3]>> {
+) -> Option<(Vec<[f64; 3]>, bool)> {
     let mut route = trim_to_pose(incumbent, pose);
     if route.len() < 2 {
         return None;
@@ -2237,7 +2237,9 @@ fn committed(
     // search's own answer from the far end when it is not. A goal that JUMPED is
     // the caller's business -- it drops the incumbent rather than asking for a
     // route across the world.
+    let mut carried = false;
     if (cell(end[0]), cell(end[1])) != (cell(goal.0), cell(goal.1)) {
+        carried = true;
         let tgt = [goal.0, goal.1, end[2]];
         if seg_free(w, fps, emb, &end, &tgt, margin) {
             route.push(tgt);
@@ -2257,7 +2259,7 @@ fn committed(
             return None;
         }
     }
-    Some(route)
+    Some((route, carried))
 }
 
 /// Both routes are priced from where the robot actually IS -- the fresh answer
@@ -2312,21 +2314,29 @@ pub fn plan(
         None => None,
         Some(inc) => committed(&mut w, &fps, emb, inc, pose, goal, margin),
     };
-    let states = match (fresh, held) {
-        (fresh, None) => fresh?,
+    // A route that is kept and was not carried anywhere new is ALREADY at
+    // resolution -- it came back through this same `densify` on the tick that
+    // published it. Running it again reproduces it waypoint for waypoint and
+    // pays the swept-station clearance scan for the privilege, which is most of
+    // what the incumbent path costs on a dense field.
+    let (states, dense) = match (fresh, held) {
+        (fresh, None) => (fresh?, false),
         // A still-walkable route beats a stub: refuse only when neither the
         // fresh search nor the carried incumbent has anywhere to go.
-        (None, Some(route)) => route,
-        (Some(f), Some(route)) => {
+        (None, Some((route, carried))) => (route, !carried),
+        (Some(f), Some((route, carried))) => {
             let cf = path_cost(&mut w, &offs, emb, &priced(pose, &f));
             let cr = path_cost(&mut w, &offs, emb, &priced(pose, &route));
             if cf < cr - commit_margin {
-                f
+                (f, false)
             } else {
-                route
+                (route, !carried)
             }
         }
     };
+    if dense {
+        return Some(states);
+    }
     Some(densify(
         &mut w,
         &offs,
