@@ -44,7 +44,7 @@ import numpy as np
 
 from dimos.navigation.motion.control.referee.episode import EpisodeResult
 from dimos.navigation.motion.control.tracks import track_of
-from dimos.navigation.motion.geometry import divergence
+from dimos.navigation.motion.geometry import path_offset
 from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
@@ -211,13 +211,22 @@ REROLL_M = 0.15
 
 
 def rerolls(result: EpisodeResult) -> int:
-    """Count of consecutive active plans that diverge by more than REROLL_M."""
+    """Count of consecutive active plans that diverge by more than REROLL_M.
+
+    Measured by PROJECTION -- the new plan's near field onto the old plan's
+    polyline -- and not by `divergence`, which lines the two up by arc from each
+    plan's own start. The robot advances between replans, so the new plan is
+    made from further along; under `divergence` a plan held perfectly still and
+    trimmed by two waypoints read 0.20 m and counted as a mind change, which is
+    the opposite of what this exists to count. gen001, every replan an exact
+    suffix of the one before it: 10 rerolls by arc, 0 by projection.
+    """
     n = 0
     for prev, new in zip(result.plans[:-1], result.plans[1:], strict=False):
         pxy, nxy = _ref_xy(prev), _ref_xy(new)
         if len(pxy) < 2 or len(nxy) < 2:  # holds/stubs are not route changes
             continue
-        d = divergence(pxy, nxy)
+        d = path_offset(nxy, pxy)
         if math.isfinite(d) and d > REROLL_M:
             n += 1
     return n

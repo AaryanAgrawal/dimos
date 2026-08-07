@@ -103,6 +103,32 @@ def divergence(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(ra[:n] - rb[:n], axis=1).mean())
 
 
+def path_offset(a: np.ndarray, b: np.ndarray, horizon: float = 3.0) -> float:
+    """Mean distance from a's first `horizon` metres ONTO b's polyline (m).
+
+    Geometric, not index-wise, and that is the whole point when the two plans
+    were made from different poses. `divergence` lines them up by arc from each
+    plan's OWN start, so a plan the robot has merely advanced along reads the
+    advance itself: a route held perfectly still and trimmed by two waypoints
+    scores 0.20 m, over any threshold meant to catch a route that MOVED. This
+    projects instead, so a plan that is the previous plan's remainder reads
+    exactly zero however far the robot got, and only a change of shape counts.
+
+    Same construction as `near_field_diff`, on xy arrays rather than on Paths.
+    """
+    ra = resample(a)[: max(1, int(horizon / 0.1))]
+    rb = resample(b)
+    if len(ra) == 0 or len(rb) == 0:
+        return float("nan")
+    if len(rb) == 1:
+        return float(np.mean(np.linalg.norm(ra - rb[0], axis=1)))
+    seg = rb[1:] - rb[:-1]
+    d = ra[:, None, :] - rb[None, :-1, :]
+    t = np.clip((d * seg).sum(-1) / np.maximum((seg**2).sum(-1), 1e-12), 0.0, 1.0)
+    off = d - t[..., None] * seg
+    return float(np.mean(np.sqrt((off**2).sum(-1)).min(axis=1)))
+
+
 def _pose_matrix(pose: Pose) -> np.ndarray:
     """4x4 homogeneous matrix of a pose (verbatim Transform.to_matrix formula)."""
     x, y, z, w = pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w
