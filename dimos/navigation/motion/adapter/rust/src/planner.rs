@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dimos_module::{native_config, warn_throttled, Input, Module, Output, Tf};
-use dimos_motion2_target::planner::{plan, Emb};
+use dimos_motion2_target::planner::{plan, Emb, COMMIT_MARGIN};
 use dimos_motion2_tc::{clearance, stamps};
 use lcm_msgs::nav_msgs::{Odometry, Path};
 use lcm_msgs::sensor_msgs::PointCloud2;
@@ -78,10 +78,16 @@ pub struct Config {
     /// its tail re-solved, so the waypoints move every time and the carrot does
     /// not -- gating on the array would dedup nothing.
     ///
-    /// The python's `reset_carrot_m` twin does not cross: it only decides when
-    /// to reset a stateful episode, and the rust target planner has no state.
     #[validate(range(min = 0.0))]
     pub replan_carrot_m: f64,
+    /// A carrot that jumped this far is a different task, and the route this
+    /// module is holding on to is about the old one -- so it is dropped and the
+    /// next search starts from nothing. Republish noise moves the carrot ~0 m; a
+    /// real reroute moved it 4.6 m in the door recording. The python twin of
+    /// this field used to stop at the module boundary, back when the search
+    /// itself was stateless; the incumbent is an input now, so it crosses.
+    #[validate(range(min = 0.0))]
+    pub reset_carrot_m: f64,
     /// What counts as an obstacle (`obstacles.rs`). "body_band" reads the cloud
     /// against the surface the feet stand on, which the embodiment knows the
     /// base's height above; "raw_band" is the absolute 0.05..0.45 slice the
@@ -356,6 +362,10 @@ impl RateCap {
 ///
 /// Free rather than a method so it can be exercised with no transport, which
 /// is the whole reason the async shell above stays as thin as it is.
+// The argument list IS the module's own state, laid out: everything the search
+// reads, named at the call. A struct would only move the same names one
+// indirection away from it.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_once(
     config: &Config,
     emb: &Emb,
@@ -364,6 +374,7 @@ pub fn plan_once(
     pose: (f64, f64, f64),
     goal: (f64, f64),
     ground_z: f64,
+    incumbent: Option<&[[f64; 3]]>,
 ) -> Path {
     let started = Instant::now();
     let t0 = msg::now_secs();
@@ -374,7 +385,15 @@ pub fn plan_once(
     let hard = obstacles::hard_points(model, points, ground_z);
     let points: &[[f32; 3]] = &hard;
     let cloud: Vec<[f64; 2]> = points.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
-    let states = match plan(&cloud, pose, goal, emb, config.resolution) {
+    let states = match plan(
+        &cloud,
+        pose,
+        goal,
+        emb,
+        config.resolution,
+        incumbent,
+        COMMIT_MARGIN,
+    ) {
         Some(s) if !s.is_empty() => s,
         _ => {
             debug!(
@@ -432,6 +451,10 @@ impl Worker {
         let mut points: Option<(u64, Arc<Vec<[f32; 3]>>)> = None;
         // The (cloud, carrot) the published plan was made from.
         let mut planned: Option<(u64, (f64, f64))> = None;
+        // ...and the plan itself. The search prefers the route it already
+        // published unless a fresh one earns the switch, and this module is
+        // where that memory lives: the shell owns it, the planner judges it.
+        let mut incumbent: Option<Vec<[f64; 3]>> = None;
 
         loop {
             ticker.tick().await;
@@ -453,8 +476,11 @@ impl Worker {
                     }
                     // A hold is not gated: it is a statement about the CLOCK,
                     // and nothing arriving is exactly the case it fires on.
-                    // Forget what was planned so the first live tick plans.
+                    // Forget what was planned so the first live tick plans, and
+                    // what was published with it: a route held across a dead
+                    // link is a route nothing has re-validated.
                     planned = None;
+                    incumbent = None;
                     let pose = snap.pose.expect("Hold implies a pose");
                     let held = hold_stub(pose, &self.config.world_frame, msg::now_secs());
                     self.publish(&held, now, &mut viz).await;
@@ -481,6 +507,13 @@ impl Worker {
                     ) {
                         continue;
                     }
+                    // A carrot that jumped is a different task, and the route
+                    // being held is about the old one.
+                    if planned.is_some_and(|(_, was)| {
+                        (was.0 - goal.0).hypot(was.1 - goal.1) > self.config.reset_carrot_m
+                    }) {
+                        incumbent = None;
+                    }
                     let cloud = snap.cloud.expect("Plan implies a cloud");
                     // The search is the expensive call in this process, and it
                     // is synchronous. block_in_place keeps it off the runtime's
@@ -495,10 +528,12 @@ impl Worker {
                             pose,
                             goal,
                             snap.ground_z.unwrap_or(0.0),
+                            incumbent.as_deref(),
                         ))
                     });
                     if let Some(produced) = produced {
                         planned = Some((snap.cloud_seq, goal));
+                        incumbent = Some(msg::path_states(&produced));
                         self.publish(&produced, now, &mut viz).await;
                     }
                 }
@@ -730,6 +765,7 @@ mod tests {
             base_frame: "base_link".into(),
             replan_on_change: true,
             replan_carrot_m: 0.2,
+            reset_carrot_m: 1.0,
             obstacle_model: "body_band".into(),
             max_map_age_s: 5.0,
             viz_publish_hz: 2.0,
@@ -761,6 +797,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (3.0, 0.0),
             0.0,
+            None,
         );
         assert!(produced.poses.len() > 1, "expected a real plan, got a stub");
         assert_eq!(produced.header.frame_id, "odom");
@@ -807,6 +844,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (3.0, 0.0),
             0.0,
+            None,
         );
         let tight = plan_once(
             &cfg,
@@ -816,6 +854,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (3.0, 0.0),
             0.0,
+            None,
         );
         assert!(roomy.poses.len() > 1 && tight.poses.len() > 1);
         assert!(
@@ -847,6 +886,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
             0.0,
+            None,
         );
         assert_eq!(produced.poses.len(), 1, "a refusal is a one-pose stub");
         assert_eq!(produced.poses[0].pose.position.x, 0.0);
@@ -876,6 +916,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
             0.0,
+            None,
         );
         assert!(produced.poses.len() > 1, "an overhead wall is not a wall");
     }
@@ -924,6 +965,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
             -0.28,
+            None,
         );
         assert!(
             blind.poses.len() > 1,
@@ -942,6 +984,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
             -0.28,
+            None,
         );
         assert_eq!(seen.poses.len(), 1, "the walls are still invisible");
     }
@@ -974,6 +1017,7 @@ mod tests {
                 (0.0, 0.0, 0.0),
                 (3.0, 0.0),
                 0.0,
+                None,
             );
             if out.poses.len() < 2 {
                 return f64::INFINITY; // a refusal is the strongest "it saw the wall"
@@ -1028,6 +1072,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             (4.0, 0.0),
             -0.28,
+            None,
         );
         assert!(produced.poses.len() > 1, "the ground read as a wall");
     }

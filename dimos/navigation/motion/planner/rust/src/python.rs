@@ -17,7 +17,7 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::planner::{plan as plan_impl, Emb};
+use crate::planner::{plan as plan_impl, Emb, COMMIT_MARGIN};
 
 /// The `Embodiment` fields the search reads, in declaration order: length,
 /// width, center_off, comfort, precision, strafe, reverse, yaw_w, envelope,
@@ -30,10 +30,17 @@ type EmbTuple = (f64, f64, f64, f64, f64, f64, f64, f64, Vec<[f64; 5]>, f64);
 
 /// One plan call. points: (N, 2) float64 obstacle xy in world frame -- every
 /// row is an obstacle, the caller's model already decided which (see
-/// `planner.rs`). Returns an (M, 3) array of (x, y, yaw) at `resolution`, or
-/// None to refuse.
+/// `planner.rs`). `incumbent` is the (M, 3) route the caller last published, or
+/// None on the first plan and after a reset; `commit_margin` is
+/// `scenarios.COMMIT_MARGIN`, which python owns and hands over here the way it
+/// hands over the envelope. Returns an (M, 3) array of (x, y, yaw) at
+/// `resolution`, or None to refuse.
 #[pyfunction]
-#[pyo3(signature = (points, pose, goal, emb, resolution))]
+#[pyo3(signature = (points, pose, goal, emb, resolution, incumbent=None, commit_margin=COMMIT_MARGIN))]
+// The argument list IS the boundary, and it is the spec: every one of these is
+// a thing python owns and the crate is handed. Bundling them into a struct
+// would only move the same seven names one indirection away from the call.
+#[allow(clippy::too_many_arguments)]
 fn plan<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<'py, f64>,
@@ -41,6 +48,8 @@ fn plan<'py>(
     goal: (f64, f64),
     emb: EmbTuple,
     resolution: f64,
+    incumbent: Option<PyReadonlyArray2<'py, f64>>,
+    commit_margin: f64,
 ) -> PyResult<Option<Bound<'py, PyArray2<f64>>>> {
     if points.shape()[1] != 2 {
         return Err(PyValueError::new_err(format!(
@@ -48,6 +57,23 @@ fn plan<'py>(
             points.shape()
         )));
     }
+    let inc = match &incumbent {
+        None => None,
+        Some(a) => {
+            if a.shape()[1] != 3 {
+                return Err(PyValueError::new_err(format!(
+                    "incumbent must be (M, 3) float64, got shape {:?}",
+                    a.shape()
+                )));
+            }
+            let v = a.as_array();
+            Some(
+                (0..v.shape()[0])
+                    .map(|k| [v[[k, 0]], v[[k, 1]], v[[k, 2]]])
+                    .collect::<Vec<[f64; 3]>>(),
+            )
+        }
+    };
     let view = points.as_array();
     let pts: Vec<[f64; 2]> = (0..view.shape()[0])
         .map(|k| [view[[k, 0]], view[[k, 1]]])
@@ -64,7 +90,17 @@ fn plan<'py>(
         envelope: emb.8,
         arc_inflate: emb.9,
     };
-    let out = py.allow_threads(|| plan_impl(&pts, pose, goal, &emb, resolution));
+    let out = py.allow_threads(|| {
+        plan_impl(
+            &pts,
+            pose,
+            goal,
+            &emb,
+            resolution,
+            inc.as_deref(),
+            commit_margin,
+        )
+    });
     Ok(out.map(|states| {
         let mut arr = Array2::<f64>::zeros((states.len(), 3));
         for (k, s) in states.iter().enumerate() {

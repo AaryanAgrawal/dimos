@@ -23,7 +23,7 @@
 
 use std::time::Instant;
 
-use dimos_motion2_target::planner::{plan, Emb};
+use dimos_motion2_target::planner::{plan, Emb, COMMIT_MARGIN};
 
 /// Square outline of obstacle points, half-size `h`, spacing `step`.
 fn ring(cx: f64, cy: f64, h: f64, step: f64) -> Vec<[f64; 2]> {
@@ -53,8 +53,26 @@ fn slalom() -> Vec<[f64; 2]> {
 fn deterministic_across_calls() {
     let pts = slalom();
     let emb = Emb::go2();
-    let a = plan(&pts, (0.0, 0.0, 0.0), (7.5, 0.0), &emb, 0.1).expect("route exists");
-    let b = plan(&pts, (0.0, 0.0, 0.0), (7.5, 0.0), &emb, 0.1).expect("route exists");
+    let a = plan(
+        &pts,
+        (0.0, 0.0, 0.0),
+        (7.5, 0.0),
+        &emb,
+        0.1,
+        None,
+        COMMIT_MARGIN,
+    )
+    .expect("route exists");
+    let b = plan(
+        &pts,
+        (0.0, 0.0, 0.0),
+        (7.5, 0.0),
+        &emb,
+        0.1,
+        None,
+        COMMIT_MARGIN,
+    )
+    .expect("route exists");
     assert_eq!(
         a.len(),
         b.len(),
@@ -102,7 +120,7 @@ fn no_cross_call_memoization() {
 
     let timed = |cloud: &[[f64; 2]], pose: (f64, f64, f64), g: (f64, f64)| -> f64 {
         let t0 = Instant::now();
-        let out = plan(cloud, pose, g, &emb, 0.1);
+        let out = plan(cloud, pose, g, &emb, 0.1, None, COMMIT_MARGIN);
         let dt = t0.elapsed().as_secs_f64();
         assert!(out.is_some(), "route exists but the planner refused");
         dt
@@ -138,7 +156,16 @@ fn no_cross_call_memoization() {
 fn sealed_box_refuses() {
     let pts = ring(0.0, 0.0, 1.0, 0.02);
     assert!(
-        plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &Emb::go2(), 0.1).is_none(),
+        plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &Emb::go2(),
+            0.1,
+            None,
+            COMMIT_MARGIN
+        )
+        .is_none(),
         "planner published a path out of a sealed box"
     );
 }
@@ -167,7 +194,16 @@ fn thin_wall_not_hopped() {
         pts.push([2.0, y]);
         y += 0.02;
     }
-    let path = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route around the end");
+    let path = plan(
+        &pts,
+        (0.0, 0.0, 0.0),
+        (4.0, 0.0),
+        &emb,
+        0.1,
+        None,
+        COMMIT_MARGIN,
+    )
+    .expect("route around the end");
     for w in path.windows(2) {
         let (a, b) = (w[0], w[1]);
         if (a[0] - 2.0) * (b[0] - 2.0) < 0.0 {
@@ -181,8 +217,16 @@ fn thin_wall_not_hopped() {
 /// An empty world has a straight answer; refusing it is never correct.
 #[test]
 fn open_world_routes() {
-    let path = plan(&[], (0.0, 0.0, 0.0), (4.0, 0.0), &Emb::go2(), 0.1)
-        .expect("planner refused an empty world");
+    let path = plan(
+        &[],
+        (0.0, 0.0, 0.0),
+        (4.0, 0.0),
+        &Emb::go2(),
+        0.1,
+        None,
+        COMMIT_MARGIN,
+    )
+    .expect("planner refused an empty world");
     let last = path.last().expect("empty path");
     let err = (last[0] - 4.0).hypot(last[1]);
     assert!(

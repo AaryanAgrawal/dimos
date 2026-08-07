@@ -85,6 +85,20 @@ const FLOOR_CLEARANCE: f64 = 0.05;
 /// The multiplier at contact, `MAX_SPEED / MIN_SPEED`.
 const TIGHT_MAX: f64 = MAX_SPEED / MIN_SPEED;
 
+/// Pitch at which a route is PRICED, along its own arc rather than its
+/// vertices: an incumbent arrives at path resolution and a fresh answer is a
+/// handful of smoothed vertices, and the two are weighed on one scale.
+/// `scenarios.py::COST_STEP`.
+const COST_STEP: f64 = FINE;
+
+/// `scenarios.py::COMMIT_MARGIN`, mirrored for this crate's own tests only.
+///
+/// Python owns the number and hands it to `plan` on every call, exactly as it
+/// hands over the envelope -- a constant measured by
+/// `planner/referee/measure_margin.py` may not have a second definition that
+/// can drift away from it.
+pub const COMMIT_MARGIN: f64 = 1.50;
+
 /// Clearance (m) -> speed ceiling (m/s): creep at the floor, cruise with room.
 fn governor_speed(clearance: f64) -> f64 {
     MIN_SPEED
@@ -2091,14 +2105,194 @@ pub fn densify(
     dense
 }
 
+/// What this route costs on the follower's own clock, in open-space metres.
+///
+/// The pricing the search puts on its own edges, read along a continuous curve
+/// instead of along a lattice: a metre of gait-weighted travel charged
+/// `MAX_SPEED/governor(clearance)` for the time it will take, plus the yaw the
+/// route commands -- half price while translating, as a blend edge pays it, full
+/// price for a rotation in place, as a turn edge does. Clearance is read on the
+/// UNION, again as the search reads it: a preference has to be comparable across
+/// routes, so it may not shift with an edge's own drift row.
+///
+/// Sampled by ARC, never by vertex. Densifying a polyline adds points that lie
+/// on it, so it leaves the curve, its length and its yaw-by-arc untouched -- and
+/// an incumbent that came back at path resolution prices identically to the
+/// sparse answer it was smoothed from, rather than to within a quadrature error
+/// sitting next to the very threshold it is being compared against.
+/// `scenarios.py::path_cost`.
+fn path_cost(w: &mut World, offs: &[(f64, f64)], emb: &Emb, states: &[[f64; 3]]) -> f64 {
+    if states.len() < 2 {
+        return 0.0;
+    }
+    let n = states.len() - 1;
+    let mut span = vec![0.0f64; n];
+    let mut dyaw = vec![0.0f64; n];
+    let mut arcs = vec![0.0f64; n + 1];
+    let mut total = 0.0;
+    for m in 0..n {
+        let (a, b) = (states[m], states[m + 1]);
+        span[m] = (b[0] - a[0]).hypot(b[1] - a[1]);
+        dyaw[m] = rem_2pi(b[2] - a[2]);
+        let moving = span[m] > 1e-9;
+        arcs[m + 1] = arcs[m] + if moving { span[m] } else { 0.0 };
+        if !moving {
+            // A rotation in place carries no arc, so it is priced here rather
+            // than in the integral below, which is parameterised by arc alone.
+            let th = a[2] + 0.5 * dyaw[m];
+            total += emb.yaw_w * dyaw[m].abs() * tight_of(pose_clear(w, offs, a[0], a[1], th));
+        }
+    }
+    let mv: Vec<usize> = (0..n).filter(|&m| span[m] > 1e-9).collect();
+    let length = arcs[n];
+    if mv.is_empty() || length <= 0.0 {
+        return total;
+    }
+    // Sub-steps split the whole route evenly, so they are a function of its
+    // total length and of nothing else: a vertex added anywhere on the curve
+    // moves no sample.
+    let nk = ((length / COST_STEP).ceil() as usize).max(1);
+    let h = length / nk as f64;
+    let mut p = 0usize;
+    for q in 0..nk {
+        let mid = (q as f64 + 0.5) * h;
+        while p + 1 < mv.len() && arcs[mv[p + 1]] <= mid {
+            p += 1;
+        }
+        let m = mv[p];
+        let (a, b) = (states[m], states[m + 1]);
+        let t = ((mid - arcs[m]) / span[m]).clamp(0.0, 1.0);
+        let th = a[2] + t * dyaw[m];
+        let rel = (b[1] - a[1]).atan2(b[0] - a[0]) - th;
+        let gait = 1.0
+            + (emb.strafe - 1.0) * rel.sin().abs()
+            + if rel.cos() < 0.0 {
+                emb.reverse - 1.0
+            } else {
+                0.0
+            };
+        // Turning while translating is a blend edge, and pays half the yaw price.
+        let turn = 0.5 * emb.yaw_w * dyaw[m].abs() / span[m];
+        let x = a[0] + t * (b[0] - a[0]);
+        let y = a[1] + t * (b[1] - a[1]);
+        total += (gait + turn) * h * tight_of(pose_clear(w, offs, x, y, th));
+    }
+    total
+}
+
+/// Head-trim a published route to where the robot is now: the remainder from the
+/// nearest published waypoint on, exactly as the global route is trimmed to the
+/// robot on every republish. That remainder IS the commitment.
+///
+/// The true pose does NOT replace the head. Splicing it in would hand the whole
+/// difference between the robot's yaw and the route's to one ~0.1 m segment, and
+/// a segment that turns that hard over that little asks for `arc_inflate` room
+/// the corridor does not have -- the route would then fail its own re-validation
+/// for a reason that is about the splice and not about the world. The fresh
+/// answer does not do this either: it opens at the lattice pose its seed snapped
+/// to, up to half a cell diagonal from the robot. Both routes are PRICED from
+/// the true pose, which is where that walk is accounted for.
+/// `scenarios.py::trim_to_pose`.
+fn trim_to_pose(states: &[[f64; 3]], pose: (f64, f64, f64)) -> Vec<[f64; 3]> {
+    if states.is_empty() {
+        return vec![[pose.0, pose.1, pose.2]];
+    }
+    let mut best = 0usize;
+    let mut bd = f64::INFINITY;
+    for (i, s) in states.iter().enumerate() {
+        let d = (s[0] - pose.0).hypot(s[1] - pose.1);
+        if d < bd {
+            bd = d;
+            best = i;
+        }
+    }
+    states[best..].to_vec()
+}
+
+/// The published route, trimmed to here and carried to the goal -- or None when
+/// this map no longer lets the body walk it.
+///
+/// Re-validation is instant and unfiltered: an obstacle the map shows today
+/// invalidates the route today. Delaying belief in one is a robustness layer
+/// priced in collisions, and map noise flapping a corridor is perception's
+/// ledger, not the planner's to absorb.
+fn committed(
+    w: &mut World,
+    fps: &Fps,
+    emb: &Emb,
+    incumbent: &[[f64; 3]],
+    pose: (f64, f64, f64),
+    goal: (f64, f64),
+    margin: f64,
+) -> Option<Vec<[f64; 3]>> {
+    let mut route = trim_to_pose(incumbent, pose);
+    if route.len() < 2 {
+        return None;
+    }
+    let end = *route.last().expect("len >= 2");
+    let cell = |v: f64| (v / CELL).round_even_i64();
+    // The goal moves under the incumbent between replans (the carrot advances
+    // ~0.2 m in the field), so the route rarely ends on it any more. Carry it
+    // the rest of the way: the straight chord when the chord is clear, and the
+    // search's own answer from the far end when it is not. A goal that JUMPED is
+    // the caller's business -- it drops the incumbent rather than asking for a
+    // route across the world.
+    if (cell(end[0]), cell(end[1])) != (cell(goal.0), cell(goal.1)) {
+        let tgt = [goal.0, goal.1, end[2]];
+        if seg_free(w, fps, emb, &end, &tgt, margin) {
+            route.push(tgt);
+        } else {
+            route.extend_from_slice(&se2_search(
+                w,
+                fps,
+                (end[0], end[1], end[2]),
+                goal,
+                emb,
+                margin,
+            )?);
+        }
+    }
+    for pair in route.windows(2) {
+        if !seg_free(w, fps, emb, &pair[0], &pair[1], margin) {
+            return None;
+        }
+    }
+    Some(route)
+}
+
+/// Both routes are priced from where the robot actually IS -- the fresh answer
+/// opens at the cell its seed snapped to, up to half a cell diagonal away, and
+/// that walk is real.
+fn priced(pose: (f64, f64, f64), states: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    let here = [pose.0, pose.1, pose.2];
+    let s = states[0];
+    if (s[0] - here[0]).abs() < 1e-9
+        && (s[1] - here[1]).abs() < 1e-9
+        && (s[2] - here[2]).abs() < 1e-9
+    {
+        return states.to_vec();
+    }
+    let mut out = vec![here];
+    out.extend_from_slice(states);
+    out
+}
+
 /// `points` is every obstacle, as xy. There is no z here to slice: see the
 /// module note.
+///
+/// `incumbent` is the route the caller has already published, or None on the
+/// first plan and after a reset -- in which case this is bit-identical to a
+/// planner that never heard of commitment. Otherwise the incumbent is trimmed to
+/// `pose`, re-validated on THIS map, carried to the goal, and kept unless the
+/// fresh search beats it by more than `commit_margin`. See planner/revision.md.
 pub fn plan(
     points: &[[f64; 2]],
     pose: (f64, f64, f64),
     goal: (f64, f64),
     emb: &Emb,
     resolution: f64,
+    incumbent: Option<&[[f64; 3]]>,
+    commit_margin: f64,
 ) -> Option<Vec<[f64; 3]>> {
     let fps = Fps::new(emb);
     let offs = fps.union().to_vec();
@@ -2108,7 +2302,31 @@ pub fn plan(
     // smoothing floor (capped at `comfort`).
     let cap = emb.comfort.max(SPEED_CLEARANCE) + reach + SNAP;
     let mut w = build_world(points, pose, goal, cap);
-    let states = se2_search(&mut w, &fps, pose, goal, emb, emb.precision)?;
+    let margin = emb.precision;
+    // The world is built from {pose, goal, cloud} and never from the incumbent:
+    // the fresh search has to answer the same question whether or not anything
+    // was published before it, or the comparison below is comparing two things
+    // that were asked differently.
+    let fresh = se2_search(&mut w, &fps, pose, goal, emb, margin);
+    let held = match incumbent {
+        None => None,
+        Some(inc) => committed(&mut w, &fps, emb, inc, pose, goal, margin),
+    };
+    let states = match (fresh, held) {
+        (fresh, None) => fresh?,
+        // A still-walkable route beats a stub: refuse only when neither the
+        // fresh search nor the carried incumbent has anywhere to go.
+        (None, Some(route)) => route,
+        (Some(f), Some(route)) => {
+            let cf = path_cost(&mut w, &offs, emb, &priced(pose, &f));
+            let cr = path_cost(&mut w, &offs, emb, &priced(pose, &route));
+            if cf < cr - commit_margin {
+                f
+            } else {
+                route
+            }
+        }
+    };
     Some(densify(
         &mut w,
         &offs,
@@ -2201,7 +2419,15 @@ mod tests {
         for res in [0.1f64, 0.075, 0.15] {
             let stride = station_stride(res) as usize;
             for pts in &worlds {
-                let Some(path) = plan(pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, res) else {
+                let Some(path) = plan(
+                    pts,
+                    (0.0, 0.0, 0.0),
+                    (4.0, 0.0),
+                    &emb,
+                    res,
+                    None,
+                    COMMIT_MARGIN,
+                ) else {
                     continue;
                 };
                 for w in path.windows(2) {
@@ -2261,8 +2487,26 @@ mod tests {
     fn determinism() {
         let pts = ring(2.0, 0.0, 0.25, 0.05);
         let emb = Emb::go2();
-        let a = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).unwrap();
-        let b = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).unwrap();
+        let a = plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &emb,
+            0.1,
+            None,
+            COMMIT_MARGIN,
+        )
+        .unwrap();
+        let b = plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &emb,
+            0.1,
+            None,
+            COMMIT_MARGIN,
+        )
+        .unwrap();
         assert_eq!(a.len(), b.len());
         for (p, q) in a.iter().zip(&b) {
             for k in 0..3 {
@@ -2293,7 +2537,16 @@ mod tests {
             pts.push([2.0, y]);
             y += 0.02;
         }
-        let path = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).unwrap();
+        let path = plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &emb,
+            0.1,
+            None,
+            COMMIT_MARGIN,
+        )
+        .unwrap();
         for w in path.windows(2) {
             let (a, b) = (w[0], w[1]);
             if (a[0] - 2.0) * (b[0] - 2.0) < 0.0 {
@@ -2307,7 +2560,16 @@ mod tests {
     #[test]
     fn sealed_box_refuses() {
         let pts = ring(0.0, 0.0, 1.0, 0.02);
-        assert!(plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &Emb::go2(), 0.1).is_none());
+        assert!(plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &Emb::go2(),
+            0.1,
+            None,
+            COMMIT_MARGIN
+        )
+        .is_none());
     }
 
     /// The governor price is what makes the cheapest-cost pre-check admissible:
@@ -2452,11 +2714,29 @@ mod tests {
     fn a_far_point_cannot_move_the_answer() {
         let emb = Emb::go2();
         let pts = ring(2.0, 0.0, 0.45, 0.05);
-        let base = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route exists");
+        let base = plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &emb,
+            0.1,
+            None,
+            COMMIT_MARGIN,
+        )
+        .expect("route exists");
         for far in [[-11.7, -6.0], [-40.3, 0.0], [0.0, -17.9]] {
             let mut with = pts.clone();
             with.push(far);
-            let got = plan(&with, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route exists");
+            let got = plan(
+                &with,
+                (0.0, 0.0, 0.0),
+                (4.0, 0.0),
+                &emb,
+                0.1,
+                None,
+                COMMIT_MARGIN,
+            )
+            .expect("route exists");
             assert_eq!(
                 got.len(),
                 base.len(),
@@ -2490,10 +2770,28 @@ mod tests {
     fn a_whole_period_translation_translates_the_answer() {
         let emb = Emb::go2();
         let pts = ring(2.0, 0.0, 0.45, 0.05);
-        let base = plan(&pts, (0.0, 0.0, 0.0), (4.0, 0.0), &emb, 0.1).expect("route exists");
+        let base = plan(
+            &pts,
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0),
+            &emb,
+            0.1,
+            None,
+            COMMIT_MARGIN,
+        )
+        .expect("route exists");
         let d = 4.0 * PERIOD;
         let moved: Vec<[f64; 2]> = pts.iter().map(|p| [p[0] + d, p[1] + d]).collect();
-        let got = plan(&moved, (d, d, 0.0), (4.0 + d, d), &emb, 0.1).expect("route exists");
+        let got = plan(
+            &moved,
+            (d, d, 0.0),
+            (4.0 + d, d),
+            &emb,
+            0.1,
+            None,
+            COMMIT_MARGIN,
+        )
+        .expect("route exists");
         let arc = |p: &[[f64; 3]]| -> f64 {
             p.windows(2)
                 .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
