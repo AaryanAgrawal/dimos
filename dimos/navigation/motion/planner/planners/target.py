@@ -29,9 +29,16 @@ import numpy as np
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.motion.embodiment import Embodiment
 from dimos.navigation.motion.geometry import AvoidanceConfig
-from dimos.navigation.motion.scenarios import FINE, PERIOD, Scenario, anchor, se2_search
+from dimos.navigation.motion.scenarios import (
+    COMMIT_MARGIN,
+    FINE,
+    PERIOD,
+    Scenario,
+    anchor,
+    se2_search,
+)
 
-from .gold import densify_states, pose_stamped
+from .gold import densify_states, pose_stamped, states_of
 
 PAD = 1.5
 # Free space around the working area, in whole periods -- se2_path's own.
@@ -51,7 +58,11 @@ class TargetEpisode:
         pass
 
     def plan(
-        self, obstacles: np.ndarray, pose: tuple[float, float, float], goal: tuple[float, float]
+        self,
+        obstacles: np.ndarray,
+        pose: tuple[float, float, float],
+        goal: tuple[float, float],
+        incumbent: Path | None = None,
     ) -> Path:
         from scipy.spatial import cKDTree
 
@@ -73,7 +84,15 @@ class TargetEpisode:
             sdf_grid = np.full((len(fgx), len(fgy)), np.inf)
 
         states = se2_search(
-            fgx, fgy, sdf_grid, (x0, y0, x1, y1), pose, goal, self._emb, self._emb.precision
+            fgx,
+            fgy,
+            sdf_grid,
+            (x0, y0, x1, y1),
+            pose,
+            goal,
+            self._emb,
+            self._emb.precision,
+            incumbent=states_of(incumbent),
         )
         if states is None:
             return Path(ts=0.0, frame_id="world", poses=[pose_stamped(*pose)])
@@ -97,9 +116,14 @@ class RustTargetEpisode:
         pass
 
     def plan(
-        self, obstacles: np.ndarray, pose: tuple[float, float, float], goal: tuple[float, float]
+        self,
+        obstacles: np.ndarray,
+        pose: tuple[float, float, float],
+        goal: tuple[float, float],
+        incumbent: Path | None = None,
     ) -> Path:
         pts = np.ascontiguousarray(np.asarray(obstacles, dtype=np.float64).reshape(-1, 2))
+        inc = states_of(incumbent)
         e = self._emb
         out = self._mod.plan(
             pts,
@@ -118,6 +142,10 @@ class RustTargetEpisode:
                 e.arc_inflate,
             ),
             self._res,
+            None if inc is None else np.ascontiguousarray(inc, dtype=np.float64),
+            # One copy of the constant, crossing the boundary the way the
+            # envelope does: python owns it, the crate is handed it.
+            COMMIT_MARGIN,
         )
         if out is None or not len(out):
             return Path(ts=0.0, frame_id="world", poses=[pose_stamped(*pose)])

@@ -27,6 +27,7 @@ from collections import deque
 from dataclasses import dataclass
 import hashlib
 import inspect
+import itertools
 import math
 import os
 from pathlib import Path as FilePath
@@ -416,10 +417,124 @@ PERIOD = 0.24  # 2 * CELL == 3 * VOXEL == 6 * FINE
 # able to swing wide of the obstacles it is routing around.
 _GRID_PAD = 3 * PERIOD  # 0.72
 
+# How much cheaper a challenger route has to be before the planner abandons the
+# one it already published, in open-space metres (`path_cost`'s unit).
+#
+# MEASURED, not tuned, and it has to cover every way a route's price can move
+# while the world stands still. Two such ways were measured, and the constant is
+# their sum plus headroom -- see `planner/referee/measure_margin.py`, which
+# bakes this number the way `simulation/envelope.py --bake` bakes the envelope,
+# and planner/revision.md's commitment amendment for why it exists at all.
+# One copy: the rust candidate is handed this very value across the extension
+# boundary, and it is in the gold's cache key.
+COMMIT_MARGIN = 1.50
+
 
 def anchor(v: float, period: float = PERIOD) -> float:
     """Snap a grid corner down onto the frame's own absolute lattice."""
     return math.floor(v / period) * period
+
+
+# Pitch at which a route is PRICED, along the route's own ARC. Not along its
+# vertices, and that is the whole point: an incumbent comes back at path
+# resolution while a fresh answer is a handful of smoothed vertices, and the two
+# have to be weighed on one scale. Densifying a polyline adds points that lie on
+# it, so it leaves the curve, its arc length and its yaw-by-arc untouched --
+# sample by arc and the two representations price IDENTICALLY, rather than to
+# within a quadrature error sitting next to a 0.1 m threshold.
+COST_STEP = FINE
+
+
+def path_cost(
+    fgx: np.ndarray,
+    fgy: np.ndarray,
+    sdf_grid: np.ndarray,
+    states: np.ndarray,
+    emb: Embodiment,
+    step: float = COST_STEP,
+) -> float:
+    """What this route costs on the follower's own clock, in open-space metres.
+
+    The pricing the search puts on its own edges, read along a continuous
+    curve instead of along a lattice: a metre of gait-weighted travel, charged
+    `MAX_SPEED/governor(clearance)` for the time it will take, plus the yaw the
+    route commands -- half price while translating, as a blend edge pays it,
+    full price for a rotation in place, as a turn edge does. Clearance is read
+    on the UNION, again as the search reads it: a preference has to be
+    comparable across routes, so it may not shift with an edge's own drift row.
+    """
+    s = np.asarray(states, dtype=float).reshape(-1, 3)
+    if len(s) < 2:
+        return 0.0
+    fine = float(fgx[1] - fgx[0])
+    off = box_offsets(emb.box(None))
+
+    def tight(px: np.ndarray, py: np.ndarray, th: np.ndarray) -> np.ndarray:
+        """MAX_SPEED/governor(clearance): what a metre here costs in metres."""
+        c_, s_ = np.cos(th)[:, None], np.sin(th)[:, None]
+        wx = px[:, None] + c_ * off[None, :, 0] - s_ * off[None, :, 1]
+        wy = py[:, None] + s_ * off[None, :, 0] + c_ * off[None, :, 1]
+        i = np.clip(np.round((wx - fgx[0]) / fine).astype(int), 0, len(fgx) - 1)
+        j = np.clip(np.round((wy - fgy[0]) / fine).astype(int), 0, len(fgy) - 1)
+        return np.asarray(MAX_SPEED / governor_speed(np.min(sdf_grid[i, j], axis=1)))
+
+    d = s[1:] - s[:-1]
+    span = np.hypot(d[:, 0], d[:, 1])
+    dyaw = np.remainder(d[:, 2] + math.pi, 2.0 * math.pi) - math.pi
+    moving = span > 1e-9
+    total = 0.0
+
+    # Rotation in place: no direction of travel, no drift row, full yaw price —
+    # the turn edge's own charge. It carries no arc, so it is priced here rather
+    # than in the integral below, which is parameterised by arc alone.
+    spin = np.flatnonzero(~moving)
+    if len(spin):
+        th = s[spin, 2] + 0.5 * dyaw[spin]
+        total += float(np.sum(emb.yaw_w * np.abs(dyaw[spin]) * tight(s[spin, 0], s[spin, 1], th)))
+
+    mv = np.flatnonzero(moving)
+    if not len(mv):
+        return total
+    # Arc at each vertex, rotations contributing nothing to it. Sub-steps split
+    # the whole route evenly, so they are a function of its total length and of
+    # nothing else — a vertex added anywhere on the curve moves no sample.
+    arcs = np.concatenate([[0.0], np.cumsum(np.where(moving, span, 0.0))])
+    length = float(arcs[-1])
+    edges = np.linspace(0.0, length, max(1, math.ceil(length / step)) + 1)
+    w = np.diff(edges)
+    mid = 0.5 * (edges[:-1] + edges[1:])
+    k = mv[np.clip(np.searchsorted(arcs[mv], mid, side="right") - 1, 0, len(mv) - 1)]
+    t = np.clip((mid - arcs[k]) / span[k], 0.0, 1.0)
+
+    th = s[k, 2] + t * dyaw[k]
+    rel = np.arctan2(d[k, 1], d[k, 0]) - th
+    gait = 1.0 + (emb.strafe - 1.0) * np.abs(np.sin(rel))
+    gait = gait + np.where(np.cos(rel) < 0.0, emb.reverse - 1.0, 0.0)
+    # Turning while translating is a blend edge, and pays half the yaw price.
+    turn = 0.5 * emb.yaw_w * np.abs(dyaw[k]) / span[k]
+    px, py = s[k, 0] + t * d[k, 0], s[k, 1] + t * d[k, 1]
+    return total + float(np.sum((gait + turn) * w * tight(px, py, th)))
+
+
+def trim_to_pose(states: np.ndarray, pose: tuple[float, float, float]) -> np.ndarray:
+    """Head-trim a published route to where the robot is now: the remainder from
+    the nearest published waypoint on, exactly as the global route is trimmed to
+    the robot on every republish. That remainder IS the commitment.
+
+    The true pose does NOT replace the head. Splicing it in would hand the whole
+    difference between the robot's yaw and the route's to one ~0.1 m segment,
+    and a segment that turns that hard over that little asks for `arc_inflate`
+    room the corridor does not have — the route would then fail its own
+    re-validation for a reason that is about the splice and not about the world.
+    The fresh answer does not do this either: it opens at the lattice pose its
+    seed snapped to, up to half a cell diagonal from the robot. Both routes are
+    PRICED from the true pose, which is where that walk is accounted for.
+    """
+    s = np.asarray(states, dtype=float).reshape(-1, 3)
+    if not len(s):
+        return np.array([[float(pose[0]), float(pose[1]), float(pose[2])]])
+    i = int(np.argmin(np.linalg.norm(s[:, :2] - np.array(pose[:2]), axis=1)))
+    return np.asarray(s[i:])
 
 
 def se2_search(
@@ -433,6 +548,8 @@ def se2_search(
     margin: float,
     cell: float = CELL,
     yaw_bins: int = 16,
+    incumbent: np.ndarray | None = None,
+    commit_margin: float = COMMIT_MARGIN,
 ) -> np.ndarray | None:
     """The SE(2) lattice search on a prebuilt fine SDF grid — shared by the
     gold oracle (box-exact grid) and any candidate that builds its grid from
@@ -449,6 +566,15 @@ def se2_search(
     to: a pose the robot actually occupies may always be departed. It is judged
     STANDING -- the static body, the intersection of the envelope's rows -- not
     on the union of the swept boxes it is not moving through.
+
+    The route already published, if there is one, is an INPUT. The lattice is
+    quantized, so a replan from a pose a few millimetres along is a slightly
+    different query, and where two routes near-tie the argmin flips for reasons
+    that are about the quantization and not about the world. So: trim the
+    incumbent to the current pose, re-validate it on THIS map, extend it to the
+    goal if the goal moved, price both on the same clock, and switch only if the
+    challenger wins by more than `commit_margin`. `incumbent=None` is
+    bit-identical to a planner that never heard of any of this.
     """
     fine = float(fgx[1] - fgx[0])
     x0, y0, x1, y1 = bounds
@@ -541,10 +667,28 @@ def se2_search(
             int(np.clip(round((p[1] - y0) / cell), 0, ny - 1)),
         )
 
-    sb = int(np.argmin(np.abs(np.angle(np.exp(1j * (thetas - start[2]))))))
-    si, sj = cell_of(start[:2])
     gi, gj = cell_of(goal)
-    result: np.ndarray | None = None
+
+    # One long edge, judged the way the lattice judges its own: against the
+    # drift row the body needs for THAT edge, widened by its own curvature.
+    # Judging it against the union instead would forbid every shortcut through
+    # a gap the lattice just proved the body walks down nose-first. Both the
+    # smoother and the incumbent's re-validation ask exactly this question, so
+    # there is one copy of it.
+    def seg_free(a: np.ndarray, b: np.ndarray, floor: float) -> bool:
+        dyaw = math.remainder(b[2] - a[2], 2 * math.pi)
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        span = math.hypot(dx, dy)
+        head = math.atan2(dy, dx) if span > 1e-9 else None
+        pad = 0.5 * emb.arc_inflate * abs(dyaw) / span if span > 1e-9 else 0.0
+        steps = max(2, int(span / 0.06), int(abs(dyaw) / 0.15))
+        for t in np.linspace(0.0, 1.0, steps + 1):
+            th = a[2] + t * dyaw
+            fp = UNION if head is None else footprint(emb.box(head - th))
+            if pose_clear(a[0] + t * dx, a[1] + t * dy, th, fp) <= floor + pad:
+                return False
+        return True
+
     # A pose the robot actually occupies may always be departed. The seed's
     # feasibility is therefore read at the TRUE start pose, not at the cell it
     # snaps to: the snap moves the body by up to half a cell diagonal (~85 mm),
@@ -563,7 +707,19 @@ def se2_search(
     # negative and still refuses. Interned HERE rather than up with the moving
     # rows: it is read at one exact pose, so it never wants a clearance plane.
     STAND = footprint(emb.stand_box())
-    if pose_clear(*start, STAND) > margin:
+
+    def solve(seed: tuple[float, float, float]) -> np.ndarray | None:
+        """The search proper, from one seed pose to the fixed goal.
+
+        Named rather than inlined because the incumbent's extension asks the
+        very same question from the route's far end, and a sub-query the
+        planner answers with a second copy of itself is a second planner.
+        """
+        if pose_clear(*seed, STAND) <= margin:
+            return None
+        sb = int(np.argmin(np.abs(np.angle(np.exp(1j * (thetas - seed[2]))))))
+        si, sj = cell_of((seed[0], seed[1]))
+
         # Gait-real costs: walking forward is cheapest, strafing ~1.8x,
         # backing up ~1.5x — the ideal turns to face long legs instead of
         # crabbing through the whole world, yet still backs out of pockets.
@@ -653,29 +809,11 @@ def se2_search(
             # Shortcut smoothing, validity-preserving: replace state runs by
             # straight SE(2) interpolations (yaw = shortest arc) whenever every
             # interpolated body pose clears the margin — the staircase is
-            # lattice quantization, not the optimum.
-            def seg_free(a: np.ndarray, b: np.ndarray, floor: float) -> bool:
-                # A shortcut may never get closer to the world than the raw
-                # detour it replaces (capped at the comfort preference) —
-                # else smoothing re-cuts the corners the cost paid to avoid.
-                # A shortcut is one long edge, so it gets the same treatment
-                # the lattice's edges do: its own drift row, widened by its
-                # own curvature. Judging it against the union instead would
-                # forbid every shortcut through a gap the lattice just proved
-                # the body walks down nose-first.
-                dyaw = math.remainder(b[2] - a[2], 2 * math.pi)
-                dx, dy = b[0] - a[0], b[1] - a[1]
-                span = math.hypot(dx, dy)
-                head = math.atan2(dy, dx) if span > 1e-9 else None
-                pad = 0.5 * emb.arc_inflate * abs(dyaw) / span if span > 1e-9 else 0.0
-                steps = max(2, int(span / 0.06), int(abs(dyaw) / 0.15))
-                for t in np.linspace(0.0, 1.0, steps + 1):
-                    th = a[2] + t * dyaw
-                    fp = UNION if head is None else footprint(emb.box(head - th))
-                    if pose_clear(a[0] + t * dx, a[1] + t * dy, th, fp) <= floor + pad:
-                        return False
-                return True
-
+            # lattice quantization, not the optimum. A shortcut may never get
+            # closer to the world than the raw detour it replaces (capped at the
+            # comfort preference), else smoothing re-cuts the corners the cost
+            # paid to avoid.
+            #
             # The raw states' own clearance is the reference the shortcut has
             # to hold: a standing pose has no drift, so it is a union reading.
             raw_clear = np.array([pose_clear(x, y, th) for x, y, th in raw])
@@ -691,9 +829,95 @@ def se2_search(
                         break
                     j -= 1
                 keep.append(j)
-            result = raw[keep]
+            return np.asarray(raw[keep])
+        return None
 
-    return result
+    result = solve(start)
+    if incumbent is None:
+        return result
+
+    def committed() -> np.ndarray | None:
+        """The published route, trimmed to here and carried to the goal —
+        or None when this map no longer lets the body walk it.
+
+        Re-validation is instant and unfiltered: an obstacle the map shows
+        today invalidates the route today. Delaying belief in one is a
+        robustness layer priced in collisions, and map noise flapping a
+        corridor is perception's ledger, not the planner's to absorb.
+        """
+        route = trim_to_pose(np.asarray(incumbent, dtype=float).reshape(-1, 3), start)
+        if len(route) < 2:
+            return None
+        end = route[-1]
+        # The goal moves under the incumbent between replans (the carrot
+        # advances ~0.2 m in the field), so the route rarely ends on it any
+        # more. Carry it the rest of the way: the straight chord when the
+        # chord is clear, and the search's own answer from the far end when it
+        # is not. A goal that jumped is the caller's business — it drops the
+        # incumbent rather than asking for a route across the world.
+        if cell_of((float(end[0]), float(end[1]))) != (gi, gj):
+            tgt = np.array([goal[0], goal[1], end[2]])
+            if seg_free(end, tgt, margin):
+                route = np.vstack([route, tgt])
+            else:
+                tail = solve((float(end[0]), float(end[1]), float(end[2])))
+                if tail is None:
+                    return None
+                route = np.vstack([route, tail])
+        if any(not seg_free(a, b, margin) for a, b in itertools.pairwise(route)):
+            return None
+        return route
+
+    route = committed()
+    if route is None:
+        return result
+    if result is None:
+        # A still-walkable route beats a stub: refuse only when neither the
+        # fresh search nor the carried incumbent has anywhere to go.
+        return route
+
+    def priced(p: np.ndarray) -> np.ndarray:
+        """Both routes are priced from where the robot actually IS — the fresh
+        answer opens at the cell its seed snapped to, up to half a cell diagonal
+        away, and that walk is real."""
+        here = np.array([[start[0], start[1], start[2]]])
+        return p if np.allclose(p[0], here[0]) else np.vstack([here, p])
+
+    fresh = path_cost(fgx, fgy, sdf_grid, priced(result), emb)
+    held = path_cost(fgx, fgy, sdf_grid, priced(route), emb)
+    return result if fresh < held - commit_margin else route
+
+
+def truth_grid(
+    boxes: list[Box],
+    start: tuple[float, float, float],
+    goal: tuple[float, float],
+    pad: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[float, float, float, float]]:
+    """The box-exact fine SDF the gold searches and prices on (judge privilege).
+
+    The working area's LOW corner is snapped down onto the scenario frame's own
+    absolute lattice; the high corner only ever adds rows. So a box appearing or
+    vanishing anywhere changes which samples exist, never where they are, and
+    the search keeps answering the same question.
+    """
+    xs = [start[0], goal[0]]
+    ys = [start[1], goal[1]]
+    for b in boxes:
+        o = b.outline(0.0)
+        xs.extend(o[:, 0])
+        ys.extend(o[:, 1])
+    x0, y0 = anchor(min(xs) - pad), anchor(min(ys) - pad)
+    x1, y1 = max(xs) + pad, max(ys) + pad
+
+    fgx = np.arange(x0 - _GRID_PAD, x1 + _GRID_PAD, FINE)
+    fgy = np.arange(y0 - _GRID_PAD, y1 + _GRID_PAD, FINE)
+    FX, FY = np.meshgrid(fgx, fgy, indexing="ij")
+    P = np.column_stack([FX.ravel(), FY.ravel()])
+    sdf = np.full(len(P), np.inf)
+    for b in boxes:
+        sdf = np.minimum(sdf, b.sdf2d(P))
+    return fgx, fgy, sdf.reshape(len(fgx), len(fgy)), (x0, y0, x1, y1)
 
 
 def se2_path(
@@ -705,22 +929,38 @@ def se2_path(
     cell: float = CELL,
     yaw_bins: int = 16,
     pad: float = 1.5,
+    incumbent: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """Brute-force maneuver with the REAL body: Dijkstra over (x, y, yaw).
 
     Box-exact truth SDF (judge privilege — candidates build theirs from the
     cloud and call se2_search). See se2_search for the search itself.
-    Cached on (world, query) — a solve is a few seconds per world.
+    Cached on (world, query, incumbent) — a solve is a few seconds per world.
     """
     if margin is None:
         margin = emb.precision  # below control precision, clearance is fiction
     # The governor curve prices every edge, so it is an input to the answer and
     # therefore to the key: retuning the follower's speed law may not serve a
-    # gold that was searched under the old one.
+    # gold that was searched under the old one. So is the incumbent, and so is
+    # the margin that decides what unseats it.
     law = (MAX_SPEED, MIN_SPEED, SPEED_CLEARANCE, FLOOR_CLEARANCE)
+    inc = None if incumbent is None else np.asarray(incumbent, dtype=float).reshape(-1, 3)
     key = hashlib.sha256(
         repr(
-            ("v12-standing-witness", boxes, start, goal, emb, margin, cell, yaw_bins, pad, law)
+            (
+                "v13-commitment",
+                boxes,
+                start,
+                goal,
+                emb,
+                margin,
+                cell,
+                yaw_bins,
+                pad,
+                law,
+                COMMIT_MARGIN,
+                None if inc is None else hashlib.sha256(inc.tobytes()).hexdigest(),
+            )
         ).encode()
     ).hexdigest()
     memo: dict[str, np.ndarray | None] = {}
@@ -732,30 +972,9 @@ def se2_path(
         except Exception:
             memo = {}
 
-    xs = [start[0], goal[0]]
-    ys = [start[1], goal[1]]
-    for b in boxes:
-        o = b.outline(0.0)
-        xs.extend(o[:, 0])
-        ys.extend(o[:, 1])
-    # The working area's LOW corner is snapped down onto the scenario frame's
-    # own absolute lattice; the high corner only ever adds rows. So a box
-    # appearing or vanishing anywhere changes which samples exist, never where
-    # they are, and the search keeps answering the same question.
-    x0, y0 = anchor(min(xs) - pad), anchor(min(ys) - pad)
-    x1, y1 = max(xs) + pad, max(ys) + pad
-
-    fgx = np.arange(x0 - _GRID_PAD, x1 + _GRID_PAD, FINE)
-    fgy = np.arange(y0 - _GRID_PAD, y1 + _GRID_PAD, FINE)
-    FX, FY = np.meshgrid(fgx, fgy, indexing="ij")
-    P = np.column_stack([FX.ravel(), FY.ravel()])
-    sdf = np.full(len(P), np.inf)
-    for b in boxes:
-        sdf = np.minimum(sdf, b.sdf2d(P))
-    sdf_grid = sdf.reshape(len(fgx), len(fgy))
-
+    fgx, fgy, sdf_grid, bounds = truth_grid(boxes, start, goal, pad)
     result = se2_search(
-        fgx, fgy, sdf_grid, (x0, y0, x1, y1), start, goal, emb, margin, cell, yaw_bins
+        fgx, fgy, sdf_grid, bounds, start, goal, emb, margin, cell, yaw_bins, incumbent
     )
     memo[key] = result
     if not _CACHE_RO:

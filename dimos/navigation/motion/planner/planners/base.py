@@ -20,6 +20,12 @@ nothing survives reset(). Honest candidates read only what plan() receives —
 obstacles, pose, goal; the scenario handed to the factory is for judge-side
 references (gold) and world-free setup, not for peeking at truth.
 
+`plan` also takes the route the caller has PUBLISHED, or None on the first call
+and after a reset. The shell owns that memory (`adapter/planner.py` and the
+episode loop already hold the last plan); the planner owns the judgment of
+whether a fresh answer has earned the switch. See planner/revision.md's
+commitment amendment.
+
 The search is PLANAR. `plan` is handed obstacle positions as (N, 2) xy, with
 no z to read and therefore none to re-interpret: which returns are obstacles
 was decided before the call, by an obstacle model that knows the body
@@ -48,6 +54,7 @@ class PlannerEpisode(Protocol):
         obstacles: np.ndarray,
         pose: tuple[float, float, float],
         goal: tuple[float, float],
+        incumbent: Path | None = None,
     ) -> Path: ...
 
 

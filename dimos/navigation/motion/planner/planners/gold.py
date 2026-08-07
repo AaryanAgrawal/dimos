@@ -45,10 +45,14 @@ class GoldEpisode:
         pass
 
     def plan(
-        self, obstacles: np.ndarray, pose: tuple[float, float, float], goal: tuple[float, float]
+        self,
+        obstacles: np.ndarray,
+        pose: tuple[float, float, float],
+        goal: tuple[float, float],
+        incumbent: Path | None = None,
     ) -> Path:
         del obstacles  # the reference reads the scenario's true boxes instead
-        states = se2_path(self._sc.boxes, pose, goal, self._sc.emb)
+        states = se2_path(self._sc.boxes, pose, goal, self._sc.emb, incumbent=states_of(incumbent))
         if states is None:
             # Sealed: refuse — a single-pose stub, the follower runs out of path.
             return Path(ts=0.0, frame_id="world", poses=[pose_stamped(*pose)])
@@ -56,6 +60,15 @@ class GoldEpisode:
         return Path(
             ts=0.0, frame_id="world", poses=[pose_stamped(x, y, yaw) for x, y, yaw in dense]
         )
+
+
+def states_of(path: Path | None) -> np.ndarray | None:
+    """A published path back as the (N, 3) SE(2) the search speaks."""
+    if path is None or not path.poses:
+        return None
+    return np.array(
+        [[p.position.x, p.position.y, p.orientation.euler[2]] for p in path.poses]
+    ).reshape(-1, 3)
 
 
 def densify_states(states: np.ndarray, res: float) -> list[np.ndarray]:
