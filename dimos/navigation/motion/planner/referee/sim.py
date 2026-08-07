@@ -56,15 +56,18 @@ from dimos.navigation.motion.geometry import (
 from dimos.navigation.motion.obstacles import hard_points, load as load_model
 from dimos.navigation.motion.planner.planners.base import load
 from dimos.navigation.motion.scenarios import (
+    COMMIT_MARGIN,
     GEN_COUNT,
     GEN_SEED,
     SCENARIOS,
     Box,
     Scenario,
     generated,
+    path_cost,
     recorded,
     se2_path,
     straight_plan,
+    truth_grid,
 )
 
 from .score import score_world, summarize
@@ -76,8 +79,20 @@ REPEATS = 2  # seeded re-runs on identical input: the band must be a fixed point
 # Consistency chain: advance the start pose down the candidate's own path and
 # replan — each answer must agree with its predecessor's remainder. Light
 # calls: no dense-truth judging, just the deviation metric.
+#
+# The chain replays the DEPLOYMENT, so each query is handed its predecessor's
+# answer, exactly as `adapter/planner.py` and the control episode hand theirs
+# over. That makes an answer that moved a scoreable event rather than a
+# reported one: the world here is static and truth is on the table, so the
+# referee prices both routes itself and a switch truth does not pay for by
+# `COMMIT_MARGIN` is an UNEARNED SWITCH. See planner/revision.md's commitment
+# amendment. The first plan of every world still has no incumbent, so
+# everything else the verdict carries is untouched.
 SPOTS = 2
 SPOT_STEP = 0.33  # fraction of the previous solution's arc per advance
+# Deviation at which two answers are different ROUTES rather than the same one
+# re-smoothed — the control judge's own `rerolls` scale (referee/judge.py).
+SWITCH_M = 0.15
 
 
 @dataclass
@@ -101,6 +116,8 @@ class Verdict:
     flicker: float  # max near-field diff across seeded repeats, identical input
     consist: float  # max deviation of chained replans from their predecessor
     chain: list[tuple[np.ndarray, np.ndarray]]  # (replan xy, spot pose xy) per spot
+    chain_steps: int  # chained replans actually made (0 = nothing to judge)
+    unearned: int  # of those, the ones that switched route without earning it
     fans: int
     avoid_ms: float  # min plan() CPU time across the repeats
     gold: np.ndarray | None  # SE(2) body-true reference maneuver
@@ -124,6 +141,14 @@ def _fan_marks(path: Path, cfg: AvoidanceConfig) -> tuple[np.ndarray, int]:
             mask[i - 1] = True
     runs = int(np.sum(np.diff(mask.astype(int)) == 1) + (1 if mask[:1].any() else 0))
     return mask, runs
+
+
+def _priced(spot: tuple[float, float, float], path: Path) -> np.ndarray:
+    """A published path as SE(2), priced from where the robot is standing —
+    both routes in a comparison have to be walked to from the same place."""
+    return np.vstack(
+        [[list(spot)], [[p.position.x, p.position.y, p.orientation.euler[2]] for p in path.poses]]
+    )
 
 
 def _emb_cfg(cfg: AvoidanceConfig, sc: Scenario) -> AvoidanceConfig:
@@ -211,9 +236,14 @@ def judge(
     flicker = max((near_field_diff(a, b, n) for a, b in itertools.pairwise(outs)), default=0.0)
 
     # Consistency chain: walk the start pose down the latest solution and
-    # replan; the new answer must match the old answer's remainder.
+    # replan, handing each query the answer before it; the new answer must
+    # match the old answer's remainder, and where it does not, truth has to
+    # justify the difference.
     consist = 0.0
     chain: list[tuple[np.ndarray, np.ndarray]] = []
+    chain_steps = 0
+    unearned = 0
+    grid: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
     prev_out = outs[-1]
     for _ in range(0 if timed_out else SPOTS):
         pxy = np.array([[p.position.x, p.position.y] for p in prev_out.poses])
@@ -225,8 +255,21 @@ def judge(
         tang = pxy[s_idx + 1] - pxy[s_idx - 1]
         spot = (float(pxy[s_idx][0]), float(pxy[s_idx][1]), math.atan2(tang[1], tang[0]))
         remainder = Path(ts=0.0, frame_id=prev_out.frame_id, poses=prev_out.poses[s_idx:])
-        new_out = episode.plan(obstacles, spot, sc.goal)
-        consist = max(consist, near_field_diff(remainder, new_out, n))
+        new_out = episode.plan(obstacles, spot, sc.goal, prev_out)
+        dev = near_field_diff(remainder, new_out, n)
+        consist = max(consist, dev)
+        chain_steps += 1
+        if dev > SWITCH_M:
+            # A different route. The referee prices both from the spot on the
+            # BOX-EXACT truth field — the candidate had to judge this on a
+            # cloud, the judge does not — and a switch truth will not pay
+            # `COMMIT_MARGIN` for is one the candidate made for no reason.
+            if grid is None:
+                fgx, fgy, sdf, _ = truth_grid(sc.boxes, sc.start, sc.goal)
+                grid = (fgx, fgy, sdf)
+            held = path_cost(*grid, _priced(spot, remainder), sc.emb)
+            fresh = path_cost(*grid, _priced(spot, new_out), sc.emb)
+            unearned += int(not fresh < held - COMMIT_MARGIN)
         chain.append((np.array([[p.position.x, p.position.y] for p in new_out.poses]), pxy[s_idx]))
         prev_out = new_out
 
@@ -313,6 +356,8 @@ def judge(
         flicker=float(flicker),
         consist=float(consist),
         chain=chain,
+        chain_steps=chain_steps,
+        unearned=unearned,
         fans=fan_count,
         avoid_ms=float(np.min(times)),  # min-of-repeats: least load noise
         gold=gold,
@@ -610,6 +655,7 @@ def _record(v: Verdict, sc: Scenario, score: bool) -> dict[str, Any]:
         "fans": v.fans,
         "flicker": v.flicker,
         "consist": v.consist,
+        "unearned": v.unearned,
         "avoid_ms": v.avoid_ms,
         "gold_ms": v.gold_ms,
         "timed_out": v.timed_out,
@@ -626,7 +672,8 @@ def _print_row(r: dict[str, Any], score: bool) -> None:
         f"{r['name']:<14}{r['side']:>6}{r['lat_max']:>9.2f}{r['min_scored']:>9.2f}"
         f"{r['min_truth']:>9.2f}{r['env_viol']:>7.3f}{r['veto']!s:>6}{r['fans']:>6}"
         f"{r['flicker']:>9.3f}"
-        f"{r['consist']:>9.3f}{r['avoid_ms']:>7.1f}{r['gold_ms']:>7.1f}{score_col}  {r['note']}"
+        f"{r['consist']:>9.3f}{r['unearned']:>5d}{r['avoid_ms']:>7.1f}"
+        f"{r['gold_ms']:>7.1f}{score_col}  {r['note']}"
     )
 
 

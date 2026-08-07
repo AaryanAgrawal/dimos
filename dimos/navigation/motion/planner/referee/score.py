@@ -12,12 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scoring: gold closeness, then consistency, then speed — by magnitude.
+"""Scoring: gold closeness, then consistency, then speed and commitment.
 
-world = gate * (100*gold + 10*consistency + 1*speed), max 111. The order
-gaps make priorities lexicographic in effect: no speed buys back deviation,
-nothing buys back a collision (gate 0 = non-vetoed interpenetration).
+world = gate * (100*gold + 10*consistency + 1*speed + 1*commit), max 112. The
+order gaps make priorities lexicographic in effect: no speed buys back
+deviation, nothing buys back a collision (gate 0 = non-vetoed interpenetration).
 Battery score = mean over worlds; report worst world and DQ count too.
+
+`commit` is the bottom tier deliberately. It grades whether a chained replan
+that CHANGED route could show truth a reason for it, and a planner that simply
+never let go of its first answer would be sitting on a route the world may have
+closed — which feasibility re-validation and the deviation half of
+`consistency` already charge for, at ten and a hundred times the weight. So it
+can name the churn without ever being worth buying.
 """
 
 from __future__ import annotations
@@ -75,10 +82,10 @@ def score_world(v: Verdict) -> dict[str, Any]:
     # Safety gate: a non-vetoed path that interpenetrates truth is a
     # collision the robot would perform. Nothing else matters.
     if v.min_truth < -1e-6 and not v.veto:
-        out.update(dq=True, gold=0.0, consistency=0.0, speed=0.0, total=0.0)
+        out.update(dq=True, gold=0.0, consistency=0.0, speed=0.0, commit=0.0, total=0.0)
         return out
     if v.timed_out:
-        out.update(dq="timeout", gold=0.0, consistency=0.0, speed=0.0, total=0.0)
+        out.update(dq="timeout", gold=0.0, consistency=0.0, speed=0.0, commit=0.0, total=0.0)
         return out
 
     path = np.array([[p.position.x, p.position.y] for p in v.final.poses])
@@ -100,12 +107,16 @@ def score_world(v: Verdict) -> dict[str, Any]:
     worst = max(v.flicker, v.consist)
     c = max(0.0, 1.0 - worst / CONSIST_SCALE)
     s = min(1.0, SPEED_BUDGET_MS / max(v.avoid_ms, 1e-6))
+    # A chain with no steps (a refusal, a stub) has nothing to have got wrong.
+    m = 1.0 if not v.chain_steps else 1.0 - v.unearned / v.chain_steps
 
     out.update(
         gold=round(g, 4),
         consistency=round(c, 4),
         speed=round(s, 4),
-        total=round(100.0 * g + 10.0 * c + s, 2),
+        commit=round(m, 4),
+        unearned=v.unearned,
+        total=round(100.0 * g + 10.0 * c + s + m, 2),
     )
     return out
 
@@ -126,5 +137,9 @@ def summarize(worlds: list[dict[str, Any]]) -> dict[str, Any]:
         "gold": round(float(np.mean([w["gold"] for w in worlds])), 4),
         "consistency": round(float(np.mean([w["consistency"] for w in worlds])), 4),
         "speed": round(float(np.mean([w["speed"] for w in worlds])), 4),
+        "commit": round(float(np.mean([w["commit"] for w in worlds])), 4),
+        # Chained replans that changed route without a reason truth would pay
+        # for -- the amendment's own KPI, in the court that can price it.
+        "unearned": sum(int(w.get("unearned", 0)) for w in worlds),
         "worlds": len(worlds),
     }
