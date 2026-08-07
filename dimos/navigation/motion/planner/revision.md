@@ -184,13 +184,32 @@ witness — **replanning from your own emitted route can never refuse.**
 
 Acceptance:
 
-- [ ] New pinned referee test: every k-th pose along every emitted path
+- [x] New pinned referee test: every k-th pose along every emitted path
   (gold and candidate, curated + gen), replayed as the start of a fresh query,
   yields a plan — refusal from your own route is a failure.
-- [ ] `--score --gen 40 -s 'gen*'`: 0 timeouts, 0 collisions (gen014's
+  *`referee/test_replan_invariance.py`: every 5th published pose (0.5 m at the
+  0.1 m path resolution), 25 worlds (15 curated + gen000-009), gold replayed
+  through gold and the candidate through its own cloud. On the union: gold
+  refused on 5 worlds / 11 poses — door_side at the FIRST vertex it published,
+  plus corridor_side_goal, gen000, gen004, gen007 — and the candidate on 2 / 7
+  (gen000 from (2.51, 1.56, 0.00), gen004 from (-0.72, -0.56, -3.14)). On the
+  intersection: 0 and 0. `test_start_witness` moved with the doctrine — its
+  under-margin corridor is now sized on the standing box, and door_side no
+  longer witnesses the snap at all (0.117 standing vs 0.033 union at the
+  snapped cell), so the pose-not-cell rule is pinned on a wall BEHIND, where
+  the standing box is only 10 mm shorter than the union.*
+- [x] `--score --gen 40 -s 'gen*'`: 0 timeouts, 0 collisions (gen014's
   collision inspected separately if it survives the fix).
-- [ ] Curated + gen batteries re-earn ≥ 107.62 / 102.22 through the unchanged
+  *40/40 goal, 0 DQ, 0 categorical failures, 114.76 mean — was 6/40 failing.
+  gen014 did not survive: it reaches goal and is the battery's worst world at
+  112.22, so there is no separate collision to inspect.*
+- [x] Curated + gen batteries re-earn ≥ 107.62 / 102.22 through the unchanged
   judge; gold gate moves only where refusals became routes.
+  *115.34 curated (16/16, boxed_in still refuses) and 114.92 mixed (56 worlds),
+  0 DQ, 0 failures, env_viol 6 at 0.0435 m max. Nothing moved down: all 25
+  worlds' gold routes for their own start are unchanged vertex for vertex
+  across the cache bump — the search never changed, only what the seed
+  accepts, and every one of those starts already passed on the union.*
 
 ## Speed: eliminated via the governor, not modelled
 
