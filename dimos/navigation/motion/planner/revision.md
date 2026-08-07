@@ -332,8 +332,37 @@ Acceptance:
   (query, incumbent) cache keys — the FIRST gold battery after any gold change
   runs cold and DQs on the time limit (34/56 observed); warm the cache before
   reading a gold gate.*
-- [ ] Runtime: incumbent validation + extension inside the 20 ms tick budget
+- [x] Runtime: incumbent validation + extension inside the 20 ms tick budget
   (door.zenoh's dense-cloud overrun stays the separate open item).
+  *door2.zenoh, 21 ticks, the crate timed directly — both builds loaded into
+  ONE process and interleaved, min of 15, so they see the same weather. Fresh
+  search alone 12.4 ms/tick, unchanged. Incumbent chained every tick: 26.5 →
+  16.8 ms/tick, worst tick 198.6 → 59.6. Under the module's OWN rule —
+  `_retask` drops the incumbent when the carrot jumps past `reset_carrot_m` —
+  13.5 → 12.6, i.e. on the robot the held route costs nothing measurable.
+  Two fixes, both bit-stable (63/63 plans identical across the two builds, the
+  crate's 19 tests, the referee's 118 and the battery at 114.80 / 40 goals /
+  0 rerolls): re-validate the trimmed route BEFORE carrying it — the two are
+  independent tests joined by an AND, and the carry is a full lattice search,
+  so on the tick where the map closed the corridor the robot was walking down
+  it was 199 ms spent on a route the very next test threw away; and ONE
+  clearance table per `plan()`, shared by the fresh search and by whatever the
+  incumbent asks. `Clear` is a pure memo of (world, footprints, margin,
+  lattice), so a cell the fresh search scanned is a cell the extension reads:
+  measured, the extension's own footprint scans fall ~94% (7227 vs 6815
+  cumulative union scans on the tick that used to pay 6800 of its own).
+  What is LEFT is the extension's own A* on a goal that jumped (12k pops,
+  60 ms). Sharing the heuristic sweep would fix that and may not be done: the
+  sweep stops the moment ITS start settles, so one shared between two starts
+  settles a different set and `h` moves for every cell outside it — admissible
+  still, but a different published route, which this line is not allowed to
+  buy.
+  This item did not open on a commitment regression. `adapter/diagnose.py`'s
+  replay pass calls `ep.plan(pts, pose, goal)` with no incumbent, so its "plan
+  wall time" has never run this code at all: it reads 16.5 ms/tick on the
+  pre-fix crate and 18.0 on the fixed one, the same number, and it is 21 ticks
+  of rerun logging and stray-column kd-trees as much as of planning. The 29.9
+  that opened the item was a loaded machine.*
 - [ ] Field: the diagnose plans-pass reroll line drops on the next robot
   recording (deferred to the next session; not agent-blockable).
 

@@ -1092,6 +1092,23 @@ fn seg_free(w: &mut World, fps: &Fps, emb: &Emb, a: &[f64; 3], b: &[f64; 3], flo
     true
 }
 
+/// The lattice the search walks: cell centres from their ABSOLUTE index, for
+/// the same reason the fine field uses one -- `x0 + i * CELL` reconstructs a
+/// position that depends on where the corner is, and the corner depends on the
+/// far end of the cloud. `k * CELL` does not.
+fn lattice_axes(w: &World) -> (Vec<f64>, Vec<f64>) {
+    let (x0, y0, x1, y1) = w.bounds;
+    let (kx, ky) = (w.kx, w.ky);
+    (
+        (0..arange_len(x0, x1 + CELL, CELL))
+            .map(|i| (kx + i as i64) as f64 * CELL)
+            .collect(),
+        (0..arange_len(y0, y1 + CELL, CELL))
+            .map(|j| (ky + j as i64) as f64 * CELL)
+            .collect(),
+    )
+}
+
 pub fn se2_search(
     w: &mut World,
     fps: &Fps,
@@ -1100,23 +1117,31 @@ pub fn se2_search(
     emb: &Emb,
     margin: f64,
 ) -> Option<Vec<[f64; 3]>> {
-    let (x0, y0, x1, y1) = w.bounds;
+    let (gx, gy) = lattice_axes(w);
+    let mut cl = Clear::new(w, fps, margin, gx, gy);
+    se2_search_in(&mut cl, fps, start, goal, emb, margin)
+}
+
+/// `se2_search` on a clearance table the caller owns.
+///
+/// The table is a pure memo of (world, footprints, margin, lattice) -- a cell's
+/// entry is the same number whoever asked for it -- so a second query against
+/// the same world reads what the first one scanned instead of scanning it
+/// again. That is the whole of the sharing: nothing search-specific lives in
+/// `Clear`, and a shared table returns the same answers a private one would.
+fn se2_search_in(
+    cl: &mut Clear,
+    fps: &Fps,
+    start: (f64, f64, f64),
+    goal: (f64, f64),
+    emb: &Emb,
+    margin: f64,
+) -> Option<Vec<[f64; 3]>> {
     let offs = fps.union().to_vec();
     let stand_offs = fps.stand().to_vec();
-    let (kx, ky) = (w.kx, w.ky);
-    // Cell centres from their ABSOLUTE lattice index, for the same reason the
-    // fine field uses one: `x0 + i * CELL` reconstructs a position that depends
-    // on where the corner is, and the corner depends on the far end of the
-    // cloud. `k * CELL` does not.
-    let gx: Vec<f64> = (0..arange_len(x0, x1 + CELL, CELL))
-        .map(|i| (kx + i as i64) as f64 * CELL)
-        .collect();
-    let gy: Vec<f64> = (0..arange_len(y0, y1 + CELL, CELL))
-        .map(|j| (ky + j as i64) as f64 * CELL)
-        .collect();
-    let (nx, ny) = (gx.len(), gy.len());
+    let (kx, ky) = (cl.w.kx, cl.w.ky);
+    let (nx, ny) = (cl.nx, cl.ny);
     let thetas = yaw_bins();
-    let mut cl = Clear::new(w, fps, margin, gx, gy);
 
     let cell_of = |px: f64, py: f64| -> (usize, usize) {
         (
@@ -1176,7 +1201,7 @@ pub fn se2_search(
     let (sb, si, sj) = match if witness {
         Some(sb)
     } else {
-        fit_bin(&mut cl, si, sj)
+        fit_bin(cl, si, sj)
     } {
         Some(b) => (b, si, sj),
         None => {
@@ -1198,7 +1223,7 @@ pub fn se2_search(
             let here = [start.0, start.1, start.2];
             let mut pick = None;
             for (i, j) in cands {
-                if let Some(b) = fit_bin(&mut cl, i, j) {
+                if let Some(b) = fit_bin(cl, i, j) {
                     let there = [cl.gx[i], cl.gy[j], thetas[b]];
                     if seg_free(cl.w, fps, emb, &here, &there, margin) {
                         pick = Some((b, i, j));
@@ -1704,7 +1729,7 @@ pub fn se2_search(
         .map(|&(b, i, j)| [cl.gx[i], cl.gy[j], thetas[b]])
         .collect();
 
-    let w = cl.w;
+    let w = &mut *cl.w;
     let raw_clear: Vec<f64> = raw
         .iter()
         .map(|s| pose_clear(w, &offs, s[0], s[1], s[2]))
@@ -2217,7 +2242,7 @@ fn trim_to_pose(states: &[[f64; 3]], pose: (f64, f64, f64)) -> Vec<[f64; 3]> {
 /// priced in collisions, and map noise flapping a corridor is perception's
 /// ledger, not the planner's to absorb.
 fn committed(
-    w: &mut World,
+    cl: &mut Clear,
     fps: &Fps,
     emb: &Emb,
     incumbent: &[[f64; 3]],
@@ -2228,6 +2253,16 @@ fn committed(
     let mut route = trim_to_pose(incumbent, pose);
     if route.len() < 2 {
         return None;
+    }
+    // RE-VALIDATE FIRST, carry second. The two are independent tests joined by
+    // an AND -- a route this map has closed is dropped whatever the extension
+    // would have found -- and the extension is a full lattice search, so asking
+    // in this order is the difference between 0.1 ms and 200 ms on the tick
+    // where the map closed the corridor the robot was walking down.
+    for pair in route.windows(2) {
+        if !seg_free(cl.w, fps, emb, &pair[0], &pair[1], margin) {
+            return None;
+        }
     }
     let end = *route.last().expect("len >= 2");
     let cell = |v: f64| (v / CELL).round_even_i64();
@@ -2241,22 +2276,27 @@ fn committed(
     if (cell(end[0]), cell(end[1])) != (cell(goal.0), cell(goal.1)) {
         carried = true;
         let tgt = [goal.0, goal.1, end[2]];
-        if seg_free(w, fps, emb, &end, &tgt, margin) {
+        if seg_free(cl.w, fps, emb, &end, &tgt, margin) {
+            // The chord IS the segment just cleared; it is not asked again.
             route.push(tgt);
         } else {
-            route.extend_from_slice(&se2_search(
-                w,
+            let join = route.len() - 1;
+            // On the clearance table the fresh search just filled: the
+            // extension asks about the same world at the same margin, and on a
+            // goal that moved it walks mostly the same cells.
+            route.extend_from_slice(&se2_search_in(
+                cl,
                 fps,
                 (end[0], end[1], end[2]),
                 goal,
                 emb,
                 margin,
             )?);
-        }
-    }
-    for pair in route.windows(2) {
-        if !seg_free(w, fps, emb, &pair[0], &pair[1], margin) {
-            return None;
+            for pair in route[join..].windows(2) {
+                if !seg_free(cl.w, fps, emb, &pair[0], &pair[1], margin) {
+                    return None;
+                }
+            }
         }
     }
     Some((route, carried))
@@ -2309,10 +2349,19 @@ pub fn plan(
     // the fresh search has to answer the same question whether or not anything
     // was published before it, or the comparison below is comparing two things
     // that were asked differently.
-    let fresh = se2_search(&mut w, &fps, pose, goal, emb, margin);
-    let held = match incumbent {
-        None => None,
-        Some(inc) => committed(&mut w, &fps, emb, inc, pose, goal, margin),
+    // ONE clearance table per plan, shared by the fresh search and by anything
+    // the incumbent asks of the same world: the table is a memo of (world,
+    // footprints, margin, lattice), so a cell the fresh search scanned is a
+    // cell the extension reads instead of scanning again.
+    let (fresh, held) = {
+        let (gx, gy) = lattice_axes(&w);
+        let mut cl = Clear::new(&mut w, &fps, margin, gx, gy);
+        let fresh = se2_search_in(&mut cl, &fps, pose, goal, emb, margin);
+        let held = match incumbent {
+            None => None,
+            Some(inc) => committed(&mut cl, &fps, emb, inc, pose, goal, margin),
+        };
+        (fresh, held)
     };
     // A route that is kept and was not carried anywhere new is ALREADY at
     // resolution -- it came back through this same `densify` on the tick that
