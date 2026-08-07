@@ -189,6 +189,10 @@ class MotionPlanner(Module):
         # was made from.
         self._cloud_seq = 0
         self._planned: tuple[int, tuple[float, float]] | None = None
+        # ...and the plan itself. The search prefers the route it already
+        # published unless a fresh one earns the switch, and this module is
+        # where that memory lives: the shell owns it, the planner judges it.
+        self._incumbent: RefereePath | None = None
         self._pose: tuple[float, float, float] | None = None
         # Where the surface under the robot is, off the body rather than off
         # the scene: the base rides emb.base_height above it.
@@ -269,8 +273,11 @@ class MotionPlanner(Module):
             if pose is not None and age is not None and age > self.config.max_map_age_s:
                 # A hold is not gated: it is a statement about the CLOCK, and
                 # nothing arriving is exactly the case it fires on. Forget what
-                # was planned so the first live tick plans again.
+                # was planned so the first live tick plans again -- and what was
+                # published with it: a route held across a dead link is a route
+                # nothing has re-validated.
                 self._planned = None
+                self._incumbent = None
                 self._hold(pose, age)
             elif cloud is not None and pose is not None and global_xy is not None:
                 if self._stale:
@@ -281,9 +288,10 @@ class MotionPlanner(Module):
                 goal = carrot_along(global_xy, (pose[0], pose[1]), self.config.goal_lookahead_m)
                 if self._due(cloud_seq, goal):
                     if self._retask(goal) and self._episode is not None:
-                        # a new task: warm starts and hysteresis from the old
-                        # one are stale (no-op for the stateless rust target)
+                        # a new task: warm starts, hysteresis and the route
+                        # being held are all about the old one
                         self._episode.reset()
+                        self._incumbent = None
                     # a pose implies a ground reference: both come off the same
                     # tf-resolved base, so this cannot be None here
                     if self._plan_once(cloud, pose, goal, 0.0 if ground_z is None else ground_z):
@@ -341,10 +349,11 @@ class MotionPlanner(Module):
         # worlds.
         pts = hard_points(self._model, cloud.points_f32(), ground_z)
         try:
-            ref = self._episode.plan(pts[:, :2], pose, goal)
+            ref = self._episode.plan(pts[:, :2], pose, goal, self._incumbent)
         except Exception:
             logger.exception("planner failed; keeping the last published path")
             return False
+        self._incumbent = ref
         plan = annotate(ref, pts, self._emb, ts=time.time(), frame_id=self.config.world_frame)
         self.path.publish(plan)
         self._stall.ok(f"planning: {len(plan.poses)} waypoints")

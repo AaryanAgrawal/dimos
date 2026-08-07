@@ -332,7 +332,12 @@ def run_episode(
                 # -- plan / replan from the controller's own pose
                 if t >= next_plan_t:
                     t0 = _time.process_time()
-                    ref = planner.plan(obstacles[:, :2], visible_pose, sc.goal)
+                    # The route already published is an input: the goal here is
+                    # fixed and the map is static, so a route that changed on a
+                    # replan changed for no reason the world can name.
+                    ref = planner.plan(
+                        obstacles[:, :2], visible_pose, sc.goal, plans[-1] if plans else None
+                    )
                     plan_ms.append((_time.process_time() - t0) * 1e3)
                     plans.append(ref)
                     plan_t.append(t)
