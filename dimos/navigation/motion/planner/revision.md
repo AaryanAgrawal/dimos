@@ -247,10 +247,20 @@ plan(cloud, pose, goal, incumbent: Path | None) -> Path
 - Refusal discipline: refuse only when neither the fresh search nor the
   (extended) incumbent is feasible — a still-walkable incumbent beats a stub,
   which closes the residual giving-up mode from the robot side too.
-- `commit_margin` is **measured, not tuned**: the p99 cost spread the seed
-  quanta alone produce (±1 yaw bin, ±half cell around battery query poses),
-  plus headroom; it must cover gen001's 0.11 m class. One constant, one
-  measuring script (envelope-bake precedent), in the gold cache key.
+- `commit_margin` is **measured, not tuned**, and covers BOTH noise sources
+  that can fake a better route: the p99 cost spread the seed quanta produce
+  (±1 yaw bin, ±half cell around battery query poses) AND the cost jitter of a
+  fixed route across consecutive local_map frames of a static field scene
+  (real lidar/raycast noise, measured on the recorded worlds). Combined spread
+  + headroom; it must cover gen001's 0.11 m class. One constant, one measuring
+  script (envelope-bake precedent), in the gold cache key.
+- Re-validation is the same per-row clearance test the search runs, on the
+  CURRENT map, instantly — a detected obstruction always invalidates the
+  incumbent this tick. No persistence/confirmation filter, ever: delaying
+  belief in an obstacle is a robustness layer priced in collisions. Map-noise
+  flapping (a voxel blinking on the corridor) is perception's ledger — the
+  diagnose churn pass names it same-map vs new-map — not the planner's to
+  absorb.
 - State lives with the callers that already hold the last plan:
   `adapter/planner.py` (kept for `replan_due`) and the episode loop
   (`plans[-1]`). The shell owns memory; the planner owns judgment.
