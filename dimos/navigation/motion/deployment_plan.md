@@ -76,11 +76,9 @@ crosses twice (lidar out, `local_map` in), and the message got much bigger.
 
 What it buys is **jitter immunity on the last stage**: the follower ticks at a
 steady 10 Hz off a locally-held path instead of the robot receiving `cmd_vel`
-in bursts whenever the link hiccups. That is the actual goal — smooth, correct
-motion — and it is worth the bandwidth. But it is a jitter argument, not a
-latency argument, and the difference matters when deciding what to do next.
+in bursts whenever the link hiccups.
 
-### The end state (option C, later)
+### The end state
 
 Move the raycaster to the robot as well and the loop is fully local: the link
 then carries lidar for visualization, goals, teleop and telemetry, none of it
@@ -105,9 +103,9 @@ many cores the pool happened to get — 8.3 on the laptop, 2.9 on the robot —
 and the ratio moves with the machine's width, not its speed. Two numbers are
 portable and worth remembering:
 
-| | laptop | robot | factor |
-|---|---|---|---|
-| single-thread CPU-s per 310 s of lidar | 100.8 | 310.8 | **3.08x** |
+|                                              | laptop             | robot                | factor             |
+|----------------------------------------------|--------------------|----------------------|--------------------|
+| single-thread CPU-s per 310 s of lidar       | 100.8              | 310.8                | **3.08x**          |
 | single-thread per-frame p50 / p95 / p99 (ms) | 28.9 / 64.7 / 87.3 | 99.7 / 187.7 / 237.7 | 3.4x / 2.9x / 2.7x |
 
 **Rule of thumb: one Go2 core ≈ one third of a laptop core on this workload.**
@@ -126,12 +124,12 @@ points/cloud, 310 s) through the real `RayTracingVoxelMap` at wall-clock speed,
 with the `go2_zenoh_raycaster` config (`voxel_size=0.08`, `emit_every=10`,
 `global_emit_every=100`, `support_min=4`):
 
-| | laptop | robot (rayon=7) | robot (rayon=2) |
-|---|---|---|---|
-| clouds processed | 99.9% | 97.0% | 91.8% |
-| sustained rate | 9.98 Hz | 9.69 Hz | 9.17 Hz |
-| cores consumed | 0.83 | 1.46 | 1.02 |
-| peak RSS | 305 MB | 304 MB | 304 MB |
+|                  | laptop  | robot (rayon=7) | robot (rayon=2) |
+|------------------|---------|-----------------|-----------------|
+| clouds processed | 99.9%   | 97.0%           | 91.8%           |
+| sustained rate   | 9.98 Hz | 9.69 Hz         | 9.17 Hz         |
+| cores consumed   | 0.83    | 1.46            | 1.02            |
+| peak RSS         | 305 MB  | 304 MB          | 304 MB          |
 
 Robot idle baseline at the time: **2.80 of 7 cores busy, 4.20 free** (30 s
 `/proc/stat` sample), with the go2web bridge, `basic_service`, `mcf_main`,
@@ -139,11 +137,16 @@ Robot idle baseline at the time: **2.80 of 7 cores busy, 4.20 free** (30 s
 adds ~1.5 cores to a machine with ~4.2 free — but three things bound the claim:
 
 - **The tail exceeds the frame budget.** p99 is 140 ms against a 100 ms
-  budget at 10 Hz. Nothing overflows the 128-deep input queue, but the module
-  is one `tokio::select!` loop over both inputs, so under load odometry gets
-  consumed behind lidar, drifts past the 0.1 s `POSE_MATCH_TOLERANCE_S`, and
-  the cloud is dropped for want of a pose. That is where the missing 3% (and
-  8% at rayon=2) goes — not to queue overflow.
+  budget at 10 Hz. Nothing overflows the 128-deep input queue. The missing 3%
+  (and 8% at rayon=2) was the cloud being dropped for want of a pose — but
+  load was never the whole story, and blaming it hid how little margin there
+  was. `select!` polls its ready arms in random order, so a cloud outruns the
+  odometry queued beside it whatever the load; and the go2 sweep measures
+  100.8 ms, not the nominal 100, which puts the previous sweep's pose 0.8 ms
+  outside `POSE_MATCH_TOLERANCE_S`. There was no second chance to lose.
+  Measured on 20260807-190044.mcap at 6.1% of clouds, on an idle laptop.
+  The module now holds an unmatched cloud for its own sweep's pose instead of
+  discarding it, so re-measure this row before quoting it.
 - **Cost grows with the map, without bound.** Single-threaded per-frame mean
   went 73 ms → 161 ms over the 5-minute recording as the map reached 366k
   voxels; `emit_points` walks every voxel on each emit. A 5-minute run fits.
@@ -168,11 +171,11 @@ cloud, so it stays confident.
 
 Three guards:
 
-| where | rule | status |
-|-------|------|--------|
-| `MotionPlanner` | `local_map` older than `max_map_age_s` (5 s) → publish the single-pose hold stub | **done** (`fd5c873a5`) |
-| `TrajectoryFollower` | `path` older than N → zero the twist | todo |
-| `CmdVelMux` | `nav_cmd_vel` stale → zero `cmd_vel` | todo, part of writing the mux |
+| where                | rule                                                                             | status                        |
+|----------------------|----------------------------------------------------------------------------------|-------------------------------|
+| `MotionPlanner`      | `local_map` older than `max_map_age_s` (5 s) → publish the single-pose hold stub | **done** (`fd5c873a5`)        |
+| `TrajectoryFollower` | `path` older than N → zero the twist                                             | todo                          |
+| `CmdVelMux`          | `nav_cmd_vel` stale → zero `cmd_vel`                                             | todo, part of writing the mux |
 
 Staleness is measured from **arrival**, not `msg.ts`: the mapper's clock is not
 the robot's, and what these guard is how long since the producer was last heard

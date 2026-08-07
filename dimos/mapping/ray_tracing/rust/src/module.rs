@@ -50,6 +50,11 @@ pub struct RayTracingVoxelMap {
 
     map: VoxelMap,
     poses: VecDeque<(f64, Vector3<f32>, UnitQuaternion<f32>)>,
+    /// A cloud still waiting on the pose for its own sweep. Both handlers share one
+    /// `select!` loop that polls ready arms in random order, so a cloud routinely
+    /// reaches us before the odometry sitting next to it in the queue. Holding it for
+    /// one sweep registers it against its own pose instead of throwing it away.
+    pending: Option<PointCloud2>,
     frame_count: u32,
     batch_points: Vec<(f32, f32, f32)>,
     batch_origins: Vec<(f32, f32, f32)>,
@@ -69,18 +74,48 @@ impl RayTracingVoxelMap {
                 )),
             ),
         );
+        self.try_register().await;
     }
 
     async fn on_lidar(&mut self, msg: PointCloud2) {
-        // Register with the pose nearest the cloud stamp, never a stale one.
-        let Some((translation, rotation)) = nearest_pose(&self.poses, time_secs(&msg.header.stamp))
-        else {
+        // At most one sweep is ever held: a newer cloud retires the older one, whose
+        // pose is by then late enough that it is not coming.
+        if self.pending.replace(msg).is_some() {
             warn_throttled!(
                 Duration::from_secs(1),
-                "No odometry within tolerance of the cloud stamp, dropped a cloud.",
+                "No odometry arrived for the held cloud, dropped a cloud.",
             );
+        }
+        self.try_register().await;
+    }
+
+    /// Register the held cloud once its pose is in, or keep holding it.
+    async fn try_register(&mut self) {
+        let Some(msg) = self.pending.take() else {
             return;
         };
+        let stamp = time_secs(&msg.header.stamp);
+        // Register with the pose nearest the cloud stamp, never a stale one.
+        let Some((translation, rotation)) = nearest_pose(&self.poses, stamp) else {
+            if pose_still_due(&self.poses, stamp) {
+                self.pending = Some(msg);
+            } else {
+                warn_throttled!(
+                    Duration::from_secs(1),
+                    "Odometry passed the cloud stamp without a match, dropped a cloud.",
+                );
+            }
+            return;
+        };
+        self.register(msg, translation, rotation).await;
+    }
+
+    async fn register(
+        &mut self,
+        msg: PointCloud2,
+        translation: Vector3<f32>,
+        rotation: UnitQuaternion<f32>,
+    ) {
         let origin = (translation.x, translation.y, translation.z);
 
         let voxel_size = self.config.voxel_size;
@@ -200,6 +235,12 @@ fn emit_due(frame_count: u32, every: u32) -> bool {
 const POSE_BUFFER_LEN: usize = 256;
 
 /// Max stamp gap between a cloud and the pose used to register it (s).
+///
+/// Deliberately under one sweep: the bridge stamps clouds and odometry off the same
+/// sweep clock, so the right pose matches exactly and anything a whole sweep away is
+/// the wrong one. On the go2 that sweep measures 100.8 ms, not the nominal 100 --
+/// close enough that the previous sweep's pose lands 0.8 ms outside this gate, which
+/// is why a cloud arriving before its pose has to be held rather than matched loosely.
 const POSE_MATCH_TOLERANCE_S: f64 = 0.1;
 
 fn time_secs(t: &Time) -> f64 {
@@ -236,6 +277,15 @@ fn nearest_pose(
     } else {
         None
     }
+}
+
+/// Whether a pose matching this cloud could still arrive. Odometry stamps advance
+/// monotonically, so once one lands past the cloud's own match window the sweep's pose
+/// either never came or came unmatched, and holding the cloud any longer is pointless.
+fn pose_still_due(poses: &VecDeque<(f64, Vector3<f32>, UnitQuaternion<f32>)>, stamp: f64) -> bool {
+    poses
+        .back()
+        .is_none_or(|&(t, ..)| t < stamp + POSE_MATCH_TOLERANCE_S)
 }
 
 struct ExtractError(&'static str);
@@ -381,6 +431,53 @@ mod tests {
             "stale poses must not register a cloud"
         );
         assert!(nearest_pose(&VecDeque::new(), 1.0).is_none());
+    }
+
+    #[test]
+    fn a_cloud_ahead_of_its_pose_is_held_not_dropped() {
+        // The go2 sweep is 100.8 ms, so the previous sweep's pose sits just outside the
+        // match gate. A cloud that beats its own pose must wait for it.
+        const SWEEP: f64 = 0.1008;
+        let mut poses: VecDeque<(f64, Vector3<f32>, UnitQuaternion<f32>)> = VecDeque::new();
+        push_pose(
+            &mut poses,
+            (10.0, Vector3::zeros(), UnitQuaternion::identity()),
+        );
+        let cloud = 10.0 + SWEEP;
+
+        assert!(
+            nearest_pose(&poses, cloud).is_none(),
+            "one sweep of drift already exceeds the gate -- this is the bug's trigger"
+        );
+        assert!(
+            pose_still_due(&poses, cloud),
+            "its own pose has yet to land"
+        );
+
+        push_pose(
+            &mut poses,
+            (
+                cloud,
+                Vector3::new(7.0, 0.0, 0.0),
+                UnitQuaternion::identity(),
+            ),
+        );
+        let (v, _) = nearest_pose(&poses, cloud).expect("the sweep's own pose registers it");
+        assert_eq!(v.x, 7.0);
+    }
+
+    #[test]
+    fn a_cloud_whose_pose_never_came_stops_being_due() {
+        let mut poses: VecDeque<(f64, Vector3<f32>, UnitQuaternion<f32>)> = VecDeque::new();
+        assert!(pose_still_due(&poses, 10.0), "empty buffer waits");
+        push_pose(
+            &mut poses,
+            (10.5, Vector3::zeros(), UnitQuaternion::identity()),
+        );
+        assert!(
+            !pose_still_due(&poses, 10.0),
+            "odometry ran past the cloud unmatched, so nothing is coming for it"
+        );
     }
 
     #[test]
