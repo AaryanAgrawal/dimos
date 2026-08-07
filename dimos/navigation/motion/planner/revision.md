@@ -211,6 +211,73 @@ Acceptance:
   across the cache bump — the search never changed, only what the seed
   accepts, and every one of those starts already passed on the union.*
 
+## Amendment: commitment — the incumbent is an input (adopted 2026-08-07)
+
+The search is a stateless argmin over a quantized lattice: the continuous pose
+enters as a seed state (22.5° yaw bin, 0.12 m cell), so every replan is a
+slightly different query even with a clean pose and a frozen map — and where
+two routes near-tie, sub-noise pose motion flips the winner. gen001: ±0.1° of
+yaw across the −11.25° bin boundary at (3.33, −2.89) deterministically swaps
+routes (Δcost ≈ 0.11 m over 2.4 m); 25 of its 51 replans re-roll while the yaw
+sweeps five boundaries — the plan visibly flaps at replan rate. Battery-wide:
+**821 same-map rerolls across 40 gen worlds at a near-max 114.76** (`rerolls`
+column, judge `REROLL_M = 0.15`). Prior sightings: u_trap's mid-route flip,
+door1's jiggle, 050343's 14 pose-driven flips (38 % of drive time in flip
+transients), the corridor near-tie, 193827's goal-region flicker. The planner
+is correct every single time; it just has no reason to prefer the route it
+already published, because that is not one of its inputs.
+
+**Design: the incumbent becomes a parameter; the planner stays pure.**
+
+```
+plan(cloud, pose, goal, incumbent: Path | None) -> Path
+```
+
+- Rule, inside the search (only the planner can price it): re-validate the
+  incumbent on the current map (per drift row, consistent post
+  standing-witness), head-trim to the current pose, cost it under the same
+  governor-time pricing; run the fresh search; **switch only if the challenger
+  wins by more than `commit_margin`**. `incumbent=None` (first plan, reset) is
+  bit-identical to today — every existing test and cache entry stands.
+- Carrot drift: the carrot advances ~0.2 m between field replans, so the
+  incumbent rarely ends at the new goal. Default: extend it — a sub-query from
+  the incumbent's endpoint to the new carrot, cost = trimmed incumbent +
+  extension. A carrot jump beyond `reset_carrot_m` (1.0) drops the incumbent,
+  as the episode reset already does.
+- Refusal discipline: refuse only when neither the fresh search nor the
+  (extended) incumbent is feasible — a still-walkable incumbent beats a stub,
+  which closes the residual giving-up mode from the robot side too.
+- `commit_margin` is **measured, not tuned**: the p99 cost spread the seed
+  quanta alone produce (±1 yaw bin, ±half cell around battery query poses),
+  plus headroom; it must cover gen001's 0.11 m class. One constant, one
+  measuring script (envelope-bake precedent), in the gold cache key.
+- State lives with the callers that already hold the last plan:
+  `adapter/planner.py` (kept for `replan_due`) and the episode loop
+  (`plans[-1]`). The shell owns memory; the planner owns judgment.
+- Gold gets identical semantics (`v13-commitment`), cached on
+  (world, query, incumbent digest) — required for referee comparability.
+- Scoring moves to the right court: the **planner referee** gains a
+  consistency term — replay chains feed each query its predecessor's answer,
+  and a switch not earned by `commit_margin` is a named, scored violation;
+  gold's own chains must score clean (gate). The control battery's `rerolls`
+  stays named-not-scored (it grades the follower); it is this amendment's KPI.
+
+Acceptance:
+
+- [ ] gen001 pinned repro: same (x, y), yaw ±0.1° across the bin boundary,
+  previous answer as incumbent → the route does not change.
+- [ ] Battery `rerolls`: 821 → ~0 on `--score --gen 40 -s 'gen*'` (the sim map
+  is static, so any residual must be an earned, > margin improvement), with
+  40/40 goals and 0 categorical failures kept.
+- [ ] `incumbent=None` byte-compatibility: grid invariance, replan invariance,
+  and every existing referee test pass unchanged.
+- [ ] Planner referee chain test + consistency scoring land together; gold
+  chains score clean; the candidate re-earns; new gates frozen and recorded.
+- [ ] Runtime: incumbent validation + extension inside the 20 ms tick budget
+  (door.zenoh's dense-cloud overrun stays the separate open item).
+- [ ] Field: the diagnose plans-pass reroll line drops on the next robot
+  recording (deferred to the next session; not agent-blockable).
+
 ## Speed: eliminated via the governor, not modelled
 
 The envelope only binds where clearance is small, and there both tracks obey
