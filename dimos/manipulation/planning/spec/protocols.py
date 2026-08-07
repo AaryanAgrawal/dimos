@@ -288,6 +288,11 @@ class PlannerSpec(Protocol):
     They use WorldSpec for collision checking and are stateless.
     All planners are backend-agnostic - they only use WorldSpec methods.
 
+    The supplied ``start`` is the authoritative state snapshot for a planning
+    request. Implementations must not replace it with, or compare it against,
+    a later sample from the live world. Trajectory execution is responsible
+    for rejecting a path when the robot has moved too far from its start.
+
     Implementations:
         - RRTConnectPlanner: Bi-directional RRT-Connect planner
         - RRTStarPlanner: RRT* planner (asymptotically optimal)
