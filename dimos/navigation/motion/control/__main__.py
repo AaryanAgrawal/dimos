@@ -23,6 +23,7 @@ python -m dimos.navigation.motion.control --score --gen 8      # + generated
 
 import argparse
 import json
+import sys
 
 import numpy as np
 
@@ -142,6 +143,15 @@ def main() -> None:
     summary = summarize(rows)
     summary["groups"] = group_summaries(rows)
     print(json.dumps({"summary": summary} if args.json else summary))
+    # Categorical gate: a truth-labeled-clear world that did not reach goal
+    # fails the suite outright — the mean is not allowed to absorb it.
+    if summary["failed"]:
+        print(
+            f"FAILED: {len(summary['failed'])} clear world(s) did not reach goal: "
+            + ", ".join(summary["failed"]),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

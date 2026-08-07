@@ -155,6 +155,16 @@ def test_tilt_tail_costs_composure() -> None:
     assert shaky["total"] < calm["total"]
 
 
+def test_not_reaching_a_clear_world_is_a_categorical_failure() -> None:
+    # A mean over enough worlds absorbs a stuck robot; the failed flag may not.
+    stuck = score_episode(_result(outcome="timeout", time_to_goal=None))
+    assert stuck["failed"]
+    refused_ok = score_episode(_result(sc=REFUSE, outcome="refused", time_to_goal=None, n=5))
+    assert not refused_ok["failed"]
+    s = summarize([score_episode(_result()), stuck])
+    assert s["failed"] == [stuck["name"]]
+
+
 def test_summarize_counts() -> None:
     rows = [
         score_episode(_result()),

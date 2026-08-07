@@ -218,6 +218,10 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         "name": sc.name,
         "outcome": result.outcome,
         "dq": result.outcome in ("collision", "fall"),
+        # A world truth-labeled "clear" has a route; anything but goal is a
+        # categorical failure no aggregate may absorb (six stuck worlds cost a
+        # 56-world mean ~2 points each and hid inside a +10 improvement).
+        "failed": sc.expect == "clear" and result.outcome != "goal",
         "time_to_goal": result.time_to_goal,
     }
 
@@ -318,6 +322,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "score": round(float(np.mean(totals)), 2) if totals else math.nan,
         "worst": {"name": worst["name"], "total": worst["total"]} if worst else None,
+        "failed": sorted(r["name"] for r in rows if r.get("failed")),
         "dq": sum(1 for r in rows if r["dq"]),
         "outcomes": outcomes,
         "env_viol": sum(1 for r in rows if r.get("env_viol", 0.0) > 0.0),
