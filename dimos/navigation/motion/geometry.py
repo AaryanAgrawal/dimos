@@ -82,6 +82,27 @@ def angle_diff(a: float, b: float) -> float:
     return (a - b + math.pi) % (2 * math.pi) - math.pi
 
 
+def resample(xy: np.ndarray, step: float = 0.1) -> np.ndarray:
+    """Path resampled at even arc length, so two plans compare point for point."""
+    xy = xy[:, :2] if xy.ndim == 2 else xy
+    if len(xy) < 2:
+        return xy.reshape(-1, 2)
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
+    if arc[-1] <= 0:
+        return xy[:1]
+    s = np.arange(0.0, arc[-1], step)
+    return np.column_stack([np.interp(s, arc, xy[:, 0]), np.interp(s, arc, xy[:, 1])])
+
+
+def divergence(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean distance between two plans over the arc they share (m)."""
+    ra, rb = resample(a), resample(b)
+    n = min(len(ra), len(rb))
+    if n == 0:
+        return float("nan")
+    return float(np.linalg.norm(ra[:n] - rb[:n], axis=1).mean())
+
+
 def _pose_matrix(pose: Pose) -> np.ndarray:
     """4x4 homogeneous matrix of a pose (verbatim Transform.to_matrix formula)."""
     x, y, z, w = pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w

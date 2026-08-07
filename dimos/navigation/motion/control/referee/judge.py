@@ -44,6 +44,7 @@ import numpy as np
 
 from dimos.navigation.motion.control.referee.episode import EpisodeResult
 from dimos.navigation.motion.control.tracks import track_of
+from dimos.navigation.motion.geometry import divergence
 from dimos.navigation.motion.scenarios import Scenario
 from dimos.navigation.motion.simulation.walk import COMMAND_SLEW
 
@@ -202,6 +203,26 @@ def plan_churn(result: EpisodeResult) -> float:
     return worst
 
 
+# A replan that moves the route by more than tracking noise + one lattice cell
+# is a re-roll: the world is static here, so the planner changed its mind, not
+# its information. gen001: 25 of 51 replans re-rolled while the yaw swept five
+# seed-bin boundaries — visible as the plan flapping left-right at replan rate.
+REROLL_M = 0.15
+
+
+def rerolls(result: EpisodeResult) -> int:
+    """Count of consecutive active plans that diverge by more than REROLL_M."""
+    n = 0
+    for prev, new in zip(result.plans[:-1], result.plans[1:], strict=False):
+        pxy, nxy = _ref_xy(prev), _ref_xy(new)
+        if len(pxy) < 2 or len(nxy) < 2:  # holds/stubs are not route changes
+            continue
+        d = divergence(pxy, nxy)
+        if math.isfinite(d) and d > REROLL_M:
+            n += 1
+    return n
+
+
 def _saturation(result: EpisodeResult) -> float:
     """Fraction of active ticks where the hardware slew clipped the request."""
     if len(result.twist_cmd) < 2:
@@ -243,6 +264,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
             xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
             xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
             churn=round(plan_churn(result), 4),
+            rerolls=rerolls(result),
             plan_tight=round(min(result.plan_min_clear), 4) if result.plan_min_clear else math.inf,
             tilt_p99=round(float(np.percentile(result.tilt, 99)), 4) if len(result.tilt) else 0.0,
             total=0.0,
@@ -304,6 +326,7 @@ def score_episode(result: EpisodeResult) -> dict[str, Any]:
         xtrack_p95=round(float(np.percentile(xt, 95)), 4) if len(xt) else 0.0,
         xtrack_max=round(float(np.max(xt)), 4) if len(xt) else 0.0,
         churn=round(churn, 4),
+        rerolls=rerolls(result),
         plan_tight=round(min(result.plan_min_clear), 4) if result.plan_min_clear else math.inf,
         tilt_p99=round(tilt_p99, 4),
         saturation=round(sat, 4),
@@ -326,6 +349,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "dq": sum(1 for r in rows if r["dq"]),
         "outcomes": outcomes,
         "env_viol": sum(1 for r in rows if r.get("env_viol", 0.0) > 0.0),
+        "rerolls": sum(r.get("rerolls", 0) for r in rows),
         "env_viol_max": round(max((r.get("env_viol_depth", 0.0) for r in rows), default=0.0), 4),
         "arrived": round(float(np.mean([r["arrived"] for r in rows])), 4) if rows else math.nan,
         "precision": round(float(np.mean([r["precision"] for r in rows])), 4) if rows else math.nan,
@@ -342,6 +366,7 @@ def print_row(row: dict[str, Any], sc: Scenario) -> None:
         f"{row['name']:<18s} {row['outcome']:<9s} {ttg}"
         f"  clear {mc_s}  below {row.get('below_floor', 0.0):4.2f}"
         f"  xt95 {row.get('xtrack_p95', 0.0):5.2f}  churn {row.get('churn', 0.0):5.2f}"
+        f"  roll {row.get('rerolls', 0):3d}"
         f"  ptight {row.get('plan_tight', 0.0):5.2f}"
         f"  tilt99 {row.get('tilt_p99', 0.0):5.2f}  {row['total']:6.2f}  {sc.note}"
     )

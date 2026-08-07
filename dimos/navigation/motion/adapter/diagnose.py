@@ -83,9 +83,10 @@ from dimos.navigation.motion.adapter.follower import GoalLatch, path_clearance
 from dimos.navigation.motion.adapter.planner import REPLAN_CARROT_M, carrot_along, replan_due
 from dimos.navigation.motion.control.controller import ControllerConfig, load as load_law
 from dimos.navigation.motion.control.profile import ceilings_to_clearance, decode_ceilings
+from dimos.navigation.motion.control.referee.judge import REROLL_M
 from dimos.navigation.motion.control.tracks import TRACKS
 from dimos.navigation.motion.embodiment import EMBODIMENTS
-from dimos.navigation.motion.geometry import AvoidanceConfig
+from dimos.navigation.motion.geometry import AvoidanceConfig, divergence
 from dimos.navigation.motion.obstacles import (
     OBSTACLE_MODELS,
     RAW_BAND,
@@ -473,30 +474,9 @@ def gated_ticks(ticks: list[Tick], carrot_m: float = REPLAN_CARROT_M) -> list[Ti
 # ------------------------------------------------------------------ metrics --
 
 
-def resample(xy: np.ndarray, step: float = 0.1) -> np.ndarray:
-    """Path resampled at even arc length, so two plans compare point for point."""
-    xy = xy[:, :2] if xy.ndim == 2 else xy
-    if len(xy) < 2:
-        return xy.reshape(-1, 2)
-    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))])
-    if arc[-1] <= 0:
-        return xy[:1]
-    s = np.arange(0.0, arc[-1], step)
-    return np.column_stack([np.interp(s, arc, xy[:, 0]), np.interp(s, arc, xy[:, 1])])
-
-
 def arclen(xy: np.ndarray) -> float:
     xy = xy[:, :2] if xy.ndim == 2 else xy
     return float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum()) if len(xy) > 1 else 0.0
-
-
-def divergence(a: np.ndarray, b: np.ndarray) -> float:
-    """Mean distance between two plans over the arc they share (m)."""
-    ra, rb = resample(a), resample(b)
-    n = min(len(ra), len(rb))
-    if n == 0:
-        return float("nan")
-    return float(np.linalg.norm(ra[:n] - rb[:n], axis=1).mean())
 
 
 def is_hold(xy: np.ndarray) -> bool:
@@ -731,6 +711,13 @@ def plans(rec: Recording) -> list[dict[str, float]]:
         f"carrot moved {np.mean([r['goal_jump'] for r in flips]):.2f} m\n"
         f"flips > {FLIP_M} m ({len(flips)}): " + " ".join(f"{r['ts'] - rec.t0:.1f}" for r in flips)
     )
+    # Same-map re-rolls: the planner changed its mind, not its information --
+    # the field twin of the battery's `rerolls` column (referee judge.REROLL_M).
+    n_roll = int((d[same] > REROLL_M).sum())
+    print(
+        f"rerolls > {REROLL_M} m with an unchanged map: {n_roll} of {same.sum()} pairs"
+        + (f"  ({100.0 * n_roll / max(1, same.sum()):.0f}%)" if same.sum() else "")
+    )
     return rows
 
 
@@ -962,15 +949,34 @@ def replay(
             rr.set_time("time", timestamp=tick.ts)
             rr.log("world/carrot", rr.Points3D([[*tick.goal, 0.0]], radii=0.07))
             # the winning model's hard set -- the very cloud plan() handed the
-            # search, holds included -- shifted back onto the map
+            # search, holds included -- shifted back onto the map. STRAYS (no
+            # adjacent hard voxel in the column plane) drawn red and fat: a
+            # lone voxel in a doorway throat closes it as surely as a wall.
             obs = plan.pts
             assert obs is not None
+            from scipy.spatial import cKDTree
+
+            xy = obs[:, :2]
+            # isolation by COLUMN, not by point: a chair leg (or a ghost of
+            # one) is one xy cell stacked with returns, and it must read stray
+            cols, inv = np.unique(np.round(xy / 0.12).astype(np.int64), axis=0, return_inverse=True)
+            near = cKDTree(cols * 0.12).query_ball_point(cols * 0.12, r=0.18, return_length=True)
+            stray = (np.asarray(near) <= 2)[inv]  # itself + at most one column
+            z = obs[:, 2] + plan.shift
             rr.log(
                 "world/obstacles",
                 rr.Points3D(
-                    np.column_stack([obs[:, :2], obs[:, 2] + plan.shift]),
+                    np.column_stack([xy[~stray], z[~stray]]),
                     radii=0.022,
                     colors=[[255, 120, 0]],
+                ),
+            )
+            rr.log(
+                "world/obstacles/strays",
+                rr.Points3D(
+                    np.column_stack([xy[stray], z[stray]]),
+                    radii=0.035,
+                    colors=[[255, 40, 40]],
                 ),
             )
         if rr is not None:

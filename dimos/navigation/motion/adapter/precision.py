@@ -36,12 +36,12 @@ from dimos.navigation.motion.adapter.diagnose import (
     FLIP_M,
     Recording,
     _before,
-    divergence,
     is_hold,
     load_recording,
     parse_instant,
 )
 from dimos.navigation.motion.embodiment import EMBODIMENTS
+from dimos.navigation.motion.geometry import divergence
 
 SPEED_BIN = 0.1  # m/s per bin
 MIN_SAMPLES = 25  # a bin with fewer samples is noise, not a measurement
