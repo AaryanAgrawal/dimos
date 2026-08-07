@@ -148,10 +148,36 @@ impl Emb {
         }
     }
 
-    /// The all-gait union: the veto shape, `half_diag`, the standing start and
-    /// the turn-in-place edges, and the fallback for an unmeasured embodiment.
+    /// The all-gait union: the veto shape, `half_diag`, the turn-in-place edges,
+    /// and the fallback for an unmeasured embodiment.
     fn union_box(&self) -> [f64; 4] {
         [self.length, self.width, self.center_off, 0.0]
+    }
+
+    /// The STANDING body: the largest box nested in every envelope row.
+    ///
+    /// Standing is not the union of the swept walking boxes -- it is the static
+    /// body, and every gait's sweep contains it. The rows are intersected in
+    /// BOTH drift signs, exactly as `envelope_at` mirrors them, so the result is
+    /// nested in whatever shape an edge may actually have been cleared by: a
+    /// pose whose row clears the margin clears this too, which is what makes
+    /// replanning from a route this planner emitted unable to refuse. No
+    /// measured envelope means no rows to intersect and the union is all there
+    /// is. `embodiment.py::stand_box`, formula for formula.
+    fn stand_box(&self) -> [f64; 4] {
+        if self.envelope.is_empty() {
+            return self.union_box();
+        }
+        let mut lo = f64::NEG_INFINITY;
+        let mut hi = f64::INFINITY;
+        let mut half_w = f64::INFINITY;
+        for r in &self.envelope {
+            lo = lo.max(r[3] - r[1] / 2.0);
+            hi = hi.min(r[3] + r[1] / 2.0);
+            // Mirroring folds a row's y interval onto |off_y| .. w/2 - |off_y|.
+            half_w = half_w.min(r[2] / 2.0 - r[4].abs());
+        }
+        [hi - lo, 2.0 * half_w, (lo + hi) / 2.0, 0.0]
     }
 
     /// `(length, width, off_x, off_y)` for a body-frame drift angle in rad.
@@ -249,6 +275,9 @@ fn offsets(b: &[f64; 4]) -> Vec<(f64, f64)> {
 pub struct Fps {
     keys: Vec<[i64; 4]>,
     offs: Vec<Vec<(f64, f64)>>,
+    /// The static body the seed is witnessed on -- id 0 for an unmeasured
+    /// embodiment, whose standing box IS its union.
+    stand: usize,
 }
 
 /// Box identity, rounded exactly as the python reference rounds it.
@@ -262,8 +291,10 @@ impl Fps {
         let mut f = Fps {
             keys: Vec::new(),
             offs: Vec::new(),
+            stand: 0,
         };
         f.intern(&emb.union_box()); // id 0: the veto shape and every fallback
+        f.stand = f.intern(&emb.stand_box());
         for row in &emb.envelope {
             for s in [1.0f64, -1.0] {
                 f.intern(&[row[1], row[2], row[3], s * row[4]]);
@@ -300,6 +331,11 @@ impl Fps {
 
     pub fn union(&self) -> &[(f64, f64)] {
         &self.offs[0]
+    }
+
+    /// The standing body's samples, and its box id for the lattice caches.
+    pub fn stand(&self) -> &[(f64, f64)] {
+        &self.offs[self.stand]
     }
 }
 
@@ -764,6 +800,8 @@ struct Clear<'a> {
     dy: Vec<bool>,
     margin: f64,
     certify: f64,
+    /// The standing body's box id -- `free`'s shape, and only `free`'s.
+    stand: usize,
 }
 
 /// The lattice's yaw bins, in radians.
@@ -812,6 +850,7 @@ impl<'a> Clear<'a> {
             // `comfort`, which has left the cost -- is where a cell stops being
             // worth scanning.
             certify: SPEED_CLEARANCE + reach + SNAP,
+            stand: fps.stand,
         }
     }
 
@@ -977,9 +1016,19 @@ impl<'a> Clear<'a> {
         fp != 0 && self.row_clear(b, fp, i, j) > thresh
     }
 
+    /// Can the robot STAND on this (bin, cell)?
+    ///
+    /// The static body, not the union of the swept walking boxes: the seed
+    /// repair below the witness answers the same question the witness does, and
+    /// on the union it answered a stricter one -- a cell a drift row threads,
+    /// and that the route therefore committed to, read as a wall to whoever
+    /// replanned from it. Union first, as everywhere else: the standing box is
+    /// nested in it, so a cell the fat box clears needs no second look, and an
+    /// unmeasured embodiment (whose standing box IS the union, id 0) keeps
+    /// exactly the reading it had.
     #[inline]
     fn free(&mut self, b: usize, i: usize, j: usize) -> bool {
-        self.clear(b, i, j) > 0.0
+        self.fits(b, self.stand, i, j, self.margin)
     }
 }
 
@@ -1039,6 +1088,7 @@ pub fn se2_search(
 ) -> Option<Vec<[f64; 3]>> {
     let (x0, y0, x1, y1) = w.bounds;
     let offs = fps.union().to_vec();
+    let stand_offs = fps.stand().to_vec();
     let (kx, ky) = (w.kx, w.ky);
     // Cell centres from their ABSOLUTE lattice index, for the same reason the
     // fine field uses one: `x0 + i * CELL` reconstructs a position that depends
@@ -1079,17 +1129,25 @@ pub fn se2_search(
     // and a start whose real pose clears the margin can land in a cell that does
     // not (door_side: 0.083 true, 0.043 snapped, against a 0.05 margin). The
     // cell still NAMES the seed; it no longer decides whether the robot is
-    // allowed to be where it already is. Standing has no direction of travel, so
-    // the reading is the union -- the honest shape when the departure gait is
-    // not yet chosen. A start genuinely inside an obstacle still reads negative.
+    // allowed to be where it already is.
+    //
+    // Standing has no direction of travel, and the shape it occupies is the
+    // STATIC BODY -- the intersection of the envelope's rows -- not the union of
+    // every swept walking box. The union made the seed stricter than the routes
+    // the search publishes: it threads a gap only a drift row fits, the robot
+    // walks in, and the next replan from mid-gap refuses forever. The
+    // intersection is nested in every row, so a pose any edge was cleared by
+    // clears the witness too. A start genuinely inside an obstacle still reads
+    // negative.
     //
     // Below the witness the old repair still stands, and it is not the same
     // question: the referee's replan spot IS a pose this planner published, and
     // refusing there scores the world zero outright. Take the nearest lattice
-    // state that does fit, ordered by distance from the true pose and then by
-    // yaw error, and accept it only if the straight segment from the true pose
-    // to it is clear. Reachability still decides refusals: a sealed world has no
-    // goal state and still returns None.
+    // state that does fit -- STANDING, on the same shape the witness reads --
+    // ordered by distance from the true pose and then by yaw error, and accept
+    // it only if the straight segment from the true pose to it is clear.
+    // Reachability still decides refusals: a sealed world has no goal state and
+    // still returns None.
     let fit_bin = |cl: &mut Clear, i: usize, j: usize| -> Option<usize> {
         for d in 0..=(YAW_BINS / 2) {
             for b in [(sb + d) % YAW_BINS, (sb + YAW_BINS - d) % YAW_BINS] {
@@ -1100,7 +1158,7 @@ pub fn se2_search(
         }
         None
     };
-    let witness = pose_clear(cl.w, &offs, start.0, start.1, start.2) > margin;
+    let witness = pose_clear(cl.w, &stand_offs, start.0, start.1, start.2) > margin;
     let (sb, si, sj) = match if witness {
         Some(sb)
     } else {
@@ -2314,6 +2372,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// And the standing box is nested inside every ROW, in both drift signs --
+    /// which is what makes the seed witness unable to refuse a pose the search
+    /// itself routed through. `embodiment.py::stand_box` must agree number for
+    /// number, so the measured go2 answer is spelled out here as well.
+    #[test]
+    fn the_standing_box_is_nested_inside_every_row() {
+        let emb = Emb::go2();
+        let b = emb.stand_box();
+        let (bx0, bx1) = (b[2] - b[0] / 2.0, b[2] + b[0] / 2.0);
+        let (by0, by1) = (b[3] - b[1] / 2.0, b[3] + b[1] / 2.0);
+        assert_eq!(b[3], 0.0, "mirroring cannot leave a lateral offset behind");
+        assert!(b[0] < emb.length && b[1] < emb.width, "still the union");
+        for row in &emb.envelope {
+            for s in [1.0f64, -1.0] {
+                let r = [row[1], row[2], row[3], s * row[4]];
+                let (rx0, rx1) = (r[2] - r[0] / 2.0, r[2] + r[0] / 2.0);
+                let (ry0, ry1) = (r[3] - r[1] / 2.0, r[3] + r[1] / 2.0);
+                assert!(
+                    rx0 <= bx0 + 1e-12
+                        && rx1 >= bx1 - 1e-12
+                        && ry0 <= by0 + 1e-12
+                        && ry1 >= by1 - 1e-12,
+                    "the standing box escapes the {} deg row",
+                    row[0]
+                );
+            }
+        }
+        // 0.781 x 0.416 at -0.039, per planner/revision.md.
+        assert!((b[0] - 0.781).abs() < 5e-4, "length {}", b[0]);
+        assert!((b[1] - 0.416).abs() < 5e-4, "width {}", b[1]);
+        assert!((b[2] + 0.039).abs() < 5e-4, "off_x {}", b[2]);
+        // Nobody measured the others, so they stand in their union.
+        let plain = Emb {
+            envelope: Vec::new(),
+            ..Emb::go2()
+        };
+        assert_eq!(plain.stand_box(), plain.union_box());
+        assert_eq!(Fps::new(&plain).stand, 0);
     }
 
     /// Lookup lands on the row the measurement was taken at, in both drift
