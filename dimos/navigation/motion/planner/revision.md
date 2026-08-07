@@ -320,8 +320,18 @@ Acceptance:
   and every existing referee test pass unchanged.
   *`incumbent=None` returns before any of it, in both implementations. Whole
   motion suite green (338 passed); grid and replan invariance untouched.*
-- [ ] Planner referee chain test + consistency scoring land together; gold
+- [x] Planner referee chain test + consistency scoring land together; gold
   chains score clean; the candidate re-earns; new gates frozen and recorded.
+  *Chains + `unearned` land in sim.py/score.py (multiplier
+  `1 − unearned/chain_steps`); `test_commitment.py` 16/16 both implementations,
+  incl. the safety rail (an obstacle across the incumbent diverts the very
+  next query). Mixed 56-world gates, FROZEN: gold 111.57 (0 DQ, pillar 1.0,
+  commit 1.0, consistency 0.967, 0 unearned), candidate 104.01 (0 DQ,
+  0 unearned; worst gen012 11.18 — the pre-existing cloud-SDF handicap).
+  Caveat that will bite CI: the chains put ~10 gold solves per world behind
+  (query, incumbent) cache keys — the FIRST gold battery after any gold change
+  runs cold and DQs on the time limit (34/56 observed); warm the cache before
+  reading a gold gate.*
 - [ ] Runtime: incumbent validation + extension inside the 20 ms tick budget
   (door.zenoh's dense-cloud overrun stays the separate open item).
 - [ ] Field: the diagnose plans-pass reroll line drops on the next robot
