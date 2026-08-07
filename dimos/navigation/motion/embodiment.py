@@ -54,18 +54,17 @@ class Embodiment:
     center_off: float = 0.002  # body center relative to the pose point
     comfort: float = 0.4
     precision: float = 0.05
-    # gait cost multipliers for the SE(2) reference (and any rollout later):
+    # gait preferences for the planner's cost function.
     # forward = 1; strafe/reverse scale it; yaw_w prices rotation per rad.
     strafe: float = 1.8
     reverse: float = 1.5
     yaw_w: float = 0.25
-    # Vertical geometry, all measured from the surface the feet stand on. This
-    # is what makes an obstacle model a property of the BODY rather than of the
-    # scene: no floor estimation, the base rides a known height above the
-    # ground (motion/obstacles.py).
-    steppable: float = 0.20  # legs negotiate obstacles below this -- at a cost (later)
+    # Vertical geometry, all measured from the surface the feet stand on.
+    # The base rides a known height above the ground (motion/obstacles.py)
+    steppable: float = 0.20  # legs negotiate obstacles below this - at a cost (TODO)
     height: float = 0.45  # above this the body passes underneath; not an obstacle
     base_height: float = 0.29  # base origin above support; frame plumbing, not semantics
+
     # Motion-conditioned envelope, one row per |drift| angle in degrees:
     # (deg, length, width, off_x, off_y). 0 = nose-first, 90 = strafe,
     # 180 = reverse. Rows sit at the lattice's own drift angles, so
@@ -156,10 +155,12 @@ GO2_ENVELOPE: tuple[tuple[float, float, float, float, float], ...] = (
     (153.4, 0.781, 0.422, -0.039, -0.003),
     (180.0, 0.781, 0.416, -0.039, 0.000),
 )
+
 # Measured 0.0334 m of extra width per rad/m, residuals <= 12 mm.
 GO2_ARC_INFLATE = 0.0334
 
 GO2 = Embodiment(envelope=GO2_ENVELOPE, arc_inflate=GO2_ARC_INFLATE)
+
 EMBODIMENTS = {
     "go2": GO2,
     # payload adds 8 cm in front: longer body, centre 4 cm further forward.

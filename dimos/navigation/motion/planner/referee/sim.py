@@ -64,6 +64,7 @@ from dimos.navigation.motion.scenarios import (
     Scenario,
     generated,
     path_cost,
+    rebody,
     recorded,
     se2_path,
     straight_plan,
@@ -790,8 +791,11 @@ def main() -> None:
         "--emb",
         default="mix",
         choices=[*sorted(EMBODIMENTS), "mix"],
-        help="embodiment for generated worlds: one of the roster, or mix "
-        "(rotate per seed; curated stay go2)",
+        help="body every world runs: one of the roster, or mix (rotate the "
+        "roster per generated seed; curated and recorded stay go2). Naming a "
+        "body re-labels the curated worlds against it -- a gap is only clear "
+        "for whoever fits through it -- which costs a truth solve per world "
+        "the first time, then caches",
     )
     ap.add_argument("--score", action="store_true", help="score each world + summary")
     ap.add_argument(
@@ -852,10 +856,14 @@ def main() -> None:
             pass  # non-Linux: unpinned, timings advisory
 
     cfg = AvoidanceConfig()
+    # None only for "mix", which is the roster rotation and names no single
+    # body -- so it is also the one value that leaves the curated worlds on the
+    # go2 they were drawn for. Naming a body means every world runs it.
+    forced = EMBODIMENTS.get(args.emb)
     pool = (
-        SCENARIOS
-        + (generated(args.gen, args.seed, emb=EMBODIMENTS.get(args.emb)) if args.gen else [])
-        + [recorded(p) for p in args.recorded]
+        (SCENARIOS if forced is None else [rebody(sc, forced) for sc in SCENARIOS])
+        + (generated(args.gen, args.seed, emb=forced) if args.gen else [])
+        + [recorded(p) if forced is None else recorded(p, emb=forced) for p in args.recorded]
     )
     todo = [s for s in pool if args.scenario is None or s.name == args.scenario]
     if not todo:

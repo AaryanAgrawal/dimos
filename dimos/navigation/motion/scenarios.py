@@ -24,7 +24,7 @@ between the two it is "safe" (never a non-vetoed interpenetration).
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import inspect
 import itertools
@@ -998,6 +998,19 @@ def label(
     if se2_path(boxes, start, goal, emb, margin=0.0) is None:
         return "refuse"
     return "safe"
+
+
+def rebody(sc: Scenario, emb: Embodiment) -> Scenario:
+    """The same geometry under a different body, re-labeled for that body.
+
+    `expect` is not a property of the world, it is a property of the world AND
+    who is walking it: a gap the go2 threads is a wall to go2-payload, so a
+    curated "clear" carried over unchanged would demand a route that does not
+    exist. Truth is re-derived rather than inherited.
+    """
+    if sc.emb == emb:
+        return sc
+    return replace(sc, emb=emb, expect=label(sc.boxes, sc.start, sc.goal, emb))
 
 
 def generate(seed: int, rules: GenRules | None = None, emb: Embodiment = GO2) -> Scenario:

@@ -93,3 +93,4 @@ def test_an_envelope_violation_is_named_and_bounded(
     )
     if not emb.envelope:
         assert v.env_viol == 0.0, "an embodiment with no rows cannot violate its envelope"
+        assert v.env_viol == 0.0, "an embodiment with no rows cannot violate its envelope"
