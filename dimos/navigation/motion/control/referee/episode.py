@@ -186,7 +186,9 @@ PLAN_RGBA = (0.25, 0.55, 1.0, 0.22)
 
 def _draw_plan(viewer: object, ref: RefereePath, sc: Scenario) -> None:
     """Expected body poses on the floor: one translucent footprint box per
-    outline waypoint, oriented by the plan's own yaw. Redrawn per (re)plan."""
+    outline waypoint, oriented by the plan's own yaw and sized by the drift
+    row the planner justified that segment with — the union only where there
+    is no direction of travel (a fan pivot). Redrawn per (re)plan."""
     scn = viewer.user_scn  # type: ignore[attr-defined]
     xy = np.array([[p.position.x, p.position.y] for p in ref.poses]).reshape(-1, 2)
     yaws = np.array([p.orientation.euler[2] for p in ref.poses])
@@ -197,13 +199,22 @@ def _draw_plan(viewer: object, ref: RefereePath, sc: Scenario) -> None:
             break
         yaw = float(yaws[i])
         c, s = math.cos(yaw), math.sin(yaw)
+        # travel direction at this waypoint: the outgoing segment, falling
+        # back to the incoming one at the path's end
+        j = i if i + 1 < len(xy) else max(0, i - 1)
+        step = xy[min(j + 1, len(xy) - 1)] - xy[j]
+        drift = math.atan2(step[1], step[0]) - yaw if float(np.hypot(*step)) > 1e-6 else None
+        if drift is None:
+            length, width, off_x, off_y = e.length, e.width, e.center_off, 0.0
+        else:
+            length, width, off_x, off_y = e.envelope_at(drift)
         g = scn.geoms[scn.ngeom]
         mujoco.mjv_initGeom(  # type: ignore[attr-defined]
             g,
             mujoco.mjtGeom.mjGEOM_BOX,
-            np.array([e.length / 2.0, e.width / 2.0, 0.001]),
-            # body centre sits center_off along body x from the pose point
-            np.array([xy[i][0] + c * e.center_off, xy[i][1] + s * e.center_off, 0.003]),
+            np.array([length / 2.0, width / 2.0, 0.001]),
+            # the row's centre sits (off_x, off_y) in the body frame
+            np.array([xy[i][0] + c * off_x - s * off_y, xy[i][1] + s * off_x + c * off_y, 0.003]),
             np.array([c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0]),
             np.array(PLAN_RGBA, dtype=np.float32),
         )
