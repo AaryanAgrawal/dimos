@@ -104,29 +104,34 @@ def divergence(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def path_offset(a: np.ndarray, b: np.ndarray, horizon: float = 3.0) -> float:
-    """Mean distance from a's first `horizon` metres ONTO b's polyline (m).
+    """Furthest a's first `horizon` metres get from b's polyline (m).
 
     Geometric, not index-wise, and that is the whole point when the two plans
     were made from different poses. `divergence` lines them up by arc from each
     plan's OWN start, so a plan the robot has merely advanced along reads the
     advance itself: a route held perfectly still and trimmed by two waypoints
-    scores 0.20 m, over any threshold meant to catch a route that MOVED. This
-    projects instead, so a plan that is the previous plan's remainder reads
-    exactly zero however far the robot got, and only a change of shape counts.
+    scored 0.20 m, over any threshold meant to catch a route that MOVED. This
+    projects instead, so a plan that is the previous plan's remainder reads ~0
+    however far the robot got, and only a change of shape counts.
 
-    Same construction as `near_field_diff`, on xy arrays rather than on Paths.
+    The WORST offset rather than the mean, unlike `near_field_diff`. Two plans
+    that leave along the same corridor and commit to different ends of the same
+    obstacle spend most of their length on top of each other, so a mean drowns
+    exactly the near-tie flip this is aimed at: gen001's bin-edge pair reads
+    0.043 mean against 0.003 for a route that did not move at all, and 0.206
+    against 0.039 at the worst point. The follower feels the worst point.
     """
     ra = resample(a)[: max(1, int(horizon / 0.1))]
     rb = resample(b)
     if len(ra) == 0 or len(rb) == 0:
         return float("nan")
     if len(rb) == 1:
-        return float(np.mean(np.linalg.norm(ra - rb[0], axis=1)))
+        return float(np.max(np.linalg.norm(ra - rb[0], axis=1)))
     seg = rb[1:] - rb[:-1]
     d = ra[:, None, :] - rb[None, :-1, :]
     t = np.clip((d * seg).sum(-1) / np.maximum((seg**2).sum(-1), 1e-12), 0.0, 1.0)
     off = d - t[..., None] * seg
-    return float(np.mean(np.sqrt((off**2).sum(-1)).min(axis=1)))
+    return float(np.max(np.sqrt((off**2).sum(-1)).min(axis=1)))
 
 
 def _pose_matrix(pose: Pose) -> np.ndarray:

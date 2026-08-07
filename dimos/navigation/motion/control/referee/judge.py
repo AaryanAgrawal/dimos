@@ -213,13 +213,15 @@ REROLL_M = 0.15
 def rerolls(result: EpisodeResult) -> int:
     """Count of consecutive active plans that diverge by more than REROLL_M.
 
-    Measured by PROJECTION -- the new plan's near field onto the old plan's
-    polyline -- and not by `divergence`, which lines the two up by arc from each
-    plan's own start. The robot advances between replans, so the new plan is
-    made from further along; under `divergence` a plan held perfectly still and
-    trimmed by two waypoints read 0.20 m and counted as a mind change, which is
-    the opposite of what this exists to count. gen001, every replan an exact
-    suffix of the one before it: 10 rerolls by arc, 0 by projection.
+    Measured by PROJECTION -- the furthest the new plan's near field gets from
+    the old plan's polyline -- and not by `divergence`, which lines the two up
+    by arc from each plan's own start. The robot advances between replans, so
+    the new plan is made from further along; under `divergence` a plan held
+    perfectly still and trimmed by two waypoints read 0.20 m and counted as a
+    mind change, which is the opposite of what this exists to count. gen001,
+    every replan an exact suffix of the one before it: 10 rerolls by arc, 0 by
+    projection -- while its bin-edge flip, two routes that really are different,
+    reads 0.206 and still counts.
     """
     n = 0
     for prev, new in zip(result.plans[:-1], result.plans[1:], strict=False):
