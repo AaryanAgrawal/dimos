@@ -74,6 +74,11 @@ class GlobalConfig(BaseSettings):
     # dialled endpoint into the whole mesh. Off means a session sees only what it
     # dialled itself, so every peer needs a fixed listen port and its own endpoint.
     zenoh_gossip: bool = True
+    # Endpoints to dial, comma separated, overriding the ones derived from
+    # --robot-ip. Set it to watch a robot without claiming it as *the* robot of
+    # this process (`dimos --zenoh-connect tcp/go2:7447 spy`), or to reach a
+    # router that is not the robot. A bare host gets `tcp/` and the robot port.
+    zenoh_connect: str = ""
     # Seconds ZenohService.start() blocks for the configured connect endpoints to
     # link before giving up and continuing. 0 disables the wait.
     zenoh_connect_timeout: float = 1.0

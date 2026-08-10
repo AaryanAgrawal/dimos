@@ -79,6 +79,25 @@ Measured: a **client stays single-linked whether gossip is on or off** — it do
 not dial peers it learns about. So `mode=client` alone is enough to keep a
 session off the wifi mesh, and gossip can stay on.
 
+## Naming what to dial
+
+Connect endpoints normally come from `--robot-ip`, and only when the stack's
+transport is zenoh — a session belonging to *this process's* robot. Tools that
+merely want to watch someone else's robot have no such robot, so
+`--zenoh-connect` (`ZENOH_CONNECT`, `zenoh_connect` in `.env`) names endpoints
+directly and is honoured whatever the transport. Comma separated; a bare host
+gets `tcp/` and port 7447.
+
+Watching a Go2, whose `dimos-helper` runs a **router**, from a laptop:
+
+```bash
+dimos --zenoh-connect go2 --zenoh-mode client spy --transport zenoh
+```
+
+Client mode is the load-bearing half — see the delivery table above. Note the
+filter goes *after* `spy`: a root `--transport` would set the stack backend, and
+the spy watches every transport regardless, so it rejects that placement.
+
 ## Gotchas
 
 - **`client` + multicast off + no connect endpoints fails at `open()`** —

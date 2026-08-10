@@ -47,6 +47,13 @@ LOOPBACK_INTERFACE = "lo0" if platform.system() == "Darwin" else "lo"
 ALL_INTERFACES = "auto"
 
 
+def _locator(host: str) -> str:
+    """Complete a bare host into a zenoh locator, leaving a full one as given."""
+    if "/" in host:
+        return host
+    return f"tcp/{host}" if ":" in host else f"tcp/{host}:{ROBOT_ZENOH_PORT}"
+
+
 def _default_connect_endpoints() -> list[str]:
     """Dial known robots directly instead of trusting multicast scouting.
 
@@ -55,17 +62,25 @@ def _default_connect_endpoints() -> list[str]:
     zenoh-transported and a robot IP is configured, it becomes an explicit
     endpoint; scouting stays on for everything else. An IP carrying its own
     ``:port`` is used as given.
+
+    ``--zenoh-connect`` overrides that derivation, and is honoured whatever the
+    stack's transport: naming an endpoint is itself the intent to dial it. That
+    is what a zenoh-only observer like `dimos spy` wants -- it watches every
+    transport, so it has no DIMOS_TRANSPORT to speak of.
     """
     from dimos.core.global_config import global_config
 
-    if global_config.transport != "zenoh":
+    if global_config.zenoh_connect.strip():
+        hosts = global_config.zenoh_connect.split(",")
+    elif global_config.transport == "zenoh":
+        hosts = [global_config.robot_ip or "", *(global_config.robot_ips or "").split(",")]
+    else:
         return []
-    ips = [global_config.robot_ip or "", *(global_config.robot_ips or "").split(",")]
     out: list[str] = []
-    for ip in (x.strip() for x in ips):
-        if not ip:
+    for host in (x.strip() for x in hosts):
+        if not host:
             continue
-        endpoint = f"tcp/{ip}" if ":" in ip else f"tcp/{ip}:{ROBOT_ZENOH_PORT}"
+        endpoint = _locator(host)
         if endpoint not in out:
             out.append(endpoint)
     return out
