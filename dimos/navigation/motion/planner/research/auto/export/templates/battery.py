@@ -111,7 +111,6 @@ def _calibrate() -> float:
     acc = 0.0
     for k in range(400_000):
         acc += math.sqrt(k * 1.0000001)
-    _ = acc
     return round((time.process_time() - t0) * 1e3, 3)
 
 
@@ -202,13 +201,13 @@ def main() -> None:
             note=sc.note,
             embodiment=sc.emb.tag,
             split="curated" if sc.name in curated else "generated",
-            # --- pillars, as the referee scored them ---
+            # Pillars, as the referee scored them.
             gold=w["gold"],
             consistency=w["consistency"],
             speed=w["speed"],
             dq=w["dq"],
             referee_total=w["total"],
-            # --- the raw measurements behind each pillar ---
+            # The raw measurements behind each pillar.
             avoid_ms=round(v.avoid_ms, 3),
             speed_budget_ms=SPEED_BUDGET_MS,
             over_budget_x=round(v.avoid_ms / SPEED_BUDGET_MS, 3),

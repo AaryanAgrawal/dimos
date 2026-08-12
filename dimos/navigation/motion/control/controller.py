@@ -62,7 +62,7 @@ class ControllerConfig(BaseConfig):
     speed_clearance: float = 0.35
     speed_floor_clearance: float = 0.05  # the embodiment precision floor
     speed_lookahead: float = 2.0
-    # --- gait calibration, read by the blind law only (laws/blind.py) ---
+    # Gait calibration, read by the blind law only (laws/blind.py).
     # The twist is a request to a walking policy that under-delivers it; these
     # inverse the measured deficit. They are properties of the POLICY BLOB,
     # not of any law: the defaults are `ml-trajectory-research/freewalk_mcf.bin`
@@ -71,7 +71,7 @@ class ControllerConfig(BaseConfig):
     walk_gain: float = 0.964
     walk_slip: float = 0.132
     walk_slip_ramp: float = 0.08  # below this intended speed the correction fades out
-    # --- read by the hinted law only (laws/hinted.py) ---
+    # Read by the hinted law only (laws/hinted.py).
     # Centred window the tangent feedforward reads the plan's direction over.
     tangent_preview: float = 0.15
     # The governor's pinch-escape leg: below escape_clearance of room (read over

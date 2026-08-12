@@ -76,7 +76,12 @@ def test_goal_latch_ignores_sub_tolerance_goal_moves():
 
 
 def _room_follower(**config):
-    """A TrajectoryFollower with just enough wired up to call _clearance_for."""
+    """A TrajectoryFollower with just enough wired up to call _clearance_for.
+
+    The real constructor stands up the module's LCM RPC transport (a
+    run_forever + _lcm_loop thread pair per instance), which these pure
+    geometry tests neither use nor can tear down.
+    """
     follower = object.__new__(TrajectoryFollower)
     follower.config = TrajectoryFollowerConfig(**config)
     follower._lock = RLock()

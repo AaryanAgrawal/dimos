@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 VAL_SEED0 = 15_000
 TRAIN_SEED0 = 20_000
 
-# --- reward weights ---------------------------------------------------------
+# Reward weights.
 # Sized to keep the judge's lexicographic ordering INSIDE the shaping: over a
 # typical 6 s / 300-tick episode, closing a 4 m route earns ~40, while riding
 # the clearance floor the whole way costs ~120. A policy cannot buy its way out

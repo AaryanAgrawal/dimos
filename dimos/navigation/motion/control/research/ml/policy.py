@@ -118,7 +118,8 @@ class ActorCritic(nn.Module):
 
 def gaussian_logp(action: Tensor, mu: Tensor, log_std: Tensor) -> Tensor:
     var = torch.exp(2.0 * log_std)
-    return (-0.5 * ((action - mu) ** 2 / var + 2.0 * log_std + float(np.log(2.0 * np.pi)))).sum(-1)
+    logp: Tensor = -0.5 * ((action - mu) ** 2 / var + 2.0 * log_std + float(np.log(2.0 * np.pi)))
+    return logp.sum(-1)
 
 
 def gaussian_entropy(log_std: Tensor) -> Tensor:

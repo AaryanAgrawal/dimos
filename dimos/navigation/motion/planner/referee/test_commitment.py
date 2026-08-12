@@ -113,7 +113,7 @@ def _same_route(a: Path, b: Path) -> bool:
     return near_field_diff(a, b, NEAR) < SWITCH_M and abs(_arc(a) - _arc(b)) < ARC_EPS
 
 
-# ---- the defect, and the answer to it ---------------------------------------
+# The defect, and the answer to it.
 
 
 @pytest.mark.parametrize("planner", CANDIDATES)
@@ -191,7 +191,7 @@ def test_a_chain_of_replans_keeps_the_route_it_published(planner: str, idx: int)
         out = new
 
 
-# ---- the rail the margin may never eat --------------------------------------
+# The rail the margin may never eat.
 
 
 @pytest.mark.parametrize("planner", CANDIDATES)
@@ -234,7 +234,7 @@ def test_a_route_this_map_forbids_is_not_an_incumbent(planner: str) -> None:
     assert _clearance(out, wall) > 0.0
 
 
-# ---- the price the comparison is made on ------------------------------------
+# The price the comparison is made on.
 
 
 @pytest.mark.parametrize("idx", [0, 1])

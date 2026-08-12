@@ -74,7 +74,7 @@ def _write(tmp_path, pos, quat, *, walk_at=None, t_host_shift=None, heights_at=(
     """A minimal mcap carrying vive/pose (and optionally control_log entries)."""
     import json
 
-    from mcap.writer import Writer
+    Writer = pytest.importorskip("mcap.writer").Writer
 
     path = tmp_path / "v.mcap"
     with path.open("wb") as f:
@@ -202,7 +202,7 @@ def test_read_policy_lowcmd_remaps_and_shares_the_epoch(tmp_path):
     """SDK motor order in, training order out; t=0 at the first walk command."""
     import json
 
-    from mcap.writer import Writer
+    Writer = pytest.importorskip("mcap.writer").Writer
 
     from dimos.navigation.motion.simulation.walk import read_policy_lowcmd
 

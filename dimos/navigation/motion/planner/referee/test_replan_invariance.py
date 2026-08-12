@@ -184,7 +184,7 @@ def test_the_standing_witness_reads_at_least_what_any_row_reads() -> None:
                 )
 
 
-# ---- the end-to-end pin: replay every k-th pose of every emitted route -------
+# The end-to-end pin: replay every k-th pose of every emitted route.
 
 
 @pytest.mark.parametrize("sc", WORLDS, ids=IDS)

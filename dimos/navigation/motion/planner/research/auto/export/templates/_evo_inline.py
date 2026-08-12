@@ -135,7 +135,7 @@ def write_result(score: float | None = None) -> float:
     return score
 
 
-# === USAGE EXAMPLE (copy + adapt) ===
+# Usage example (copy + adapt).
 #
 # For a benchmark scoring N independent items, emit one log_task per item.
 # write_result() with no arg aggregates _SCORES into the final score.
