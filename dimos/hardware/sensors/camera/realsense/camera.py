@@ -43,10 +43,13 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.spec import perception
+from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure
 
 if TYPE_CHECKING:
     import pyrealsense2 as rs  # type: ignore[import-not-found,import-untyped]
+
+logger = setup_logger()
 
 
 def default_base_transform() -> Transform:
@@ -275,9 +278,15 @@ class RealSenseCamera(DepthCameraHardware, Module, perception.DepthCamera):
         while self._running and self._pipeline is not None:
             try:
                 frames = self._pipeline.wait_for_frames(timeout_ms=1000)
-            except (RuntimeError, AttributeError):
-                # Pipeline stopped or None - exit loop
+            except AttributeError:
+                # Pipeline cleared by stop() - exit loop
                 break
+            except RuntimeError:
+                # Frame timeout (camera warm-up, transient USB stall) - keep
+                # waiting. Shutdown clears _running, ending the loop.
+                if self._running:
+                    logger.warning("RealSense: no frames within 1s - retrying")
+                continue
 
             ts = time.time()
 

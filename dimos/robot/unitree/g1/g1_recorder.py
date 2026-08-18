@@ -15,9 +15,9 @@
 """Records the G1 into a memory SQLite db.
 
 Captures Point-LIO odom + lidar (trajectory baked into ``pointlio_lidar`` via
-the inherited ``@pose_setter_for``) plus the RealSense color stream. Color
-frames are anchored via the mount frames the G1 tf publisher and the camera
-module put on tf.
+the inherited ``@pose_setter_for``) plus the RealSense color and depth
+streams. Camera frames are anchored via the mount frames the G1 tf publisher
+and the camera module put on tf.
 """
 
 from __future__ import annotations
@@ -30,4 +30,6 @@ from dimos.msgs.sensor_msgs.Image import Image
 
 class G1Recorder(PointlioRecorder):
     color_image: In[Image]
+    realsense_depth_image: In[Image]
     realsense_camera_info: In[CameraInfo]
+    realsense_depth_camera_info: In[CameraInfo]
