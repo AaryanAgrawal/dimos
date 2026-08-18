@@ -16,10 +16,10 @@
 """Drive-and-record blueprint for the G1.
 
 Keyboard teleop from the rerun viewer's websocket walks the robot while
-Point-LIO odom+lidar are recorded into a memory db, together with tf. The
-sensor mount frames from g1.urdf are published continuously onto tf, with
-the base_link edge tracking the waist joints live, so they're captured in
-the recording.
+Point-LIO odom+lidar and the RealSense color stream are recorded into a
+memory db, together with tf. The sensor mount frames from g1.urdf are
+published continuously onto tf, with the base_link edge tracking the waist
+joints live, so they're captured in the recording.
 
 The lidar IPs default to the G1's internal network. Run it for a timestamped
 ``recordings/`` folder::
@@ -34,11 +34,12 @@ from pathlib import Path
 from dimos.constants import RECORDINGS_DIR
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
+from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
-from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_vis import unitree_g1_vis
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
+from dimos.robot.unitree.g1.g1_recorder import G1Recorder
 from dimos.robot.unitree.g1.g1_tf_publisher import G1TfPublisher
 from dimos.utils.logging_config import setup_logger
 
@@ -70,7 +71,17 @@ unitree_g1_record = autoconnect(
             (PointLio, "odometry", "pointlio_odometry"),
         ]
     ),
-    PointlioRecorder.blueprint(db_path=str(_RECORDING_DIR / "mem2.db")),
+    # RGB only: the color stream anchors to the d435_link frame published by
+    # G1TfPublisher via the camera's own base -> optical tf subtree.
+    RealSenseCamera.blueprint(
+        base_frame_id="d435_link",
+        enable_depth=False,
+    ).remappings(
+        [
+            (RealSenseCamera, "camera_info", "realsense_camera_info"),
+        ]
+    ),
+    G1Recorder.blueprint(db_path=str(_RECORDING_DIR / "mem2.db")),
     # Continuously publishes the sensor mount frames onto tf, with the
     # torso -> base_link edge tracking the waist joints from rt/lowstate.
     G1TfPublisher.blueprint(network_interface="eth0"),
