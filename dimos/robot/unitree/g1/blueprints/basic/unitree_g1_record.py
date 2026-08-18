@@ -17,8 +17,9 @@
 
 Keyboard teleop from the rerun viewer's websocket walks the robot while
 Point-LIO odom+lidar are recorded into a memory db, together with tf. The
-sensor mount frames from g1.urdf are published continuously onto tf so
-they're captured in the recording.
+sensor mount frames from g1.urdf are published continuously onto tf, with
+the base_link edge tracking the waist joints live, so they're captured in
+the recording.
 
 The lidar IPs default to the G1's internal network. Run it for a timestamped
 ``recordings/`` folder::
@@ -38,7 +39,7 @@ from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_vis import unitree_g1_vis
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
-from dimos.robot.unitree.g1.g1_static_transforms import G1StaticTf
+from dimos.robot.unitree.g1.g1_tf_publisher import G1TfPublisher
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -70,8 +71,9 @@ unitree_g1_record = autoconnect(
         ]
     ),
     PointlioRecorder.blueprint(db_path=str(_RECORDING_DIR / "mem2.db")),
-    # Continuously republishes the sensor mount frames onto tf (no latched static tf).
-    G1StaticTf.blueprint(),
+    # Continuously publishes the sensor mount frames onto tf, with the
+    # torso -> base_link edge tracking the waist joints from rt/lowstate.
+    G1TfPublisher.blueprint(network_interface="eth0"),
     # Rerun viewer + websocket server. Viewer keyboard teleop publishes
     # tele_cmd_vel, which feeds MovementManager.
     unitree_g1_vis,
