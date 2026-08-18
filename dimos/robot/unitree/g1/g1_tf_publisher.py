@@ -19,6 +19,11 @@ to the torso, but base_link (the pelvis) sits across the three waist joints,
 so that edge is computed live from the rt/lowstate waist angles. Until the
 first LowState arrives the rest pose is published.
 
+The Mid-360 ships mounted upside down. The URDF mid360_link is the nominal
+upright mount pose, while Point-LIO tracks the sensor's own frame, so the
+torso edge composes the URDF mount with a 180 degree roll (the same
+correction the groot WBC blueprint applies).
+
 The published tree is rooted at mid360_link so the edges stay off the entity
 the live odom -> mid360_link edge writes. The tf buffer composes either
 direction.
@@ -30,6 +35,7 @@ it coexists with high-level AI-mode control.
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from typing import Any
@@ -44,7 +50,6 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
-from dimos.protocol.tf.static_tf_publisher import FrameSpec, frames_to_edge_transforms
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -52,15 +57,34 @@ logger = setup_logger()
 MID360_PITCH = 0.04014257279586953
 D435_PITCH = 0.8307767239493009
 
-# g1.urdf fixed sensor mounts on torso_link.
-FRAMES: list[FrameSpec] = [
-    ("torso_link", None, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
-    ("mid360_link", "torso_link", (0.0002835, 0.00003, 0.41618), (0.0, MID360_PITCH, 0.0)),
-    ("d435_link", "torso_link", (0.0576235, 0.01753, 0.42987), (0.0, D435_PITCH, 0.0)),
-]
+# g1.urdf fixed sensor mount origins on torso_link.
+_TORSO_MID360_XYZ = (0.0002835, 0.00003, 0.41618)
+_TORSO_D435_XYZ = (0.0576235, 0.01753, 0.42987)
 
 # waist_roll_joint origin, the only nonzero offset in the pelvis -> torso chain.
 _WAIST_ROLL_ORIGIN = (-0.0039635, 0.0, 0.044)
+
+
+def torso_to_mid360() -> Transform:
+    """torso_link -> the Mid-360's own frame: URDF mount pitch plus the upside-down roll."""
+    return Transform(
+        translation=Vector3(*_TORSO_MID360_XYZ),
+        rotation=Quaternion.from_euler(Vector3(0.0, MID360_PITCH, 0.0))
+        * Quaternion.from_euler(Vector3(math.pi, 0.0, 0.0)),
+        frame_id="torso_link",
+        child_frame_id="mid360_link",
+    )
+
+
+def torso_to_d435() -> Transform:
+    """torso_link -> d435_link, the URDF mount."""
+    return Transform(
+        translation=Vector3(*_TORSO_D435_XYZ),
+        rotation=Quaternion.from_euler(Vector3(0.0, D435_PITCH, 0.0)),
+        frame_id="torso_link",
+        child_frame_id="d435_link",
+    )
+
 
 # rt/lowstate motor indices, ordering from make_humanoid_joints("g1").
 _WAIST_YAW_IDX = 12
@@ -93,11 +117,10 @@ def mount_transforms(
     waist_yaw: float = 0.0, waist_roll: float = 0.0, waist_pitch: float = 0.0
 ) -> list[Transform]:
     """The mount tree as published: rooted at mid360_link."""
-    edges = {t.child_frame_id: t for t in frames_to_edge_transforms(FRAMES)}
     return [
-        -edges["mid360_link"],
+        -torso_to_mid360(),
         -base_to_torso(waist_yaw, waist_roll, waist_pitch),
-        edges["d435_link"],
+        torso_to_d435(),
     ]
 
 

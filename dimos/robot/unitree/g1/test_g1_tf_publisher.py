@@ -14,52 +14,76 @@
 
 """The published mount tree composes back to the g1.urdf geometry.
 
-mount_transforms() inverts two edges to root the tree at mid360_link, so the
-geometry a consumer reads back is not the geometry written in FRAMES. These
-pin the composed result at rest and under waist articulation, which is what
-nav actually uses.
+mount_transforms() inverts two edges to root the tree at mid360_link, and the
+mid360 edge carries the upside-down mounting roll on top of the URDF mount.
+These pin the composed result at rest and under waist articulation, which is
+what nav actually uses.
 """
 
 import math
 
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.protocol.tf.tf import MultiTBuffer
 from dimos.robot.unitree.g1.g1_tf_publisher import (
     D435_PITCH,
     MID360_PITCH,
     base_to_torso,
     mount_transforms,
+    torso_to_mid360,
 )
 
 # base_link -> mid360_link, summed down the rest-pose chain.
 MOUNT_X = -0.0039635 + 0.0002835
 MOUNT_Z = 0.044 + 0.41618
+LIDAR_HEIGHT = 1.2
 
 
 def _buffer(
-    waist_yaw: float = 0.0, waist_roll: float = 0.0, waist_pitch: float = 0.0
+    waist_yaw: float = 0.0,
+    waist_roll: float = 0.0,
+    waist_pitch: float = 0.0,
+    live: Transform | None = None,
 ) -> MultiTBuffer:
     buffer = MultiTBuffer()
     buffer.receive_transform(*mount_transforms(waist_yaw, waist_roll, waist_pitch))
+    if live is not None:
+        buffer.receive_transform(live)
     return buffer
 
 
-def test_rest_pose_matches_urdf() -> None:
+def test_rest_pose_offsets_match_urdf() -> None:
     """The lidar sits MOUNT_Z above base_link, the offset every ground projection uses."""
     leg = _buffer().get("mid360_link", "base_link")
     assert leg is not None
     base_to_sensor = -leg
     assert abs(base_to_sensor.translation.z - MOUNT_Z) < 1e-6
     assert abs(base_to_sensor.translation.x - MOUNT_X) < 1e-6
-    assert abs((-leg).rotation.euler.y - MID360_PITCH) < 1e-6
 
 
-def test_rest_pose_base_to_torso_matches_urdf_offsets() -> None:
-    rest = base_to_torso(0.0, 0.0, 0.0)
-    assert abs(rest.translation.x - (-0.0039635)) < 1e-6
-    assert abs(rest.translation.z - 0.044) < 1e-6
-    assert abs(rest.rotation.euler.x) < 1e-6
-    assert abs(rest.rotation.euler.y) < 1e-6
-    assert abs(rest.rotation.euler.z) < 1e-6
+def test_mid360_frame_is_upside_down() -> None:
+    """The sensor's z axis points at the floor in the base frame (inverted mount)."""
+    leg = _buffer().get("base_link", "mid360_link")
+    assert leg is not None
+    z_axis = leg.rotation.rotate_vector(Vector3(0.0, 0.0, 1.0))
+    assert z_axis.z < -0.99
+
+
+def test_flipped_level_sensor_yields_level_base() -> None:
+    """A standing robot reports a flipped sensor pose. base_link must come out level, below it."""
+    live = Transform(
+        translation=Vector3(0.0, 0.0, LIDAR_HEIGHT),
+        rotation=torso_to_mid360().rotation,
+        frame_id="world",
+        child_frame_id="mid360_link",
+    )
+    base = _buffer(live=live).get("world", "base_link")
+    assert base is not None
+    euler = base.rotation.euler
+    assert abs(euler.x) < 1e-6
+    assert abs(euler.y) < 1e-6
+    assert abs(euler.z) < 1e-6
+    assert math.isclose(base.translation.z, LIDAR_HEIGHT - MOUNT_Z, abs_tol=1e-6)
 
 
 def test_waist_yaw_rotates_base_link_against_the_torso() -> None:
@@ -70,18 +94,20 @@ def test_waist_yaw_rotates_base_link_against_the_torso() -> None:
     assert abs(leg.rotation.euler.z - (-yaw)) < 1e-6
 
 
-def test_waist_pitch_composes_with_the_mid360_mount_pitch() -> None:
+def test_waist_pitch_rotates_base_link_against_the_torso() -> None:
     pitch = 0.3
-    leg = _buffer(waist_pitch=pitch).get("mid360_link", "base_link")
+    leg = _buffer(waist_pitch=pitch).get("torso_link", "base_link")
     assert leg is not None
-    assert abs((-leg).rotation.euler.y - (MID360_PITCH + pitch)) < 1e-6
+    assert abs(leg.rotation.euler.y - (-pitch)) < 1e-6
 
 
-def test_waist_yaw_leaves_mount_height_alone() -> None:
-    """The waist yaw axis is vertical, so twisting must not move the lidar height."""
-    leg = _buffer(waist_yaw=1.0).get("mid360_link", "base_link")
-    assert leg is not None
-    assert abs((-leg).translation.z - MOUNT_Z) < 1e-6
+def test_rest_pose_base_to_torso_matches_urdf_offsets() -> None:
+    rest = base_to_torso(0.0, 0.0, 0.0)
+    assert abs(rest.translation.x - (-0.0039635)) < 1e-6
+    assert abs(rest.translation.z - 0.044) < 1e-6
+    assert abs(rest.rotation.euler.x) < 1e-6
+    assert abs(rest.rotation.euler.y) < 1e-6
+    assert abs(rest.rotation.euler.z) < 1e-6
 
 
 def test_d435_hangs_off_base_link() -> None:
@@ -95,6 +121,8 @@ def test_d435_hangs_off_base_link() -> None:
 
 def test_pelvis_height_matches_config_note() -> None:
     """mid360 1.2m above ground implies the 0.74m nominal standing pelvis height."""
-    leg = _buffer().get("mid360_link", "base_link")
-    assert leg is not None
-    assert math.isclose(1.2 - (-leg).translation.z, 0.74, abs_tol=0.005)
+    assert math.isclose(LIDAR_HEIGHT - MOUNT_Z, 0.74, abs_tol=0.005)
+
+
+def test_mid360_pitch_constant_matches_urdf() -> None:
+    assert math.isclose(MID360_PITCH, 0.04014257279586953)

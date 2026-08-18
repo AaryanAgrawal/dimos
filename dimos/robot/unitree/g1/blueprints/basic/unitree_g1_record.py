@@ -67,7 +67,10 @@ def _g1_record_rerun_blueprint() -> Any:
 
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial2DView(origin="world/color_image", name="Camera"),
+            rrb.Vertical(
+                rrb.Spatial2DView(origin="world/color_image", name="Camera"),
+                rrb.Spatial2DView(origin="world/realsense_depth_image", name="Depth"),
+            ),
             rrb.Spatial3DView(
                 origin="world",
                 name="3D",
@@ -100,12 +103,21 @@ def _convert_camera_info(camera_info: Any) -> Any:
     )
 
 
+def _convert_depth_camera_info(camera_info: Any) -> Any:
+    # Depth is aligned to color, so it shares the color optical frame.
+    return camera_info.to_rerun(
+        image_topic="/world/realsense_depth_image",
+        optical_frame="camera_color_optical_frame",
+    )
+
+
 _record_vis = vis_module(
     viewer_backend=global_config.viewer,
     rerun_config={
         "blueprint": _g1_record_rerun_blueprint,
         "visual_override": {
             "world/realsense_camera_info": _convert_camera_info,
+            "world/realsense_depth_camera_info": _convert_depth_camera_info,
         },
         # G1-sized wireframe on the live base_link frame.
         "static": {"world/robot_body": _static_robot_body},
