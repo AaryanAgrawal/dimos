@@ -33,5 +33,8 @@ TASK_EXPOSES: dict[str, list[str]] = {
         "set_upper_body",
         "clear_upper_body",
         "state_snapshot",
+        "play_motion_clip",
+        "stop_motion_clip",
+        "list_motion_clips",
     ],
 }

@@ -33,7 +33,7 @@ policy encoder consumes. Semantics preserved exactly:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -97,9 +97,7 @@ class StreamedMotionMerger:
         self._window_start = 0
         self._active_protocol: int | None = None
 
-    def merge(
-        self, fields: dict[str, NDArray], current_playback_frame: int
-    ) -> MergeResult:
+    def merge(self, fields: dict[str, NDArray], current_playback_frame: int) -> MergeResult:
         """Merge one decoded pose-topic message. ``fields`` are the raw
         decoded arrays keyed by wire name."""
         result = MergeResult()
@@ -111,9 +109,7 @@ class StreamedMotionMerger:
         if self._active_protocol is None:
             self._active_protocol = protocol
         elif self._active_protocol != protocol:
-            result.error = (
-                f"protocol version changed {self._active_protocol} -> {protocol}"
-            )
+            result.error = f"protocol version changed {self._active_protocol} -> {protocol}"
             result.protocol_version = protocol
             return result
 
@@ -162,9 +158,7 @@ class StreamedMotionMerger:
         new = StreamedMotion(
             joint_pos=np.zeros((total, NUM_JOINTS), dtype=np.float32),
             joint_vel=np.zeros((total, NUM_JOINTS), dtype=np.float32),
-            root_quat=np.tile(
-                np.array([1, 0, 0, 0], dtype=np.float32), (total, 1)
-            ),
+            root_quat=np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (total, 1)),
             smpl_joints=(
                 np.zeros((total, NUM_SMPL_JOINTS, 3), dtype=np.float32)
                 if protocol in (2, 3)
@@ -193,12 +187,12 @@ class StreamedMotionMerger:
                 n = (ov_end - ov_start) // frame_step
                 n = min(n, old.timesteps - src0, total - dst0)
                 if n > 0:
-                    new.joint_pos[dst0:dst0 + n] = old.joint_pos[src0:src0 + n]
-                    new.joint_vel[dst0:dst0 + n] = old.joint_vel[src0:src0 + n]
-                    new.root_quat[dst0:dst0 + n] = old.root_quat[src0:src0 + n]
+                    new.joint_pos[dst0 : dst0 + n] = old.joint_pos[src0 : src0 + n]
+                    new.joint_vel[dst0 : dst0 + n] = old.joint_vel[src0 : src0 + n]
+                    new.root_quat[dst0 : dst0 + n] = old.root_quat[src0 : src0 + n]
                     if new.smpl_joints is not None and old.smpl_joints is not None:
-                        new.smpl_joints[dst0:dst0 + n] = old.smpl_joints[src0:src0 + n]
-                        new.smpl_pose[dst0:dst0 + n] = old.smpl_pose[src0:src0 + n]
+                        new.smpl_joints[dst0 : dst0 + n] = old.smpl_joints[src0 : src0 + n]
+                        new.smpl_pose[dst0 : dst0 + n] = old.smpl_pose[src0 : src0 + n]
 
         # copy incoming
         if joint_pos is not None:
@@ -210,19 +204,15 @@ class StreamedMotionMerger:
         bq = np.asarray(body_quat, dtype=np.float32).reshape(num_frames, -1, 4)
         new.root_quat[merge_dst:] = bq[:, 0, :]
         if new.smpl_joints is not None:
-            new.smpl_joints[merge_dst:] = np.asarray(
-                smpl_joints, dtype=np.float32
-            ).reshape(num_frames, NUM_SMPL_JOINTS, 3)
-            new.smpl_pose[merge_dst:] = np.asarray(
-                smpl_pose, dtype=np.float32
-            ).reshape(num_frames, NUM_SMPL_POSES, 3)
+            new.smpl_joints[merge_dst:] = np.asarray(smpl_joints, dtype=np.float32).reshape(
+                num_frames, NUM_SMPL_JOINTS, 3
+            )
+            new.smpl_pose[merge_dst:] = np.asarray(smpl_pose, dtype=np.float32).reshape(
+                num_frames, NUM_SMPL_POSES, 3
+            )
 
         old_window_start = self._window_start
-        window_shift = (
-            (new_window_start - old_window_start) // frame_step
-            if frame_step > 0
-            else 0
-        )
+        window_shift = (new_window_start - old_window_start) // frame_step if frame_step > 0 else 0
 
         self._motion = new
         self._window_start = new_window_start
@@ -258,9 +248,7 @@ class StreamedMotionMerger:
             return incoming_start, 0, True
 
         tentative_start = min(global_playback, incoming_start)
-        merge_dst = (
-            (incoming_start - tentative_start) // frame_step if frame_step > 0 else 0
-        )
+        merge_dst = (incoming_start - tentative_start) // frame_step if frame_step > 0 else 0
         large_gap = incoming_start > window_end + frame_step
 
         if merge_dst > max_gap or large_gap:

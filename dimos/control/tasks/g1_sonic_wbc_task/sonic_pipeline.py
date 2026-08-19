@@ -548,9 +548,7 @@ class SonicPipeline:
     ) -> None:
         """Upper-body targets in ZMQ wire order (17: waist + arms). None clears."""
         self._ub17_pos = (
-            None
-            if positions_17 is None
-            else np.asarray(positions_17, dtype=np.float32).reshape(17)
+            None if positions_17 is None else np.asarray(positions_17, dtype=np.float32).reshape(17)
         )
         self._ub17_vel = (
             None
@@ -584,6 +582,25 @@ class SonicPipeline:
 
     def clear_planner_command(self) -> None:
         self._planner_cmd = None
+
+    def play_clip(self, motion: StreamedMotion) -> None:
+        """Play a disk reference clip through the streamed-motion path.
+
+        Resets heading alignment so the clip is re-anchored to the robot's
+        current heading (mirrors the C++ reference-motion switch)."""
+        self._streamed = motion
+        self._streamed_frame = 0
+        self._use_stream = True
+        self._heading_delta_quat = np.array([1, 0, 0, 0], dtype=np.float64)
+        self._heading_initialized = False
+
+    def stop_clip(self) -> None:
+        """Back to planner-driven locomotion."""
+        self._use_stream = False
+        self._streamed = None
+        self._streamed_frame = 0
+        self._merger.reset()
+        self._needs_replan = True
 
     def apply_pose_message(self, fields: dict) -> dict:
         """Merge one decoded pose-topic chunk; returns a merge summary."""

@@ -66,7 +66,7 @@ def split_topic(raw: bytes) -> tuple[str, bytes]:
     for topic in KNOWN_TOPICS:
         prefix = topic.encode()
         if raw.startswith(prefix):
-            return topic, raw[len(prefix):]
+            return topic, raw[len(prefix) :]
     raise ValueError(f"unknown topic prefix: {raw[:16]!r}")
 
 
@@ -74,9 +74,7 @@ def decode(raw: bytes) -> DecodedMessage:
     """Decode one packed message (topic prefix included)."""
     topic, body = split_topic(raw)
     if len(body) < HEADER_SIZE:
-        raise ValueError(
-            f"{topic}: body shorter than header ({len(body)} < {HEADER_SIZE})"
-        )
+        raise ValueError(f"{topic}: body shorter than header ({len(body)} < {HEADER_SIZE})")
     header_json = body[:HEADER_SIZE].rstrip(b"\x00")
     header: dict[str, Any] = json.loads(header_json)
     if header.get("endian", "le") != "le":
@@ -98,8 +96,7 @@ def decode(raw: bytes) -> DecodedMessage:
         nbytes = int(np.prod(shape)) * dtype.itemsize
         if offset + nbytes > len(payload):
             raise ValueError(
-                f"{topic}: payload underrun at field {name!r} "
-                f"({offset + nbytes} > {len(payload)})"
+                f"{topic}: payload underrun at field {name!r} ({offset + nbytes} > {len(payload)})"
             )
         arr = np.frombuffer(payload, dtype=dtype, count=int(np.prod(shape)), offset=offset)
         msg.fields[name] = arr.reshape(shape).copy()

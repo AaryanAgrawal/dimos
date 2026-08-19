@@ -344,6 +344,54 @@ class G1SonicWBCTask(BaseControlTask):
             float(msg.linear.x), float(msg.linear.y), float(msg.angular.z), t_now
         )
 
+    def play_motion_clip(self, name: str) -> dict[str, Any]:
+        """Play a reference motion clip from the sonic data dir by name.
+
+        Clips are 50 Hz CSVs in SONIC's reference layout (joint_pos.csv,
+        joint_vel.csv, body_quat.csv - IsaacLab joint order, header row).
+        """
+        import numpy as np
+
+        from dimos.control.tasks.g1_sonic_wbc_task.streamed_motion import StreamedMotion
+        from dimos.utils.data import get_data
+
+        clip_dir = Path(get_data("sonic")) / "motions" / name
+        if not clip_dir.is_dir():
+            raise FileNotFoundError(f"no such clip: {name} ({clip_dir})")
+        jp = np.loadtxt(clip_dir / "joint_pos.csv", delimiter=",", dtype=np.float32, skiprows=1)
+        jv = np.loadtxt(clip_dir / "joint_vel.csv", delimiter=",", dtype=np.float32, skiprows=1)
+        bq = np.loadtxt(clip_dir / "body_quat.csv", delimiter=",", dtype=np.float32, skiprows=1)
+        motion = StreamedMotion(
+            joint_pos=jp,
+            joint_vel=jv,
+            root_quat=bq[:, :4],
+            smpl_joints=None,
+            smpl_pose=None,
+            encode_mode=0,
+            timesteps=len(jp),
+        )
+        self._pipeline.play_clip(motion)
+        logger.info(
+            "G1SonicWBCTask playing clip",
+            task=self._name,
+            clip=name,
+            frames=len(jp),
+            seconds=round(len(jp) / 50.0, 1),
+        )
+        return {"clip": name, "frames": len(jp), "seconds": len(jp) / 50.0}
+
+    def stop_motion_clip(self) -> bool:
+        self._pipeline.stop_clip()
+        return True
+
+    def list_motion_clips(self) -> list[str]:
+        from dimos.utils.data import get_data
+
+        motions = Path(get_data("sonic")) / "motions"
+        if not motions.is_dir():
+            return []
+        return sorted(p.name for p in motions.iterdir() if p.is_dir())
+
     def set_locomotion_mode(self, mode: int | str | None) -> dict[str, Any]:
         """Force one of the 27 GEAR locomotion modes; None = speed-auto."""
         applied = self._pipeline.set_mode(mode)
@@ -396,9 +444,7 @@ class G1SonicWBCTask(BaseControlTask):
                 pub=self._config.zmq_pub_endpoint,
             )
         except Exception as exc:
-            logger.warning(
-                "G1SonicWBCTask ZMQ unavailable", task=self._name, error=repr(exc)
-            )
+            logger.warning("G1SonicWBCTask ZMQ unavailable", task=self._name, error=repr(exc))
             self._zmq_started = False
 
     def _zmq_poll(self, t_now: float) -> None:
@@ -464,9 +510,7 @@ class G1SonicWBCTask(BaseControlTask):
             height=upd.height,
         )
         self._last_planner_msg_t = t_now
-        self._pipeline.set_upper_body_wire17(
-            upd.upper_body_position, upd.upper_body_velocity
-        )
+        self._pipeline.set_upper_body_wire17(upd.upper_body_position, upd.upper_body_velocity)
         if upd.left_hand_joints is not None:
             self._left_hand = upd.left_hand_joints
         if upd.right_hand_joints is not None:

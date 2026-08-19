@@ -90,21 +90,14 @@ _MUJOCO_LIDAR_KWARGS: dict[str, Any] = {
     "mujoco_lidar_robot_exclusion_radius": G1.width_clearance,
 }
 
-# SONIC model files. Default to the local GR00T-WholeBodyControl checkout;
-# override with SONIC_MODEL_DIR / SONIC_PLANNER_PATH for other machines.
-_SONIC_RELEASE_DIR = Path(
-    os.environ.get(
-        "SONIC_MODEL_DIR",
-        Path.home() / "Desktop/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release",
-    )
-)
-_SONIC_PLANNER_PATH = Path(
-    os.environ.get(
-        "SONIC_PLANNER_PATH",
-        Path.home()
-        / "Desktop/GR00T-WholeBodyControl/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx",
-    )
-)
+# SONIC model files ship in the LFS data archive (data/sonic: encoder,
+# decoder, 774 MB planner, reference motion clips). LfsPath pulls lazily on
+# first access; SONIC_MODEL_DIR / SONIC_PLANNER_PATH override for machines
+# with a gear_sonic_deploy checkout.
+_env_model_dir = os.environ.get("SONIC_MODEL_DIR")
+_SONIC_RELEASE_DIR = Path(_env_model_dir) if _env_model_dir else LfsPath("sonic")
+_env_planner = os.environ.get("SONIC_PLANNER_PATH")
+_SONIC_PLANNER_PATH = Path(_env_planner) if _env_planner else LfsPath("sonic/planner_sonic.onnx")
 
 _MJCF_PATH = LfsPath("mujoco_sim/g1_gear_wbc.xml")
 _G1_NUM_MOTORS = len(g1_joints)
