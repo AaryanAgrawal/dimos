@@ -53,6 +53,11 @@ from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.g1.config import G1
+from dimos.robot.unitree.g1.g1_rerun import (
+    G1_RERUN_ROOT,
+    g1_urdf_joint_state,
+    g1_urdf_static_robot,
+)
 from dimos.utils.data import LfsPath
 from dimos.visualization.vis_module import vis_module
 
@@ -255,21 +260,76 @@ _coordinator = _G1SonicCoordinator.blueprint(
             },
         ),
     ],
-).transports(
-    {
-        ("joint_command", JointState): LCMTransport("/g1/joint_command", JointState),
-        ("g1_joints", JointState): LCMTransport("/g1/joints", JointState),
-        ("cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
-        ("motor_states", JointState): LCMTransport("/g1/motor_states", JointState),
-        ("imu", Imu): LCMTransport("/g1/imu", Imu),
-        ("motor_command", MotorCommandArray): LCMTransport("/g1/motor_command", MotorCommandArray),
-    }
 )
+
+# Real hardware speaks LCM to G1WholeBodyConnection on fixed topics. In sim,
+# leave transports to the runtime default (works under both lcm and zenoh);
+# pinning LCMTransport here would silently break under DIMOS_TRANSPORT=zenoh.
+if not global_config.simulation:
+    _coordinator = _coordinator.transports(
+        {
+            ("joint_command", JointState): LCMTransport("/g1/joint_command", JointState),
+            ("g1_joints", JointState): LCMTransport("/g1/joints", JointState),
+            ("cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
+            ("motor_states", JointState): LCMTransport("/g1/motor_states", JointState),
+            ("imu", Imu): LCMTransport("/g1/imu", Imu),
+            ("motor_command", MotorCommandArray): LCMTransport(
+                "/g1/motor_command", MotorCommandArray
+            ),
+        }
+    )
+
+_G1_JOINTS_ENTITY = "world/g1_joints"
+
+
+def _g1_sonic_rerun_blueprint():
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    return rrb.Blueprint(
+        rrb.Spatial3DView(
+            origin="world",
+            name="G1 SONIC WBC",
+            background=rrb.Background(kind="SolidColor", color=[0, 0, 0]),
+            line_grid=rrb.LineGrid3D(
+                plane=rr.components.Plane3D.XY.with_distance(0.0),
+            ),
+        ),
+        rrb.TimePanel(state="collapsed"),
+    )
+
+
+_rerun_config: dict[str, Any] = {
+    "blueprint": _g1_sonic_rerun_blueprint,
+    "visual_override": {
+        "world/color_image": None,
+        "world/camera_info": None,
+        "world/depth_image": None,
+        "world/depth_camera_info": None,
+        _G1_JOINTS_ENTITY: g1_urdf_joint_state(root_path=G1_RERUN_ROOT),
+    },
+    "max_hz": {
+        _G1_JOINTS_ENTITY: 25.0,
+        "world/g1/imu": 10.0,
+        "world/odometry": 15.0,
+    },
+    "static": {G1_RERUN_ROOT: g1_urdf_static_robot(root_path=G1_RERUN_ROOT)},
+}
 
 _remappings = [*_nav_remap, (_G1SonicCoordinator, "twist_command", "cmd_vel")]
 
 unitree_g1_sonic_wbc = (
-    autoconnect(_backend, _coordinator, _nav_stack, vis_module(viewer_backend=global_config.viewer))
+    autoconnect(
+        _backend,
+        _coordinator,
+        _nav_stack,
+        # rerun_config with callable factories does not survive the zenoh
+        # deploy path (msgpack turns them into dicts); pass it only under LCM.
+        vis_module(
+            viewer_backend=global_config.viewer,
+            rerun_config=None if global_config.transport == "zenoh" else _rerun_config,
+        ),
+    )
     .remappings(cast("Any", _remappings))
     .global_config(robot_model="unitree_g1", n_workers=_n_workers)
 )
