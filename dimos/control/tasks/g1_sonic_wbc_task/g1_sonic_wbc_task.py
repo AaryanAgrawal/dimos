@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -305,7 +306,11 @@ class G1SonicWBCTask(BaseControlTask):
 
     # -- command inputs ------------------------------------------------------
 
-    def set_velocity_command(self, vx: float, vy: float, yaw_rate: float, t_now: float) -> None:
+    def set_velocity_command(
+        self, vx: float, vy: float, yaw_rate: float, t_now: float | None = None
+    ) -> None:
+        if t_now is None:
+            t_now = time.perf_counter()
         with self._cmd_lock:
             self._cmd[:] = [vx, vy, yaw_rate]
             self._last_cmd_time = t_now
@@ -446,6 +451,14 @@ class G1SonicWBCTask(BaseControlTask):
             "arming_duration": self._arming_duration,
         }
         snap.update(self._pipeline.snapshot())
+        snap["debug_q_leg"] = [round(float(v), 4) for v in self._cached_q_29[:6]]
+        snap["debug_dq_leg"] = [round(float(v), 4) for v in self._cached_dq_29[:6]]
+        try:
+            imu = self._adapter.read_imu()
+            snap["debug_quat"] = [round(float(v), 4) for v in imu.quaternion]
+            snap["debug_gyro"] = [round(float(v), 4) for v in imu.gyroscope]
+        except Exception:
+            pass
         return snap
 
     # -- internal ------------------------------------------------------------

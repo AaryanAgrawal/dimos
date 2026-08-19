@@ -482,6 +482,8 @@ class SonicPipeline:
         # Latest robot state fed by step() (for planner input building)
         self._cur_quat = np.array([1, 0, 0, 0], dtype=np.float64)
         self._cur_q_dds = DEFAULT_ANGLES_DDS.copy()
+        self._nan_reported = 0
+        self._last_targets_dds = DEFAULT_ANGLES_DDS.copy()
 
     # -- commands ---------------------------------------------------------
 
@@ -678,6 +680,8 @@ class SonicPipeline:
         num_frames = int(result[1].item())
         if num_frames < 2:
             return
+        if self._nan_check("planner_qpos", qpos_30hz[:num_frames]):
+            return
         new_traj = self._resample_to_50hz(qpos_30hz, num_frames)
 
         if self._trajectory is not None and self._trajectory.num_frames > 0:
@@ -723,6 +727,19 @@ class SonicPipeline:
 
     # -- step -------------------------------------------------------------
 
+    def _nan_check(self, name: str, arr: NDArray) -> bool:
+        if np.isnan(arr).any() or np.isinf(arr).any():
+            if self._nan_reported < 10:
+                logger.warning(
+                    "SonicPipeline non-finite tensor",
+                    tensor=name,
+                    step=self._step_count,
+                    sample=np.asarray(arr).ravel()[:8].tolist(),
+                )
+                self._nan_reported += 1
+            return True
+        return False
+
     def step(
         self,
         q_dds: NDArray,
@@ -733,6 +750,28 @@ class SonicPipeline:
     ) -> NDArray:
         """One 50 Hz policy step. Returns 29 position targets, DDS order."""
         self._step_count += 1
+
+        # Input sentries: a non-finite or degenerate input poisons the
+        # heading math and the planner. Hold the previous targets instead.
+        bad = (
+            self._nan_check("q_dds", np.asarray(q_dds))
+            or self._nan_check("dq_dds", np.asarray(dq_dds))
+            or self._nan_check("base_quat", np.asarray(base_quat_wxyz))
+            or self._nan_check("gyro", np.asarray(gyro_body))
+            or self._nan_check("gravity", np.asarray(gravity_body))
+        )
+        qn = float(np.linalg.norm(np.asarray(base_quat_wxyz, dtype=np.float64)))
+        if qn < 0.5:
+            if self._nan_reported < 10:
+                logger.warning(
+                    "SonicPipeline degenerate base quaternion",
+                    norm=qn,
+                    step=self._step_count,
+                )
+                self._nan_reported += 1
+            bad = True
+        if bad:
+            return self._last_targets_dds.copy()
         self._cur_quat = np.asarray(base_quat_wxyz, dtype=np.float64)
         self._cur_q_dds = np.asarray(q_dds, dtype=np.float32)
 
@@ -800,13 +839,18 @@ class SonicPipeline:
         obs[674:964] = self._his_action[order].ravel()
         obs[964:994] = self._his_gravity[order].ravel()
 
+        self._nan_check("token", token)
+        self._nan_check("decoder_obs", obs)
         out = self._decoder.run(None, {self._decoder_input: obs.reshape(1, -1)})
         actions = out[0].squeeze()[:NUM_JOINTS].astype(np.float32)
+        if self._nan_check("actions", actions):
+            return self._last_targets_dds.copy()
         self._last_action = actions.copy()
 
         # All 29 decoder actions applied directly - no post-decoder override
         # (D3; matches C++ CreatePolicyCommand).
         targets_onnx = DEFAULT_ANGLES_ONNX + actions * ACTION_SCALE_ONNX
+        self._last_targets_dds = targets_onnx[DDS_TO_ONNX].copy()
 
         if self._trajectory is not None:
             self._traj_frame = min(self._traj_frame + 1, self._trajectory.num_frames - 1)

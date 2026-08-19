@@ -44,12 +44,46 @@ from dimos.core.global_config import global_config
 from dimos.core.stream import Out
 from dimos.core.transport import LCMTransport
 from dimos.hardware.whole_body.spec import WholeBodyConfig
+from dimos.mapping.costmapper import CostMapper
+from dimos.mapping.pointclouds.occupancy import HeightCostConfig
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
+from dimos.navigation.movement_manager.movement_manager import MovementManager
+from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
+from dimos.robot.unitree.g1.config import G1
 from dimos.utils.data import LfsPath
 from dimos.visualization.vis_module import vis_module
+
+_G1_NAV_VOXEL_RESOLUTION = 0.05
+_G1_REAL_NAV_VOXEL_RESOLUTION = 0.08
+_G1_NAV_OVERHEAD_SAFETY_MARGIN = 0.2
+_G1_NAV_MAX_STEP_HEIGHT = 0.10
+_G1_NAV_ROTATION_DIAMETER = 0.8
+_G1_NAV_SAFE_RADIUS_MARGIN = 0.6
+assert G1.height_clearance is not None and G1.width_clearance is not None
+_MUJOCO_LIDAR_CAMERAS = (
+    "lidar_front_camera",
+    "lidar_left_camera",
+    "lidar_right_camera",
+)
+_MUJOCO_LIDAR_KWARGS: dict[str, Any] = {
+    "camera_name": _MUJOCO_LIDAR_CAMERAS[0],
+    "mujoco_lidar_camera_names": list(_MUJOCO_LIDAR_CAMERAS),
+    "width": 320,
+    "height": 240,
+    "fps": 2,
+    "enable_color": False,
+    "enable_depth": False,
+    "enable_pointcloud": True,
+    "pointcloud_fps": 1.0,
+    "enable_mujoco_lidar": True,
+    "mujoco_lidar_geom_groups": [2, 3],
+    "mujoco_lidar_raycast_width": 64,
+    "mujoco_lidar_raycast_height": 32,
+    "mujoco_lidar_robot_exclusion_radius": G1.width_clearance,
+}
 
 # SONIC model files. Default to the local GR00T-WholeBodyControl checkout;
 # override with SONIC_MODEL_DIR / SONIC_PLANNER_PATH for other machines.
@@ -108,12 +142,15 @@ if global_config.simulation == "mujoco":
         require_imu=True,
     )
 
+    from dimos.mapping.voxels.module import VoxelGridMapper
+
     _backend = MujocoSimModule.blueprint(
         address=_MJCF_PATH,
         headless=True,
         dof=_G1_NUM_MOTORS,
         inject_legacy_assets=True,
         robot_sim_spec=_g1_sim_spec,
+        **_MUJOCO_LIDAR_KWARGS,
     )
     _adapter_type = "sim_mujoco_g1"
     _adapter_address = _MJCF_PATH
@@ -123,6 +160,23 @@ if global_config.simulation == "mujoco":
     _default_ramp_seconds = 0.0
     _decimation = 1
     _n_workers = 2
+    _nav_stack = autoconnect(
+        VoxelGridMapper.blueprint(emit_every=1),
+        CostMapper.blueprint(
+            config=HeightCostConfig(
+                resolution=_G1_NAV_VOXEL_RESOLUTION,
+                can_pass_under=G1.height_clearance + _G1_NAV_OVERHEAD_SAFETY_MARGIN,
+                can_climb=_G1_NAV_MAX_STEP_HEIGHT,
+            ),
+            initial_safe_radius_meters=G1.width_clearance + _G1_NAV_SAFE_RADIUS_MARGIN,
+        ),
+        ReplanningAStarPlanner.blueprint(
+            robot_width=G1.width_clearance,
+            robot_rotation_diameter=_G1_NAV_ROTATION_DIAMETER,
+        ),
+        MovementManager.blueprint(),
+    )
+    _nav_remap = [(VoxelGridMapper, "lidar", "pointcloud")]
 else:
     from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
 
@@ -135,6 +189,33 @@ else:
     _default_ramp_seconds = 10.0
     _decimation = 2  # 100 Hz tick / 2 = 50 Hz policy
     _n_workers = 10
+    from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+    from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
+
+    _nav_stack = autoconnect(
+        PointLio.blueprint(),
+        RayTracingVoxelMap.blueprint(
+            voxel_size=_G1_REAL_NAV_VOXEL_RESOLUTION,
+            emit_every=0,
+            global_emit_every=4,
+            max_health=10,
+            graze_cos=0.85,
+        ),
+        CostMapper.blueprint(
+            config=HeightCostConfig(
+                resolution=_G1_REAL_NAV_VOXEL_RESOLUTION,
+                can_pass_under=G1.height_clearance + _G1_NAV_OVERHEAD_SAFETY_MARGIN,
+                can_climb=_G1_NAV_MAX_STEP_HEIGHT,
+            ),
+            initial_safe_radius_meters=G1.width_clearance + _G1_NAV_SAFE_RADIUS_MARGIN,
+        ),
+        ReplanningAStarPlanner.blueprint(
+            robot_width=G1.width_clearance,
+            robot_rotation_diameter=_G1_NAV_ROTATION_DIAMETER,
+        ),
+        MovementManager.blueprint(),
+    )
+    _nav_remap = []
 
 
 class _G1SonicCoordinator(ControlCoordinator):
@@ -185,10 +266,10 @@ _coordinator = _G1SonicCoordinator.blueprint(
     }
 )
 
-_remappings = [(_G1SonicCoordinator, "twist_command", "cmd_vel")]
+_remappings = [*_nav_remap, (_G1SonicCoordinator, "twist_command", "cmd_vel")]
 
 unitree_g1_sonic_wbc = (
-    autoconnect(_backend, _coordinator, vis_module(viewer_backend=global_config.viewer))
+    autoconnect(_backend, _coordinator, _nav_stack, vis_module(viewer_backend=global_config.viewer))
     .remappings(cast("Any", _remappings))
     .global_config(robot_model="unitree_g1", n_workers=_n_workers)
 )
