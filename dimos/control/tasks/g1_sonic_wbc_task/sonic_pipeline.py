@@ -38,6 +38,10 @@ import numpy as np
 from numpy.typing import NDArray
 import onnxruntime as ort  # type: ignore[import-untyped]
 
+from dimos.control.tasks.g1_sonic_wbc_task.streamed_motion import (
+    StreamedMotion,
+    StreamedMotionMerger,
+)
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -273,6 +277,14 @@ ACTION_SCALE_DDS = np.array(
 DEFAULT_ANGLES_ONNX = DEFAULT_ANGLES_DDS[ONNX_TO_DDS]
 ACTION_SCALE_ONNX = ACTION_SCALE_DDS[ONNX_TO_DDS]
 
+# 6 wrist joints in ONNX order (wrist_joint_isaaclab_order_in_isaaclab_index)
+WRIST_ONNX_INDICES = np.array([23, 24, 25, 26, 27, 28], dtype=np.intp)
+
+# Encoder observation offsets for the SMPL (mode 2) fields
+_SMPL_JOINTS_OFFSET = 922  # smpl_joints_10frame_step1: 720
+_SMPL_ANCHOR_OFFSET = 1642  # smpl_anchor_orientation_10frame_step1: 60
+_WRISTS_OFFSET = 1702  # motion_joint_positions_wrists_10frame_step1: 60
+
 # 17 upper-body joints (waist + arms) in ONNX-order indices, matching the
 # C++ upper_body_joint_isaaclab_order_in_isaaclab_index.
 UPPER_BODY_ONNX_INDICES = np.array(
@@ -485,6 +497,19 @@ class SonicPipeline:
         self._nan_reported = 0
         self._last_targets_dds = DEFAULT_ANGLES_DDS.copy()
 
+        # Streamed reference motion (ZMQ pose topic)
+        self._merger = StreamedMotionMerger()
+        self._streamed: StreamedMotion | None = None
+        self._streamed_frame = 0
+        self._use_stream = False
+        # Direct planner command (ZMQ planner topic); None -> twist-derived
+        self._planner_cmd: dict | None = None
+        self._upper_vel_dds: NDArray | None = None
+        # Wire-order (17: waist + arms) upper-body buffers; take precedence
+        # over the DDS-14 arm API when set
+        self._ub17_pos: NDArray | None = None
+        self._ub17_vel: NDArray | None = None
+
     # -- commands ---------------------------------------------------------
 
     def set_velocity(self, vx: float, vy: float, wz: float) -> None:
@@ -508,8 +533,74 @@ class SonicPipeline:
             self._needs_replan = True
         self._height_cmd = float(height)
 
-    def set_upper_body(self, targets_dds_14: NDArray) -> None:
+    def set_upper_body(
+        self, targets_dds_14: NDArray, velocities_dds_14: NDArray | None = None
+    ) -> None:
         self._upper_targets_dds = np.asarray(targets_dds_14, dtype=np.float32).flatten()[:14]
+        self._upper_vel_dds = (
+            None
+            if velocities_dds_14 is None
+            else np.asarray(velocities_dds_14, dtype=np.float32).flatten()[:14]
+        )
+
+    def set_upper_body_wire17(
+        self, positions_17: NDArray | None, velocities_17: NDArray | None
+    ) -> None:
+        """Upper-body targets in ZMQ wire order (17: waist + arms). None clears."""
+        self._ub17_pos = (
+            None
+            if positions_17 is None
+            else np.asarray(positions_17, dtype=np.float32).reshape(17)
+        )
+        self._ub17_vel = (
+            None
+            if velocities_17 is None
+            else np.asarray(velocities_17, dtype=np.float32).reshape(17)
+        )
+
+    def set_source_stream(self, use_stream: bool) -> None:
+        """Command-topic planner-flag inverse: True -> pose-topic motion."""
+        if use_stream != self._use_stream:
+            self._needs_replan = not use_stream
+        self._use_stream = bool(use_stream)
+
+    def set_planner_command(
+        self,
+        mode: int,
+        movement: NDArray,
+        facing: NDArray,
+        speed: float = -1.0,
+        height: float = -1.0,
+    ) -> None:
+        """Direct planner command (ZMQ planner topic); overrides twist mapping."""
+        self._planner_cmd = {
+            "mode": int(mode),
+            "movement": np.asarray(movement, dtype=np.float32).reshape(3),
+            "facing": np.asarray(facing, dtype=np.float32).reshape(3),
+            "speed": float(speed),
+            "height": float(height),
+        }
+        self._needs_replan = True
+
+    def clear_planner_command(self) -> None:
+        self._planner_cmd = None
+
+    def apply_pose_message(self, fields: dict) -> dict:
+        """Merge one decoded pose-topic chunk; returns a merge summary."""
+        res = self._merger.merge(fields, self._streamed_frame)
+        if res.error:
+            logger.warning("SonicPipeline pose merge rejected", error=res.error)
+            return {"error": res.error}
+        self._streamed = res.motion
+        if res.did_catchup_reset:
+            self._streamed_frame = 0
+        else:
+            self._streamed_frame = max(0, self._streamed_frame - res.frame_offset_adjustment)
+        return {
+            "frames": res.motion.timesteps if res.motion else 0,
+            "encode_mode": res.motion.encode_mode if res.motion else -1,
+            "catchup": res.did_catchup_reset,
+        }
 
     def reset(self) -> None:
         self._his_ang_vel[:] = 0.0
@@ -532,6 +623,14 @@ class SonicPipeline:
         self._planner_future = None
         self._upper_targets_dds = DEFAULT_ANGLES_DDS[15:].copy()
         self._mode_override = None
+        self._merger.reset()
+        self._streamed = None
+        self._streamed_frame = 0
+        self._use_stream = False
+        self._planner_cmd = None
+        self._upper_vel_dds = None
+        self._ub17_pos = None
+        self._ub17_vel = None
 
     # -- encoder ----------------------------------------------------------
 
@@ -544,24 +643,39 @@ class SonicPipeline:
         return out[0].squeeze().astype(np.float32)
 
     def _has_upper_body_targets(self) -> bool:
+        if self._ub17_pos is not None:
+            return True
         return not np.allclose(self._upper_targets_dds, DEFAULT_ANGLES_DDS[15:], atol=1e-6)
 
     def _upper_body_17_onnx(self) -> NDArray:
+        if self._ub17_pos is not None:
+            return self._ub17_pos
         full = DEFAULT_ANGLES_ONNX.copy()
         for dds_i in range(15, 29):
             full[DDS_TO_ONNX[dds_i]] = self._upper_targets_dds[dds_i - 15]
         return full[UPPER_BODY_ONNX_INDICES]
 
+    def _upper_body_vel_17_onnx(self) -> NDArray:
+        if self._ub17_vel is not None:
+            return self._ub17_vel
+        full = np.zeros(NUM_JOINTS, dtype=np.float32)
+        if self._upper_vel_dds is not None:
+            for dds_i in range(15, 29):
+                full[DDS_TO_ONNX[dds_i]] = self._upper_vel_dds[dds_i - 15]
+        return full[UPPER_BODY_ONNX_INDICES]
+
     def _inject_upper_body(self, enc_obs: NDArray) -> None:
-        """Encoder-observation injection (D3): positions replaced, velocities
-        zeroed for the 17 upper-body joints across all 10 frames."""
+        """Encoder-observation injection (D3): positions replaced; velocities
+        replaced with provided upper-body velocities (zero when absent) for
+        the 17 upper-body joints across all 10 frames."""
         upper_vals = self._upper_body_17_onnx()
+        upper_vels = self._upper_body_vel_17_onnx()
         for i in range(10):
             pos = 4 + i * NUM_JOINTS
             vel = 294 + i * NUM_JOINTS
             for k, idx in enumerate(UPPER_BODY_ONNX_INDICES):
                 enc_obs[pos + idx] = upper_vals[k]
-                enc_obs[vel + idx] = 0.0
+                enc_obs[vel + idx] = upper_vels[k]
 
     def _build_encoder_obs(self, base_quat: NDArray) -> NDArray:
         enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
@@ -617,6 +731,12 @@ class SonicPipeline:
         return context
 
     def _build_planner_inputs(self) -> dict:
+        if self._planner_cmd is not None:
+            # ZMQ planner topic: mode/movement/facing given directly
+            c = self._planner_cmd
+            return self._planner_inputs_dict(
+                c["mode"], c["movement"], c["facing"], c["speed"], c["height"]
+            )
         speed = math.hypot(self._vx, self._vy)
         yaw = _yaw_from_quat(self._cur_quat)
         cos_h, sin_h = math.cos(yaw), math.sin(yaw)
@@ -640,12 +760,22 @@ class SonicPipeline:
         else:
             target_vel = -1.0
 
+        return self._planner_inputs_dict(mode, move_dir, face_dir, target_vel, self._height_cmd)
+
+    def _planner_inputs_dict(
+        self,
+        mode: int,
+        move_dir: NDArray,
+        face_dir: NDArray,
+        target_vel: float,
+        height: float,
+    ) -> dict:
         return {
             "context_mujoco_qpos": self._build_planner_context().reshape(1, 4, 36),
             "target_vel": np.array([target_vel], dtype=np.float32),
             "mode": np.array([mode], dtype=np.int64),
-            "movement_direction": move_dir.reshape(1, 3),
-            "facing_direction": face_dir.reshape(1, 3),
+            "movement_direction": np.asarray(move_dir, dtype=np.float32).reshape(1, 3),
+            "facing_direction": np.asarray(face_dir, dtype=np.float32).reshape(1, 3),
             "random_seed": np.array([42], dtype=np.int64),
             "has_specific_target": np.zeros((1, 1), dtype=np.int64),
             "specific_target_positions": np.zeros((1, 4, 3), dtype=np.float32),
@@ -653,7 +783,7 @@ class SonicPipeline:
             "allowed_pred_num_tokens": np.array(
                 [[1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0]], dtype=np.int64
             ),
-            "height": np.array([self._height_cmd], dtype=np.float32),
+            "height": np.array([height], dtype=np.float32),
         }
 
     def _submit_planner(self) -> None:
@@ -793,7 +923,7 @@ class SonicPipeline:
             and mode not in STATIC_MODES
             and self._replan_timer >= interval
         )
-        if (
+        if not self._use_stream and (
             self._needs_replan
             or (self._replan_timer >= interval and moving)
             or traj_low
@@ -804,7 +934,16 @@ class SonicPipeline:
             self._needs_replan = False
 
         # Encoder token
-        if self._trajectory is not None and self._trajectory.num_frames > 0:
+        if self._use_stream and self._streamed is not None and self._streamed.timesteps > 0:
+            if not self._heading_initialized:
+                init_heading = _calc_heading_quat(self._cur_quat)
+                init_ref_inv = _calc_heading_quat_inv(
+                    self._streamed.root_quat[0].astype(np.float64)
+                )
+                self._heading_delta_quat = _quat_multiply(init_heading, init_ref_inv)
+                self._heading_initialized = True
+            token = self._run_encoder(self._build_streamed_encoder_obs(self._cur_quat))
+        elif self._trajectory is not None and self._trajectory.num_frames > 0:
             token = self._run_encoder(self._build_encoder_obs(self._cur_quat))
         elif self._has_upper_body_targets():
             enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
@@ -852,10 +991,54 @@ class SonicPipeline:
         targets_onnx = DEFAULT_ANGLES_ONNX + actions * ACTION_SCALE_ONNX
         self._last_targets_dds = targets_onnx[DDS_TO_ONNX].copy()
 
-        if self._trajectory is not None:
+        if self._use_stream and self._streamed is not None:
+            self._streamed_frame = min(self._streamed_frame + 1, self._streamed.timesteps - 1)
+        elif self._trajectory is not None:
             self._traj_frame = min(self._traj_frame + 1, self._trajectory.num_frames - 1)
 
         return targets_onnx[DDS_TO_ONNX]
+
+    def _build_streamed_encoder_obs(self, base_quat: NDArray) -> NDArray:
+        """Encoder obs from the streamed motion (pose topic).
+
+        Mode 0 (protocol v1): joint fields step5, like a planner trajectory.
+        Mode 2 (v2/v3): SMPL fields step1 + wrist positions step1, matching
+        the C++ observation registry offsets.
+        """
+        motion = self._streamed
+        assert motion is not None
+        enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+        enc_obs[0] = float(motion.encode_mode)
+        f_curr = min(self._streamed_frame, motion.timesteps - 1)
+        q_base_inv = _quat_conjugate(base_quat)
+
+        if motion.encode_mode == 0:
+            for i in range(10):
+                f = min(f_curr + i * 5, motion.timesteps - 1)
+                enc_obs[4 + i * NUM_JOINTS : 4 + (i + 1) * NUM_JOINTS] = motion.joint_pos[f]
+                enc_obs[294 + i * NUM_JOINTS : 294 + (i + 1) * NUM_JOINTS] = motion.joint_vel[f]
+                q_aligned = _quat_multiply(
+                    self._heading_delta_quat, motion.root_quat[f].astype(np.float64)
+                )
+                q_rel = _quat_multiply(q_base_inv, q_aligned)
+                enc_obs[601 + i * 6 : 601 + (i + 1) * 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
+            if self._has_upper_body_targets():
+                self._inject_upper_body(enc_obs)
+        else:
+            assert motion.smpl_joints is not None
+            for i in range(10):
+                f = min(f_curr + i, motion.timesteps - 1)
+                o = _SMPL_JOINTS_OFFSET + i * 72
+                enc_obs[o : o + 72] = motion.smpl_joints[f].ravel()
+                q_aligned = _quat_multiply(
+                    self._heading_delta_quat, motion.root_quat[f].astype(np.float64)
+                )
+                q_rel = _quat_multiply(q_base_inv, q_aligned)
+                ao = _SMPL_ANCHOR_OFFSET + i * 6
+                enc_obs[ao : ao + 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
+                wo = _WRISTS_OFFSET + i * 6
+                enc_obs[wo : wo + 6] = motion.joint_pos[f][WRIST_ONNX_INDICES]
+        return enc_obs
 
     def _run_encoder(self, enc_obs: NDArray) -> NDArray:
         out = self._encoder.run(None, {self._encoder_input: enc_obs.reshape(1, -1)})
@@ -875,4 +1058,8 @@ class SonicPipeline:
             "traj_frames_total": (self._trajectory.num_frames if self._trajectory else 0),
             "action_norm": float(np.linalg.norm(self._last_action)),
             "upper_body_active": self._has_upper_body_targets(),
+            "stream_active": self._use_stream,
+            "stream_frames": self._streamed.timesteps if self._streamed else 0,
+            "stream_frame": self._streamed_frame,
+            "stream_encode_mode": self._streamed.encode_mode if self._streamed else -1,
         }
