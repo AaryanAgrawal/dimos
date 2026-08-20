@@ -12,24 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Live sensor-mount tf for the G1.
+"""Live G1 sensor-mount tf: mounts from g1.urdf, the base_link edge from the waist joints.
 
-Publishes the mount tree from g1.urdf onto tf. The mid360 and d435 are fixed
-to the torso, but base_link (the pelvis) sits across the three waist joints,
-so that edge is computed live from the rt/lowstate waist angles. Until the
-first LowState arrives the rest pose is published.
-
-The Mid-360 ships mounted upside down. The URDF mid360_link is the nominal
-upright mount pose, while Point-LIO tracks the sensor's own frame, so the
-torso edge composes the URDF mount with a 180 degree roll (the same
-correction the groot WBC blueprint applies).
-
-The published tree is rooted at mid360_link so the edges stay off the entity
-the live odom -> mid360_link edge writes. The tf buffer composes either
-direction.
-
-The lowstate subscriber is read-only. It never opens the rt/lowcmd path, so
-it coexists with high-level AI-mode control.
+The Mid-360 ships mounted upside down, so the torso edge composes the URDF
+mount with a 180 degree roll. The rt/lowstate subscriber is read-only.
 """
 
 from __future__ import annotations

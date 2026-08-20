@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Records the G1 into a memory SQLite db.
-
-Captures Point-LIO odom + lidar (trajectory baked into ``pointlio_lidar`` via
-the inherited ``@pose_setter_for``) plus the RealSense color and depth
-streams. Camera frames are anchored via the mount frames the G1 tf publisher
-and the camera module put on tf.
-"""
+"""Records Point-LIO odom+lidar and the RealSense color and depth streams into a memory db."""
 
 from __future__ import annotations
 

@@ -282,8 +282,7 @@ class RealSenseCamera(DepthCameraHardware, Module, perception.DepthCamera):
                 # Pipeline cleared by stop() - exit loop
                 break
             except RuntimeError:
-                # Frame timeout (camera warm-up, transient USB stall) - keep
-                # waiting. Shutdown clears _running, ending the loop.
+                # Frame timeouts are transient, from warm-up or USB stalls. Keep waiting.
                 if self._running:
                     logger.warning("RealSense: no frames within 1s - retrying")
                 continue

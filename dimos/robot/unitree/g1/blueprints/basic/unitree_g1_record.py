@@ -15,16 +15,9 @@
 
 """Drive-and-record blueprint for the G1.
 
-Keyboard teleop from the rerun viewer's websocket walks the robot while
-Point-LIO odom+lidar and the RealSense color+depth streams are recorded into
-a memory db, together with tf. The sensor mount frames from g1.urdf are
-published continuously onto tf, with the base_link edge tracking the waist
-joints live, so they're captured in the recording.
-
-The lidar IPs default to the G1's internal network. Run it for a timestamped
-``recordings/`` folder::
-
-    uv run python dimos/robot/unitree/g1/blueprints/basic/unitree_g1_record.py
+Rerun viewer keyboard teleop walks the robot while Point-LIO odom+lidar, the
+RealSense color+depth streams, and tf are recorded into a timestamped folder
+under recordings/.
 """
 
 from typing import Any
@@ -35,6 +28,7 @@ from dimos.core.global_config import global_config
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 from dimos.memory.module import default_recording_dir
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
 from dimos.robot.unitree.g1.g1_recorder import G1Recorder
@@ -80,14 +74,14 @@ def _static_robot_body(rr: Any) -> list[Any]:
     ]
 
 
-def _convert_camera_info(camera_info: Any) -> Any:
+def _convert_camera_info(camera_info: CameraInfo) -> Any:
     return camera_info.to_rerun(
         image_topic="/world/color_image",
         optical_frame="camera_color_optical_frame",
     )
 
 
-def _convert_depth_camera_info(camera_info: Any) -> Any:
+def _convert_depth_camera_info(camera_info: CameraInfo) -> Any:
     # Depth is aligned to color, so it shares the color optical frame.
     return camera_info.to_rerun(
         image_topic="/world/realsense_depth_image",
@@ -124,8 +118,7 @@ unitree_g1_record = autoconnect(
             (PointLio, "odometry", "pointlio_odometry"),
         ]
     ),
-    # Camera streams anchor to the d435_link frame published by G1TfPublisher
-    # via the camera's own base -> optical tf subtree.
+    # The camera anchors its optical tf subtree to the d435_link frame.
     RealSenseCamera.blueprint(
         base_frame_id="d435_link",
     ).remappings(
@@ -136,11 +129,9 @@ unitree_g1_record = autoconnect(
         ]
     ),
     G1Recorder.blueprint(db_path=str(_RECORDING_DIR / "mem2.db")),
-    # Continuously publishes the sensor mount frames onto tf, with the
-    # torso -> base_link edge tracking the waist joints from rt/lowstate.
+    # Mount frames onto tf, base_link edge live from the waist joints.
     G1TfPublisher.blueprint(),
-    # Rerun viewer + websocket server. Viewer keyboard teleop publishes
-    # tele_cmd_vel, which feeds MovementManager.
+    # Viewer keyboard teleop feeds MovementManager via tele_cmd_vel.
     _record_vis,
 ).global_config(n_workers=12, robot_model="unitree_g1")
 

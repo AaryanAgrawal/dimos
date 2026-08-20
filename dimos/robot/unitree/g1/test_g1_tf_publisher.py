@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The published mount tree composes back to the g1.urdf geometry.
-
-mount_transforms() inverts two edges to root the tree at mid360_link, and the
-mid360 edge carries the upside-down mounting roll on top of the URDF mount.
-These pin the composed result at rest and under waist articulation, which is
-what nav actually uses.
-"""
+"""The published mount tree composes back to the g1.urdf geometry."""
 
 import math
 
@@ -33,9 +27,12 @@ from dimos.robot.unitree.g1.g1_tf_publisher import (
     torso_to_mid360,
 )
 
+# g1.urdf pelvis -> torso_link rest offsets.
+PELVIS_TORSO_X = -0.0039635
+PELVIS_TORSO_Z = 0.044
 # base_link -> mid360_link, summed down the rest-pose chain.
-MOUNT_X = -0.0039635 + 0.0002835
-MOUNT_Z = 0.044 + 0.41618
+MOUNT_X = PELVIS_TORSO_X + 0.0002835
+MOUNT_Z = PELVIS_TORSO_Z + 0.41618
 LIDAR_HEIGHT = 1.2
 
 
@@ -62,7 +59,7 @@ def test_rest_pose_offsets_match_urdf() -> None:
 
 
 def test_mid360_frame_is_upside_down() -> None:
-    """The sensor's z axis points at the floor in the base frame (inverted mount)."""
+    """The inverted mount points the sensor's z axis at the floor in the base frame."""
     leg = _buffer().get("base_link", "mid360_link")
     assert leg is not None
     z_axis = leg.rotation.rotate_vector(Vector3(0.0, 0.0, 1.0))
@@ -103,8 +100,8 @@ def test_waist_pitch_rotates_base_link_against_the_torso() -> None:
 
 def test_rest_pose_base_to_torso_matches_urdf_offsets() -> None:
     rest = base_to_torso(0.0, 0.0, 0.0)
-    assert abs(rest.translation.x - (-0.0039635)) < 1e-6
-    assert abs(rest.translation.z - 0.044) < 1e-6
+    assert abs(rest.translation.x - PELVIS_TORSO_X) < 1e-6
+    assert abs(rest.translation.z - PELVIS_TORSO_Z) < 1e-6
     assert abs(rest.rotation.euler.x) < 1e-6
     assert abs(rest.rotation.euler.y) < 1e-6
     assert abs(rest.rotation.euler.z) < 1e-6
@@ -114,8 +111,8 @@ def test_d435_hangs_off_base_link() -> None:
     """The tree is rooted at mid360_link, so the camera edge is reachable by composition."""
     camera = _buffer().get("base_link", "d435_link")
     assert camera is not None
-    assert abs(camera.translation.x - (-0.0039635 + 0.0576235)) < 1e-6
-    assert abs(camera.translation.z - (0.044 + 0.42987)) < 1e-6
+    assert abs(camera.translation.x - (PELVIS_TORSO_X + 0.0576235)) < 1e-6
+    assert abs(camera.translation.z - (PELVIS_TORSO_Z + 0.42987)) < 1e-6
     assert abs(camera.rotation.euler.y - D435_PITCH) < 1e-6
 
 
