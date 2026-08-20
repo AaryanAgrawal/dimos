@@ -1,0 +1,21 @@
+# PLACEHOLDER — replaced by real survey.
+#
+# KEPT in the Jul 17 cleanup (trial/scripts/, demo/, print/ were removed) on purpose:
+# dimos' go2 blueprint defaults marker_map_file to the bare name "office_markers.yaml"
+# (dimos/robot/unitree/go2/blueprints/smart/unitree_go2.py) and resolve_named_path
+# (dimos/utils/data.py) checks the cwd first — running unitree-go2-visual-relocalization
+# from this repo root resolves to THIS file. Delete only when that default changes.
+#
+# Stand-in marker map so unitree_go2_marker_localization can be smoke-composed
+# before Aaryan's real office survey YAML lands at this same path. One dummy
+# ArUco/AprilTag marker at the map origin, identity rotation. Format matches
+# dimos.perception.fiducial.marker_localization.load_marker_map:
+#   markers:
+#     <id>:
+#       translation: [x, y, z]      # meters, in the `map` frame
+#       rotation: [x, y, z, w]      # quaternion, in the `map` frame
+
+markers:
+  0:
+    translation: [0.0, 0.0, 0.0]
+    rotation: [0.0, 0.0, 0.0, 1.0]

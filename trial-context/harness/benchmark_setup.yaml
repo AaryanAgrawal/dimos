@@ -1,0 +1,222 @@
+# THE RELOCALIZATION BENCHMARK — canonical setup (v1, 2026-07-17, Aaryan + night session)
+#
+# This file is a MANIFEST: which recordings exist, what role each plays, which are
+# excluded and why, and each one's lane wiring. No code reads it — trial/PLAN.md:17
+# uses it as the same-scene pair list for the premap benchmark.
+#
+# Grading method (canonical, see trial/harness/BENCHMARK_METHOD.md):
+#   Grade the REAL pipeline under `dimos --replay run <blueprint>` via replay_bench.py +
+#   score_replay.py — the harness re-implements NO data-path step. Premap = real
+#   `dimos map global --pgo --export`; truth = real PGO `correction_at`. The old sections
+#   path (prep.py body-frame submaps + run_bench.py's direct relocalize()) is SUPERSEDED:
+#   its body-frame re-anchor manufactured the phantom mid360 gravity-gate bug. Kept for its
+#   archived SILVER numbers only; do not produce new numbers on it.
+#
+# DEPRECATED 2026-07-22: the referee-tag split (one id per recording held out to grade
+# against) is gone, with its instruments (referee_verdict.py, cluster_gate.py,
+# show_benchmark.py, fig3_hardened.py, fastlio_lane_markers.py) — last present at git
+# b713aec. Relocalization is scored against the PREMAP now. Per-recording `referee_tag:`
+# and `fiducial_tags:` were merged into one `tags:` list; role prose below still names
+# the historical referee decisions where they explain an exclusion.
+
+recordings:
+  recording_go2_mid360_2026-05-29_4-45pm-PST:
+    role: primary multi-tag benchmark run (BOTH lidar lanes in one file)
+    tags: [0, 1, 2, 4, 6, 7]   # id 6 is weak (24.5 s span) but valid; id 4 spans 769.6 s
+    lanes:
+      go2:
+        lidar: lidar
+        odom: odom
+        note: "lidar obs poses are placeholders — re-pose from odom payload"
+      mid360_fastlio:
+        lidar: fastlio_lidar
+        odom: fastlio_odometry
+        note: "placeholder poses too — re-pose from fastlio_odometry payload.
+          MEASURED (Jul 17) — 300s+ revisit raw 0.035–0.111 m (LIO drift ~2 cm over
+          13 min; ~100–250x tighter than go2 lane's 8.80 m); PGO on top
+          benign-to-mildly-helpful — unnecessary, not harmful"
+
+  markers_go2:
+    role: REMOVED from the set (Aaryan Jul 17) — lidar obs carry no poses, so it
+          can never grade PGO or the module; detector-dev recording only
+  hk_village1: {role: single-tag run, tags: [10]}
+  hk_village3: {role: single-tag run, tags: [10]}
+  hk_village5: {role: single-tag run, tags: [10]}
+  hk_village6: {role: single-tag run, tags: [10]}
+  hk_village2: {role: EXCLUDED, reason: 3 physical tags share id 10 (cluster check)}
+  hk_village4: {role: EXCLUDED, reason: 2 physical tags share id 10 (cluster check)}
+  hk_building_all_around:
+    role: CONFIDENCE-EVAL ONLY, NOT a benchmark run (Aaryan Jul 19 reclassification —
+          tag-free means no external anchor, so truth is self-referential PGO-silver;
+          this grades the relocal MODULE's confidence, never PGO itself; kept for
+          environment diversity in the thresholds-don't-transfer finding) —
+          measured 83.3% (20/24) ransac, 0.028 m median on successes, 24.6 s median
+          solve on the 1.4M-pt premap; failures at fitness 0.32-0.66 (the 0.45 gate
+          correctly rejects 3 of 4 HERE — unlike the villages); only 3 loop closures,
+          truth thin (VERIFIED tag-free, 0/663 sampled frames)
+    tags: []
+  go2_hongkong_office:
+    role: CONFIDENCE-EVAL ONLY, NOT a benchmark run (same Jul 19 reclassification —
+          no external anchor, self-referential PGO-silver truth) — no tags (verified,
+          0/398 sampled frames);
+          measured 80% (32/40, full denominator) ransac, 0.033 m median on
+          successes, 41 s median solve on the 850k-pt premap
+    tags: []
+  china_office: {role: EXCLUDED, reason: Aaryan 2026-07-17 — do not use}
+
+  sf_office_go2_20260718_survey1:
+    role: "TIER B. FIRST SF-office recording (454 Natoma). go2-only rig,
+      13.6 min continuous (max stream gap 1.9 s), survey pass + loop + mid-run kidnap.
+      Streams: color 4105@5.0 Hz / lidar 5479@6.7 Hz / odom 15184@18.5 Hz. Live census
+      during capture (spy on marker TFs): 6 physical tags, all multi-sighted.
+      Local file: trial/harness/out/robot_day/ (2.38 GB; not in the shared catalog yet
+      — no-remote rule)."
+    tags: [2, 3, 5, 6, 7, 19]   # 2-7 = the Jul 18 printed 100 mm singles;
+                                # 19 = the pre-existing wall start/end tag (Aaryan)
+
+  # === Flashdrive mid360 runs — SELECTED + registered night Jul 20 (autonomous session) ===
+  # Source: /media/dimos/datasets/mid360_recordings/ (non-china). Per-recording detection
+  # sweeps in the session log. Purpose: attack caveat #1 (fiducial-on-mid360 evidence was a
+  # single 2026-05-29 episode) with more marker-bearing mid360 runs, plus baseline gravity-
+  # gate tests. Duplicate-id risk below is UNCHECKED (1.0 m single-linkage spatial-cluster
+  # check, cf. hk_village2/4 exclusions) — run markers.py per recording before building any
+  # marker_map.yaml. Marker ids are certain; per-id sighting totals are floors (guided
+  # frame samples, not full-stream scans). Dropped this round (logged, not registered):
+  # mid360_outdoor_small_loop_20260528 (weakest gravity — 49 deg, single tag 7);
+  # mid360_gir_park1_2_20260602 (near-dup of gir_park1: same park +21 min, tag ids a subset,
+  #   366 s < 600 s tier-B floor, go2/livox lidar poses placeholder);
+  # mid360_huge_loop_realsense_20260604 (BENCH-BLOCKED: markers.py hardcodes go2 720p
+  #   intrinsics `_camera_info_static()` (markers.py:90); realsense frames are 848x480 ->
+  #   DetectMarkers skips on size mismatch -> 0 detections. Needs the detector pointed at
+  #   realsense K/D (harness change, out of this select+register scope). Near-dup loop of
+  #   huge_loop_go2 (same ids 10/11/13/21/29). WORTH benching once wired: its tag 13
+  #   got 3 revisit waves, the richest revisit coverage of any candidate).
+
+  mid360_gir_stairs2_20260602:
+    role: "TIER B PROVISIONAL — single-episode mid360 marker run (rig = mid360; go2+mid360
+      dual-lane recording, go2 front cam 1280x720 for markers). Multi-floor stairwell,
+      2119 s (>=600 tier-B duration). 9 distinct AprilTag ids — the richest mid360 marker
+      run found on the flashdrive. DUPLICATE-ID RISK HIGH: stairwells commonly reuse a tag
+      per landing (the exact hk_village2/4 exclusion pattern) — the 1.0 m single-linkage
+      spatial-cluster check MUST pass before any marker map is built; if any id proves
+      multi-instance this recording is EXCLUDED, not benched. Tag 11 spans the full run
+      (0-2093 s)."
+    tags: [10, 11, 12, 13, 21, 28, 29, 30, 31]
+    lanes:
+      go2:
+        lidar: lidar
+        odom: odom
+        note: "storage poses REAL (0/5886 placeholder) — no --lidar-pose-from-odom needed.
+          Marker + PGO-truth lane (go2 body level, median tilt 2.2 deg)."
+      mid360_fastlio:
+        lidar: fastlio_lidar
+        odom: fastlio_odometry
+        note: "storage poses REAL; body tilt median 52.4 deg (gravity-gate regime), real
+          vertical from a stairs climb. Optional --lidar-pose-from-odom fastlio_odometry
+          to stay faithful to the mid360 lane."
+
+  mid360_gir_park1_20260602:
+    role: "TIER B PROVISIONAL — single-episode mid360 marker run (rig = mid360; go2+mid360
+      dual-lane recording, go2 front cam 1280x720 for markers). Outdoor park loop, 1202 s
+      (>=600 tier-B duration). 5 distinct tag ids; 21 has the widest start-to-end span
+      (seen 34 s AND 1197 s). Spatial-cluster duplicate-id check UNRUN (outdoor space
+      could host repeated physical tags); revisit coverage is start+end only in a
+      200-frame sample — run markers.py before building a marker map."
+    tags: [11, 12, 21, 29, 30]
+    lanes:
+      go2:
+        lidar: lidar
+        odom: odom
+        note: "storage poses REAL (0/9227 placeholder) — no --lidar-pose-from-odom needed.
+          Marker + PGO-truth lane (go2 body level, median tilt 4.4 deg)."
+      mid360_fastlio:
+        lidar: fastlio_lidar
+        odom: fastlio_odometry
+        note: "storage poses REAL; body tilt median 50.8 deg (gravity-gate regime) — doubles
+          as a RANSAC-reloc gravity test. Optional --lidar-pose-from-odom fastlio_odometry."
+
+  mid360_huge_loop_go2_20260604:
+    role: "TIER B PROVISIONAL — single-episode mid360 marker run (rig = mid360; go2+mid360
+      dual-lane recording, go2 front cam 1280x720 for markers). ~53 min huge loop, 3206 s
+      (>=600 tier-B duration). 5 distinct tag ids, each physically revisited exactly
+      TWICE (loop bookends ~1000-1600 s apart); 13 is the start/end tag. Only 2 revisit
+      waves, so visit-level statistics are bookends, not a sample. Spatial-cluster
+      duplicate-id check UNRUN (risk LOW — each id's two clusters are a coherent
+      out-and-back, not co-temporal duplicates — but run before map-build)."
+    tags: [10, 11, 13, 21, 29]
+    lanes:
+      go2:
+        lidar: lidar
+        odom: odom
+        note: "storage poses REAL (match odom endpoint) — no --lidar-pose-from-odom needed.
+          Genuine loop closure (returns near origin mid-run). Marker + PGO-truth lane."
+      mid360_fastlio:
+        lidar: fastlio_lidar
+        odom: fastlio_odometry
+        note: "storage poses REAL; body tilt median 51.1 deg (gravity-gate regime) — doubles
+          as a RANSAC-reloc gravity test. Optional --lidar-pose-from-odom fastlio_odometry."
+
+  mid360_grassy_field_20260601:
+    role: "GRAVITY-GATE RANSAC TEST (no usable markers). mid360 tilted-body lane, body tilt
+      median 52.3 deg (46.7-53.9). Selected (night Jul 20) to show plain RANSAC
+      relocalization fails on a tilted-sensor lane at baseline — expect ransac ~0/N, median
+      tens of meters (relocalize.py GRAVITY_TILT_MAX_DEG=10 discards the geometrically-
+      correct tilted candidates and keeps upright-wrong ones). 174 m outdoor grassy-field
+      walk, 752 s. Only 2 tag ids (18,21), each revisited 2x -> too thin for a marker
+      bench; markers ignored here."
+    tags: [18, 21]
+    lanes:
+      mid360_fastlio:
+        lidar: fastlio_lidar
+        odom: fastlio_odometry
+        note: "storage poses PLACEHOLDER -> REQUIRES --lidar-pose-from-odom fastlio_odometry.
+          The gravity test lives on this fastlio lane; the go2 odom lane is level (2.8 deg)."
+
+  mid360_gir_stairs1_20260601:
+    role: "GRAVITY-GATE RANSAC TEST (no usable markers). mid360 tilted-body lane, body tilt
+      median 52.4 deg (fastlio; pointlio 51.5) with real vertical from a stairs climb (z up
+      to 3.4 m) — a distinct terrain stressor vs the flat grassy-field test. Selected (night
+      Jul 20) to show plain RANSAC relocalization fails on a tilted-sensor lane at baseline
+      (expect ransac ~0/N, median tens of meters). 763 s. Only ONE tag id (21) -> NOT a
+      marker bench; markers ignored here."
+    tags: [21]
+    lanes:
+      mid360_fastlio:
+        lidar: fastlio_lidar
+        odom: fastlio_odometry
+        note: "storage poses REAL (already populated, match odom) — prep runs without a
+          re-pose flag; optional --lidar-pose-from-odom fastlio_odometry to stay faithful.
+          The go2 odom lane is level (2.2 deg) — gravity test lives on this fastlio lane."
+
+protocol:
+  truth_policy: PGO poses are SILVER; decimeter floor on long accumulation
+                windows; ~6 cm PGO run-to-run wobble between two independent
+                builds of the same recording
+  determinism: per-frame seeds = frame_idx; OMP_NUM_THREADS=1 before open3d
+               import; full denominator (crashes/no-candidates = failures)
+  handoff: sections + fixes feed the relocalization-confidence harness
+           (run_bench.py / analyze.py)
+
+# --- v2 target set (Aaryan, Jul 18: "we should have a good set for the benchmark") ---
+# The current set is TIER A = adversarial shorts (lesh's own description: very short
+# clips, robot thrown around; PGO defaults were TUNED on the villages — in-sample).
+# Good for mechanisms and regression, statistically thin for grading. Robot day
+# starts TIER B: operational recordings. A recording qualifies for tier B only if
+# ALL of these hold (they are pass criteria for the RECORDING, not the robot):
+suite_v2_acceptance:
+  duration_s: ">=600 (10 min); target 10-20 min of walking-speed operation, not stress handling"
+  scenarios_in_run: "normal loop + one kidnap segment + one power-on-near-tag start, in the same recording where practical"
+  rigs: "capture each space twice when hardware allows: go2-only AND go2+mid360"
+  provenance: "recording name states date/place/rig, logged here"
+tier_a_legacy: [hk_village1, hk_village3, hk_village5, hk_village6,
+                recording_go2_mid360_2026-05-29_4-45pm-PST]
+confidence_eval_only: [hk_building_all_around, go2_hongkong_office]  # tag-free: module
+                # confidence evals vs PGO-silver — NOT benchmark-grade (Jul 19)
+tier_b_planned: "robot day Jul 18, SF office — target 4-6 recordings (2 rigs x 2-3 runs); added here as they land"
+# Tier-B registration template (copy under `recordings:`):
+#   sf_office_go2_<date>_survey1:
+#     role: tier B operational (SF office, go2-only rig)
+#     tags: [0, 1, 2, 3, 4, 5]
+
+publication_intent: push under a "relocalization benchmark" home on GitHub
+                    (Aaryan, Jul 17 — "maybe"; NOT pushed yet, no-remote rule)
