@@ -82,6 +82,20 @@ load_dotenv()
 
 SIMULATORS = ("mujoco", "dimsim")
 
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "dimos" / "config"
+
+
+def _reject_legacy_config() -> None:
+    """~/.config/dimos used to BE the config file; it is now a directory."""
+    legacy = CONFIG_DIR / "dimos"
+    if legacy.is_file():
+        typer.echo(
+            f"config found at old path {legacy}, which is now a directory; move it:\n"
+            f"  mv {legacy} {legacy}.tmp && mkdir {legacy} && mv {legacy}.tmp {legacy}/config",
+            err=True,
+        )
+        raise typer.Exit(2)
+
 
 def _normalize_simulation_argv(argv: list[str]) -> list[str]:
     """Keep `--simulation` backwards compatible.
@@ -207,7 +221,7 @@ def run(
     daemon: bool = typer.Option(False, "--daemon", "-d", help="Run in background"),
     disable: list[str] = typer.Option([], "--disable", help="Module names to disable"),
     config_path: Path = typer.Option(
-        CONFIG_DIR / "dimos", "--config", "-c", help="Path to config file"
+        DEFAULT_CONFIG_PATH, "--config", "-c", help="Path to config file"
     ),
     local_relay: bool | None = typer.Option(
         None,
@@ -220,6 +234,8 @@ def run(
     show_help: bool = typer.Option(False, "--help"),
 ) -> None:
     """Start a robot blueprint"""
+    if config_path == DEFAULT_CONFIG_PATH:
+        _reject_legacy_config()
     from dimos.core.coordination.blueprint_config.errors import BlueprintConfigError
     from dimos.core.coordination.blueprint_config.parser import (
         BlueprintConfigParser,
