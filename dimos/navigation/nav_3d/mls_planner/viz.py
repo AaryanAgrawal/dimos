@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from dimos.msgs.nav_msgs.LineSegments3D import LineSegments3D
+from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 if TYPE_CHECKING:
@@ -48,6 +49,16 @@ def clearance_colors(clearance: NDArray[np.float32], clamp_m: float) -> NDArray[
     norm = np.clip(np.nan_to_num(clearance / clamp_m, nan=1.0, posinf=1.0), 0.0, 1.0)
     tight, open_ = np.array(TIGHT_COLOR), np.array(OPEN_COLOR)
     return np.asarray(tight + norm[:, None] * (open_ - tight), dtype=np.uint8)
+
+
+def render_path(msg: Path) -> Path | None:
+    """The planner emits an empty path when it finds no route to the goal.
+
+    Logging those would blank the line, so drop them and keep the last path.
+    """
+    if len(msg.poses) == 0:
+        return None
+    return msg
 
 
 def render_surface_map(

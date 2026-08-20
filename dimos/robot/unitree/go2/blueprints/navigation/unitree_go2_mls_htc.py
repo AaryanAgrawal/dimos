@@ -28,7 +28,7 @@ from dimos.navigation.dannav.local_planner.module import DanLocalPlanner
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
-from dimos.navigation.nav_3d.mls_planner.viz import planner_visual_override
+from dimos.navigation.nav_3d.mls_planner.viz import planner_visual_override, render_path
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import rerun_config
 from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.visualization.vis_module import vis_module
@@ -46,14 +46,6 @@ def _render_global_map(msg: Any) -> Any:
     return msg.to_rerun()
 
 
-def _render_path(msg: Any) -> Any:
-    # The planner emits an empty path when it finds no route to the goal.
-    # Logging those would blank the line, so drop them and keep the last path.
-    if len(msg.poses) == 0:
-        return None
-    return msg
-
-
 _nav_rerun_config = {
     **rerun_config,
     "max_hz": {
@@ -65,7 +57,7 @@ _nav_rerun_config = {
         **rerun_config["visual_override"],
         "world/global_map": _render_global_map,
         "world/planner_path": None,
-        "world/path": _render_path,
+        "world/path": render_path,
         **planner_visual_override(planner_viz_hz),
     },
 }

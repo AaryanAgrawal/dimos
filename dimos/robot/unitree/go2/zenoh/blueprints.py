@@ -45,7 +45,7 @@ from dimos.navigation.nav_3d.mls_planner.mls_planner_native import (
     MLSPlannerNative,
     MLSPlannerNativeConfig,
 )
-from dimos.navigation.nav_3d.mls_planner.viz import planner_visual_override
+from dimos.navigation.nav_3d.mls_planner.viz import planner_visual_override, render_path
 from dimos.robot.unitree.go2.constants import ROBOT_HEIGHT, ROBOT_LENGTH, ROBOT_WIDTH
 from dimos.robot.unitree.go2.zenoh.zenohconnection import GO2Zenoh
 from dimos.visualization.vis_module import vis_module
@@ -118,14 +118,6 @@ def _render_map(msg: Any) -> Any:
     return msg.to_rerun(voxel_size=0.01)
 
 
-def _render_path(msg: Any) -> Any:
-    # The planner emits an empty path when it finds no route to the goal.
-    # Logging those would blank the line, so drop them and keep the last path.
-    if len(msg.poses) == 0:
-        return None
-    return msg
-
-
 def _rerun_config(visual_override: dict[str, Any] | None = None) -> dict[str, Any]:
     """The bridge's own view, plus whatever the layer above it adds."""
     return {
@@ -142,7 +134,7 @@ def _rerun_config(visual_override: dict[str, Any] | None = None) -> dict[str, An
             "world/lidar": None,
             "world/local_map": _render_map,
             "world/global_map": _render_map,
-            "world/path": _render_path,
+            "world/path": render_path,
             **planner_visual_override(planner_viz_hz, voxel_size=voxel_size, wall_clearance_m=0.1),
             **(visual_override or {}),
         },

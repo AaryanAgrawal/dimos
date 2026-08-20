@@ -50,6 +50,12 @@ _TORSO_D435_XYZ = (0.0576235, 0.01753, 0.42987)
 # waist_roll_joint origin, the only nonzero offset in the pelvis -> torso chain.
 _WAIST_ROLL_ORIGIN = (-0.0039635, 0.0, 0.044)
 
+# Base height above ground while standing.
+NOMINAL_BASE_HEIGHT = 0.74
+
+# Standing height of the Mid-360 above the ground, waist at rest.
+MID360_HEIGHT = NOMINAL_BASE_HEIGHT + _WAIST_ROLL_ORIGIN[2] + _TORSO_MID360_XYZ[2]
+
 
 def torso_to_mid360() -> Transform:
     """torso_link -> the Mid-360's own frame: URDF mount pitch plus the upside-down roll."""
