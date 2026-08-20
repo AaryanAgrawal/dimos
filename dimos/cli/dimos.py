@@ -711,6 +711,21 @@ def show_config() -> None:
         typer.echo(f"{field_name}: {value}")
 
 
+@main.command(
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        # let --help through to the bake command itself
+        "help_option_names": [],
+    }
+)
+def bake(ctx: typer.Context) -> None:
+    """Compose rust native modules into a single host binary."""
+    from dimos.cli.bake.cli import main as bake_main
+
+    bake_main(list(ctx.args))
+
+
 @main.command(name="list")
 def list_blueprints() -> None:
     """List all available blueprints."""
