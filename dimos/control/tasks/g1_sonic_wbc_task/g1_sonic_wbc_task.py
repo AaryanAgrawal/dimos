@@ -380,6 +380,37 @@ class G1SonicWBCTask(BaseControlTask):
         )
         return {"clip": name, "frames": len(jp), "seconds": len(jp) / 50.0}
 
+    def set_vr_3point(
+        self,
+        positions: list[float],
+        orientations: list[float],
+        t_now: float | None = None,
+    ) -> dict[str, Any]:
+        """VR 3-point teleop targets (SONIC encoder mode 1).
+
+        positions: 9 floats - [left wrist, right wrist, head] xyz, root-relative
+        (world minus pelvis, rotated into the pelvis frame). orientations: 12
+        floats - the same three points as quat wxyz, root-relative
+        (quat_inv(root) * q_world). The C++ deploy stack's wrist offsets
+        [0.18, -/+0.025, 0] and head offset [0, 0, 0.35] must already be
+        applied by the caller. Targets are encoder HINTS through the policy
+        latent - expect coordinated whole-body following, not servo-accurate
+        end-effector tracking. Stale data (> 0.5 s) reverts to planner obs;
+        re-send at teleop rate.
+        """
+        import numpy as np
+
+        self._pipeline.set_vr_3point(
+            np.asarray(positions, dtype=np.float32),
+            np.asarray(orientations, dtype=np.float32),
+            t_now=t_now,
+        )
+        return {"vr_active": True}
+
+    def clear_vr_3point(self) -> bool:
+        self._pipeline.clear_vr_3point()
+        return True
+
     def stop_motion_clip(self) -> bool:
         self._pipeline.stop_clip()
         return True
@@ -515,7 +546,8 @@ class G1SonicWBCTask(BaseControlTask):
             self._left_hand = upd.left_hand_joints
         if upd.right_hand_joints is not None:
             self._right_hand = upd.right_hand_joints
-        # VR 3-point buffers are encoder fields; deferred to the VR phase.
+        if upd.vr_position is not None and upd.vr_orientation is not None:
+            self._pipeline.set_vr_3point(upd.vr_position, upd.vr_orientation, t_now=t_now)
 
     def _zmq_publish_state(
         self,

@@ -33,6 +33,7 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 import math
 from pathlib import Path
+import time
 
 import numpy as np
 from numpy.typing import NDArray
@@ -281,6 +282,17 @@ ACTION_SCALE_ONNX = ACTION_SCALE_DDS[ONNX_TO_DDS]
 WRIST_ONNX_INDICES = np.array([23, 24, 25, 26, 27, 28], dtype=np.intp)
 
 # Encoder observation offsets for the SMPL (mode 2) fields
+# Teleop (encoder mode 1) fields. Lowerbody gather uses MUJOCO-order indices
+# into the IsaacLab-order joint array (policy_parameters.hpp
+# lower_body_joint_mujoco_order_in_isaaclab_index) - NOT the sorted variant.
+LOWER_BODY_MJC_IN_ONNX = np.array([0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18], dtype=np.intp)
+_ANCHOR_SINGLE_OFFSET = 595  # motion_anchor_orientation: 6
+_LOWERBODY_POS_OFFSET = 661  # motion_joint_positions_lowerbody_10frame_step5: 120
+_LOWERBODY_VEL_OFFSET = 781  # motion_joint_velocities_lowerbody_10frame_step5: 120
+_VR_POS_OFFSET = 901  # vr_3point_local_target: 9
+_VR_ORN_OFFSET = 910  # vr_3point_local_orn_target: 12
+VR_STALE_SEC = 0.5  # hold-last window; stale -> revert to planner obs (mode 0)
+
 _SMPL_JOINTS_OFFSET = 922  # smpl_joints_10frame_step1: 720
 _SMPL_ANCHOR_OFFSET = 1642  # smpl_anchor_orientation_10frame_step1: 60
 _WRISTS_OFFSET = 1702  # motion_joint_positions_wrists_10frame_step1: 60
@@ -509,6 +521,11 @@ class SonicPipeline:
         # over the DDS-14 arm API when set
         self._ub17_pos: NDArray | None = None
         self._ub17_vel: NDArray | None = None
+        # VR 3-point teleop (encoder mode 1). Root-relative, sender-normalized:
+        # positions [L wrist, R wrist, head] xyz; orientations 3x quat wxyz.
+        self._vr_pos: NDArray | None = None
+        self._vr_orn: NDArray | None = None
+        self._vr_time = 0.0
 
     # -- commands ---------------------------------------------------------
 
@@ -555,6 +572,32 @@ class SonicPipeline:
             if velocities_17 is None
             else np.asarray(velocities_17, dtype=np.float32).reshape(17)
         )
+
+    def set_vr_3point(
+        self, positions_9: NDArray, orientations_12: NDArray, t_now: float | None = None
+    ) -> None:
+        """VR 3-point teleop targets (encoder mode 1).
+
+        Frame convention (matches C++ GatherVR3Point buffered path - values are
+        copied into the encoder obs verbatim): point order left wrist, right
+        wrist, head; positions root-relative (p_world - root_pos rotated into
+        the root frame); orientations quat wxyz, root-relative
+        (quat_mul(quat_inv(root_quat), q_world)); wrist offsets
+        [0.18, -/+0.025, 0] and head offset [0, 0, 0.35] already applied by
+        the sender. While fresh (< VR_STALE_SEC) the encoder runs in teleop
+        mode; stale data reverts to planner obs.
+        """
+        self._vr_pos = np.asarray(positions_9, dtype=np.float32).reshape(9)
+        self._vr_orn = np.asarray(orientations_12, dtype=np.float32).reshape(12)
+        self._vr_time = time.perf_counter() if t_now is None else t_now
+
+    def clear_vr_3point(self) -> None:
+        self._vr_pos = None
+        self._vr_orn = None
+        self._vr_time = 0.0
+
+    def _vr_active(self) -> bool:
+        return self._vr_pos is not None and (time.perf_counter() - self._vr_time) < VR_STALE_SEC
 
     def set_source_stream(self, use_stream: bool) -> None:
         """Command-topic planner-flag inverse: True -> pose-topic motion."""
@@ -716,6 +759,40 @@ class SonicPipeline:
             )
             q_rel = _quat_multiply(q_base_inv, q_aligned)
             enc_obs[601 + i * 6 : 601 + (i + 1) * 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
+        return enc_obs
+
+    def _build_teleop_encoder_obs(self, base_quat: NDArray) -> NDArray:
+        """Encoder obs for teleop mode (1): mode scalar, lowerbody joint
+        pos/vel history from the planner trajectory, single-frame anchor
+        orientation, VR 3-point blocks. All other fields stay zero - the C++
+        gathers ONLY the active mode's required observations into a zeroed
+        buffer (GatherEncoderObservations)."""
+        enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+        enc_obs[0] = 1.0  # encoder_mode_4: scalar mode id, rest zeros
+        traj = self._trajectory
+        assert traj is not None
+        f_curr = min(self._traj_frame, traj.num_frames - 1)
+
+        for i in range(10):
+            f = min(f_curr + i * 5, traj.num_frames - 1)
+            enc_obs[_LOWERBODY_POS_OFFSET + i * 12 : _LOWERBODY_POS_OFFSET + (i + 1) * 12] = (
+                traj.joint_pos[f][LOWER_BODY_MJC_IN_ONNX]
+            )
+            enc_obs[_LOWERBODY_VEL_OFFSET + i * 12 : _LOWERBODY_VEL_OFFSET + (i + 1) * 12] = (
+                traj.joint_vel[f][LOWER_BODY_MJC_IN_ONNX]
+            )
+
+        q_base_inv = _quat_conjugate(base_quat)
+        q_aligned = _quat_multiply(
+            self._heading_delta_quat, traj.root_quat[f_curr].astype(np.float64)
+        )
+        q_rel = _quat_multiply(q_base_inv, q_aligned)
+        enc_obs[_ANCHOR_SINGLE_OFFSET : _ANCHOR_SINGLE_OFFSET + 6] = _rotmat_to_6d(
+            _quat_to_rotmat(q_rel)
+        )
+
+        enc_obs[_VR_POS_OFFSET : _VR_POS_OFFSET + 9] = self._vr_pos
+        enc_obs[_VR_ORN_OFFSET : _VR_ORN_OFFSET + 12] = self._vr_orn
         return enc_obs
 
     # -- planner ----------------------------------------------------------
@@ -960,6 +1037,8 @@ class SonicPipeline:
                 self._heading_delta_quat = _quat_multiply(init_heading, init_ref_inv)
                 self._heading_initialized = True
             token = self._run_encoder(self._build_streamed_encoder_obs(self._cur_quat))
+        elif self._vr_active() and self._trajectory is not None and self._trajectory.num_frames > 0:
+            token = self._run_encoder(self._build_teleop_encoder_obs(self._cur_quat))
         elif self._trajectory is not None and self._trajectory.num_frames > 0:
             token = self._run_encoder(self._build_encoder_obs(self._cur_quat))
         elif self._has_upper_body_targets():
@@ -1079,4 +1158,8 @@ class SonicPipeline:
             "stream_frames": self._streamed.timesteps if self._streamed else 0,
             "stream_frame": self._streamed_frame,
             "stream_encode_mode": self._streamed.encode_mode if self._streamed else -1,
+            "vr_active": self._vr_active(),
+            "vr_age_sec": (
+                round(time.perf_counter() - self._vr_time, 3) if self._vr_pos is not None else -1.0
+            ),
         }
