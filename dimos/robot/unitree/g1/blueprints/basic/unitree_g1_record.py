@@ -40,7 +40,6 @@ _RECORDING_DIR = default_recording_dir()
 
 def _g1_record_rerun_blueprint() -> Any:
     """Split layout: camera feed + 3D world view side by side."""
-    import rerun as rr
     import rerun.blueprint as rrb
 
     return rrb.Blueprint(
@@ -52,11 +51,7 @@ def _g1_record_rerun_blueprint() -> Any:
             rrb.Spatial3DView(
                 origin="world",
                 name="3D",
-                # Point-LIO's world origin is the lidar's boot pose, ~1.2m
-                # above the floor on a standing G1.
-                line_grid=rrb.LineGrid3D(
-                    plane=rr.components.Plane3D.XY.with_distance(1.2),
-                ),
+                line_grid=rrb.LineGrid3D(visible=False),
             ),
             column_shares=[1, 2],
         ),
