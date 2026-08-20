@@ -63,7 +63,11 @@ def default_recording_dir() -> Path:
     """Timestamped folder under RECORDINGS_DIR, local time with the machine's zone abbreviation."""
     now = datetime.now().astimezone()
     stamp = (
-        now.strftime("%Y-%m-%d") + "_" + now.strftime("%I-%M%p").lower() + "-" + now.strftime("%Z")
+        now.strftime("%Y-%m-%d")
+        + "_"
+        + now.strftime("%I-%M-%S%p").lower()
+        + "-"
+        + now.strftime("%Z")
     )
     return RECORDINGS_DIR / stamp
 
