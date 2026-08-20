@@ -125,7 +125,7 @@ def mount_transforms(
 
 
 class G1TfPublisherConfig(ModuleConfig):
-    network_interface: str = ""
+    network_interface: str = "eth0"
     publish_hz: float = Field(default=20.0, gt=0.0)
 
 
@@ -138,7 +138,6 @@ class G1TfPublisher(Module):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._running = False
         self._subscriber: Any = None
         self._waist = (0.0, 0.0, 0.0)
         self._waist_lock = threading.Lock()
@@ -149,13 +148,13 @@ class G1TfPublisher(Module):
     @rpc
     def start(self) -> None:
         super().start()
+        self._stop_event.clear()
         self._subscriber = self._init_lowstate_subscriber()
         if self._subscriber is not None:
             self._reader_thread = threading.Thread(
                 target=self._reader_loop, name="g1-tf-lowstate", daemon=True
             )
             self._reader_thread.start()
-        self._running = True
         self.spawn(self._publish_loop())
         logger.info(
             "G1TfPublisher publishing at %.1f Hz (waist %s)",
@@ -165,7 +164,6 @@ class G1TfPublisher(Module):
 
     @rpc
     def stop(self) -> None:
-        self._running = False
         self._stop_event.set()
         if self._reader_thread is not None and self._reader_thread.is_alive():
             self._reader_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
@@ -197,8 +195,10 @@ class G1TfPublisher(Module):
             else:
                 ChannelFactoryInitialize(0)
         except Exception as e:
-            # Idempotent - already initialized by a sibling participant is fine.
-            logger.debug(f"ChannelFactoryInitialize raised (likely already init'd): {e}")
+            logger.warning(
+                f"ChannelFactoryInitialize failed - publishing rest-pose waist only: {e}"
+            )
+            return None
         subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         subscriber.Init(None, 0)
         return subscriber
@@ -206,7 +206,7 @@ class G1TfPublisher(Module):
     def _reader_loop(self) -> None:
         period = 1.0 / self.config.publish_hz
         while not self._stop_event.is_set():
-            sample = self._subscriber.Read()
+            sample = self._subscriber.Read(period)
             if sample is not None:
                 waist = (
                     float(sample.motor_state[_WAIST_YAW_IDX].q),
@@ -222,7 +222,7 @@ class G1TfPublisher(Module):
 
     async def _publish_loop(self) -> None:
         period = 1.0 / self.config.publish_hz
-        while self._running:
+        while not self._stop_event.is_set():
             with self._waist_lock:
                 waist_yaw, waist_roll, waist_pitch = self._waist
             transforms = mount_transforms(waist_yaw, waist_roll, waist_pitch)

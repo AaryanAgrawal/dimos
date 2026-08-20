@@ -27,37 +27,21 @@ The lidar IPs default to the G1's internal network. Run it for a timestamped
     uv run python dimos/robot/unitree/g1/blueprints/basic/unitree_g1_record.py
 """
 
-from datetime import datetime
-import os
-from pathlib import Path
 from typing import Any
 
-from dimos.constants import RECORDINGS_DIR
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.global_config import global_config
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+from dimos.memory.module import default_recording_dir
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
 from dimos.robot.unitree.g1.g1_recorder import G1Recorder
 from dimos.robot.unitree.g1.g1_tf_publisher import G1TfPublisher
-from dimos.utils.logging_config import setup_logger
 from dimos.visualization.vis_module import vis_module
 
-logger = setup_logger()
-
-
-def _default_recording_dir() -> Path:
-    # Local time, with the machine's actual zone abbreviation (not a hardcoded PST).
-    now = datetime.now().astimezone()
-    stamp = (
-        now.strftime("%Y-%m-%d") + "_" + now.strftime("%I-%M%p").lower() + "-" + now.strftime("%Z")
-    )
-    return RECORDINGS_DIR / stamp
-
-
-_RECORDING_DIR = _default_recording_dir()
+_RECORDING_DIR = default_recording_dir()
 
 
 def _g1_record_rerun_blueprint() -> Any:
@@ -132,8 +116,8 @@ unitree_g1_record = autoconnect(
     G1HighLevelDdsSdk.blueprint(),
     PointLio.blueprint(
         frame_id="world",
-        host_ip=os.getenv("LIDAR_HOST_IP", "192.168.123.164"),
-        lidar_ip=os.getenv("LIDAR_IP", "192.168.123.120"),
+        host_ip="192.168.123.164",
+        lidar_ip="192.168.123.120",
     ).remappings(
         [
             (PointLio, "lidar", "pointlio_lidar"),
@@ -154,7 +138,7 @@ unitree_g1_record = autoconnect(
     G1Recorder.blueprint(db_path=str(_RECORDING_DIR / "mem2.db")),
     # Continuously publishes the sensor mount frames onto tf, with the
     # torso -> base_link edge tracking the waist joints from rt/lowstate.
-    G1TfPublisher.blueprint(network_interface="eth0"),
+    G1TfPublisher.blueprint(),
     # Rerun viewer + websocket server. Viewer keyboard teleop publishes
     # tele_cmd_vel, which feeds MovementManager.
     _record_vis,
@@ -162,6 +146,5 @@ unitree_g1_record = autoconnect(
 
 
 if __name__ == "__main__":
-    _RECORDING_DIR.mkdir(parents=True, exist_ok=True)
     coordinator = ModuleCoordinator.build(unitree_g1_record)
     coordinator.loop()
