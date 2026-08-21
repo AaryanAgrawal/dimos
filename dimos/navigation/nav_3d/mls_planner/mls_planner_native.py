@@ -26,8 +26,8 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 class MLSPlannerNativeConfig(NativeModuleConfig):
     cwd: str | None = "rust"
-    executable: str = "target/release/mls_planner"
-    build_command: str | None = "cargo build --release"
+    executable: str = "result/bin/mls_planner"
+    build_command: str | None = "nix build -L path:."
     stdin_config: bool = True
 
     world_frame: str = "map"
