@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Check if we should skip the cmu nav tests
-"""
+"""The `dimos bake` command; the implementation lives in dimos.cli.bake."""
 
-import os
+from __future__ import annotations
 
-import pytest
+import typer
 
-SKIP_CMU_NAV = pytest.mark.skipif(
-    os.environ.get("CMU_NAV_TESTS") != "true",
-    reason="cmu_nav tests disabled, set CMU_NAV_TESTS=true to run",
-)
+
+def bake(ctx: typer.Context) -> None:
+    """Compose rust native modules into a single host binary."""
+    from dimos.cli.bake.cli import main as bake_main
+
+    bake_main(list(ctx.args))
