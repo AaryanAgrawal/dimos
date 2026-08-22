@@ -286,16 +286,93 @@ WRIST_ONNX_INDICES = np.array([23, 24, 25, 26, 27, 28], dtype=np.intp)
 # into the IsaacLab-order joint array (policy_parameters.hpp
 # lower_body_joint_mujoco_order_in_isaaclab_index) - NOT the sorted variant.
 LOWER_BODY_MJC_IN_ONNX = np.array([0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18], dtype=np.intp)
-_ANCHOR_SINGLE_OFFSET = 595  # motion_anchor_orientation: 6
-_LOWERBODY_POS_OFFSET = 661  # motion_joint_positions_lowerbody_10frame_step5: 120
-_LOWERBODY_VEL_OFFSET = 781  # motion_joint_velocities_lowerbody_10frame_step5: 120
-_VR_POS_OFFSET = 901  # vr_3point_local_target: 9
-_VR_ORN_OFFSET = 910  # vr_3point_local_orn_target: 12
 VR_STALE_SEC = 0.5  # hold-last window; stale -> revert to planner obs (mode 0)
 
-_SMPL_JOINTS_OFFSET = 922  # smpl_joints_10frame_step1: 720
-_SMPL_ANCHOR_OFFSET = 1642  # smpl_anchor_orientation_10frame_step1: 60
-_WRISTS_OFFSET = 1702  # motion_joint_positions_wrists_10frame_step1: 60
+
+class _ObsLayout:
+    """Encoder-obs field offsets per checkpoint variant (observation_config.yaml
+    order; verified against the C++ observation registry). ``heading_anchor``
+    selects the anchor-orientation left quaternion: full base quat (original
+    release, orientation_mode 0) vs robot heading only (SONIC v1.1,
+    orientation_mode 1 - the motion_anchor_orientation_heading fields)."""
+
+    __slots__ = (
+        "anchor_hist",
+        "anchor_single",
+        "heading_anchor",
+        "lowerbody_pos",
+        "lowerbody_vel",
+        "name",
+        "obs_dim",
+        "smpl_anchor",
+        "smpl_joints",
+        "vr_orn",
+        "vr_pos",
+        "wrists",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        obs_dim: int,
+        heading_anchor: bool,
+        anchor_hist: int,
+        anchor_single: int,
+        lowerbody_pos: int,
+        lowerbody_vel: int,
+        vr_pos: int,
+        vr_orn: int,
+        smpl_joints: int,
+        smpl_anchor: int,
+        wrists: int,
+    ) -> None:
+        self.name = name
+        self.obs_dim = obs_dim
+        self.heading_anchor = heading_anchor
+        self.anchor_hist = anchor_hist
+        self.anchor_single = anchor_single
+        self.lowerbody_pos = lowerbody_pos
+        self.lowerbody_vel = lowerbody_vel
+        self.vr_pos = vr_pos
+        self.vr_orn = vr_orn
+        self.smpl_joints = smpl_joints
+        self.smpl_anchor = smpl_anchor
+        self.wrists = wrists
+
+
+# Original release: 1762 = 4 + 290 + 290 + 10 (root_z hist) + 1 (root_z) +
+# 6 (anchor single) + 60 (anchor hist) + 120 + 120 + 9 + 12 + 720 + 60 + 60.
+LAYOUT_RELEASE = _ObsLayout(
+    "release",
+    1762,
+    False,
+    anchor_hist=601,
+    anchor_single=595,
+    lowerbody_pos=661,
+    lowerbody_vel=781,
+    vr_pos=901,
+    vr_orn=910,
+    smpl_joints=922,
+    smpl_anchor=1642,
+    wrists=1702,
+)
+# SONIC v1.1: 1751 - root_z fields dropped, anchor fields heading-normalized
+# and reordered (10-frame history BEFORE the single frame).
+LAYOUT_V1_1 = _ObsLayout(
+    "sonic_v1_1",
+    1751,
+    True,
+    anchor_hist=584,
+    anchor_single=644,
+    lowerbody_pos=650,
+    lowerbody_vel=770,
+    vr_pos=890,
+    vr_orn=899,
+    smpl_joints=911,
+    smpl_anchor=1631,
+    wrists=1691,
+)
+_LAYOUTS_BY_DIM = {1762: LAYOUT_RELEASE, 1751: LAYOUT_V1_1}
 
 # 17 upper-body joints (waist + arms) in ONNX-order indices, matching the
 # C++ upper_body_joint_isaaclab_order_in_isaaclab_index.
@@ -465,8 +542,18 @@ class SonicPipeline:
             self._planner = ort.InferenceSession(str(planner_path), providers=cpu)
         self._encoder_input = self._encoder.get_inputs()[0].name
         self._decoder_input = self._decoder.get_inputs()[0].name
+        # Checkpoint variant is identified by the encoder's input width
+        enc_dim = int(self._encoder.get_inputs()[0].shape[-1])
+        layout = _LAYOUTS_BY_DIM.get(enc_dim)
+        if layout is None:
+            raise ValueError(
+                f"unknown SONIC encoder obs dim {enc_dim}; known: {sorted(_LAYOUTS_BY_DIM)}"
+            )
+        self._layout = layout
         logger.info(
             "SonicPipeline models loaded",
+            variant=layout.name,
+            encoder_obs_dim=enc_dim,
             encoder_providers=self._encoder.get_providers(),
             planner_providers=self._planner.get_providers(),
         )
@@ -603,7 +690,28 @@ class SonicPipeline:
         """Command-topic planner-flag inverse: True -> pose-topic motion."""
         if use_stream != self._use_stream:
             self._needs_replan = not use_stream
+            # Motion-source switch = heading re-anchor (C++ sets
+            # reinitialize_heading_ on every motion switch). Without this the
+            # next source keeps the previous source's heading delta - after a
+            # clip, planner trajectories would stay anchored to the clip's
+            # mocap heading and the policy turns instead of tracking.
+            self._reset_heading_alignment()
         self._use_stream = bool(use_stream)
+
+    def _reset_heading_alignment(self) -> None:
+        self._heading_delta_quat = np.array([1, 0, 0, 0], dtype=np.float64)
+        self._heading_initialized = False
+
+    def apply_heading_increment(self, increment_rad: float) -> None:
+        """Operator yaw adjustment (pose-topic heading_increment field, pico
+        joystick). C++ accumulates it into HeadingState.delta_heading, applied
+        left of the ref-alignment quat; folding it into _heading_delta_quat is
+        equivalent and resets with it on re-anchor."""
+        if increment_rad == 0.0:
+            return
+        half = 0.5 * float(increment_rad)
+        yaw_quat = np.array([math.cos(half), 0.0, 0.0, math.sin(half)], dtype=np.float64)
+        self._heading_delta_quat = _quat_multiply(yaw_quat, self._heading_delta_quat)
 
     def set_planner_command(
         self,
@@ -634,16 +742,17 @@ class SonicPipeline:
         self._streamed = motion
         self._streamed_frame = 0
         self._use_stream = True
-        self._heading_delta_quat = np.array([1, 0, 0, 0], dtype=np.float64)
-        self._heading_initialized = False
+        self._reset_heading_alignment()
 
     def stop_clip(self) -> None:
-        """Back to planner-driven locomotion."""
+        """Back to planner-driven locomotion (heading re-anchors on the next
+        planner trajectory - see set_source_stream)."""
         self._use_stream = False
         self._streamed = None
         self._streamed_frame = 0
         self._merger.reset()
         self._needs_replan = True
+        self._reset_heading_alignment()
 
     def apply_pose_message(self, fields: dict) -> dict:
         """Merge one decoded pose-topic chunk; returns a merge summary."""
@@ -695,12 +804,21 @@ class SonicPipeline:
     # -- encoder ----------------------------------------------------------
 
     def _build_standing_token(self) -> NDArray:
-        enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+        lay = self._layout
+        enc_obs = np.zeros(lay.obs_dim, dtype=np.float32)
         for i in range(10):
             enc_obs[4 + i * NUM_JOINTS : 4 + (i + 1) * NUM_JOINTS] = DEFAULT_ANGLES_ONNX
-            enc_obs[601 + i * 6 : 601 + (i + 1) * 6] = _IDENTITY_6D
+            enc_obs[lay.anchor_hist + i * 6 : lay.anchor_hist + (i + 1) * 6] = _IDENTITY_6D
         out = self._encoder.run(None, {self._encoder_input: enc_obs.reshape(1, -1)})
         return out[0].squeeze().astype(np.float32)
+
+    def _anchor_left_inv(self, base_quat: NDArray) -> NDArray:
+        """Conjugated left quaternion for anchor-orientation obs: full base
+        quat for the original release (orientation_mode 0), heading-only for
+        v1.1 (orientation_mode 1, motion_anchor_orientation_heading)."""
+        if self._layout.heading_anchor:
+            return _calc_heading_quat_inv(base_quat)
+        return _quat_conjugate(base_quat)
 
     def _has_upper_body_targets(self) -> bool:
         if self._ub17_pos is not None:
@@ -738,7 +856,8 @@ class SonicPipeline:
                 enc_obs[vel + idx] = upper_vels[k]
 
     def _build_encoder_obs(self, base_quat: NDArray) -> NDArray:
-        enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+        lay = self._layout
+        enc_obs = np.zeros(lay.obs_dim, dtype=np.float32)
         traj = self._trajectory
         assert traj is not None
         f_curr = min(self._traj_frame, traj.num_frames - 1)
@@ -751,14 +870,16 @@ class SonicPipeline:
         if self._has_upper_body_targets():
             self._inject_upper_body(enc_obs)
 
-        q_base_inv = _quat_conjugate(base_quat)
+        q_left_inv = self._anchor_left_inv(base_quat)
         for i in range(10):
             f = min(f_curr + i * 5, traj.num_frames - 1)
             q_aligned = _quat_multiply(
                 self._heading_delta_quat, traj.root_quat[f].astype(np.float64)
             )
-            q_rel = _quat_multiply(q_base_inv, q_aligned)
-            enc_obs[601 + i * 6 : 601 + (i + 1) * 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
+            q_rel = _quat_multiply(q_left_inv, q_aligned)
+            enc_obs[lay.anchor_hist + i * 6 : lay.anchor_hist + (i + 1) * 6] = _rotmat_to_6d(
+                _quat_to_rotmat(q_rel)
+            )
         return enc_obs
 
     def _build_teleop_encoder_obs(self, base_quat: NDArray) -> NDArray:
@@ -767,7 +888,8 @@ class SonicPipeline:
         orientation, VR 3-point blocks. All other fields stay zero - the C++
         gathers ONLY the active mode's required observations into a zeroed
         buffer (GatherEncoderObservations)."""
-        enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+        lay = self._layout
+        enc_obs = np.zeros(lay.obs_dim, dtype=np.float32)
         enc_obs[0] = 1.0  # encoder_mode_4: scalar mode id, rest zeros
         traj = self._trajectory
         assert traj is not None
@@ -775,24 +897,22 @@ class SonicPipeline:
 
         for i in range(10):
             f = min(f_curr + i * 5, traj.num_frames - 1)
-            enc_obs[_LOWERBODY_POS_OFFSET + i * 12 : _LOWERBODY_POS_OFFSET + (i + 1) * 12] = (
-                traj.joint_pos[f][LOWER_BODY_MJC_IN_ONNX]
-            )
-            enc_obs[_LOWERBODY_VEL_OFFSET + i * 12 : _LOWERBODY_VEL_OFFSET + (i + 1) * 12] = (
-                traj.joint_vel[f][LOWER_BODY_MJC_IN_ONNX]
-            )
+            enc_obs[lay.lowerbody_pos + i * 12 : lay.lowerbody_pos + (i + 1) * 12] = traj.joint_pos[
+                f
+            ][LOWER_BODY_MJC_IN_ONNX]
+            enc_obs[lay.lowerbody_vel + i * 12 : lay.lowerbody_vel + (i + 1) * 12] = traj.joint_vel[
+                f
+            ][LOWER_BODY_MJC_IN_ONNX]
 
-        q_base_inv = _quat_conjugate(base_quat)
+        q_left_inv = self._anchor_left_inv(base_quat)
         q_aligned = _quat_multiply(
             self._heading_delta_quat, traj.root_quat[f_curr].astype(np.float64)
         )
-        q_rel = _quat_multiply(q_base_inv, q_aligned)
-        enc_obs[_ANCHOR_SINGLE_OFFSET : _ANCHOR_SINGLE_OFFSET + 6] = _rotmat_to_6d(
-            _quat_to_rotmat(q_rel)
-        )
+        q_rel = _quat_multiply(q_left_inv, q_aligned)
+        enc_obs[lay.anchor_single : lay.anchor_single + 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
 
-        enc_obs[_VR_POS_OFFSET : _VR_POS_OFFSET + 9] = self._vr_pos
-        enc_obs[_VR_ORN_OFFSET : _VR_ORN_OFFSET + 12] = self._vr_orn
+        enc_obs[lay.vr_pos : lay.vr_pos + 9] = self._vr_pos
+        enc_obs[lay.vr_orn : lay.vr_orn + 12] = self._vr_orn
         return enc_obs
 
     # -- planner ----------------------------------------------------------
@@ -1042,10 +1162,11 @@ class SonicPipeline:
         elif self._trajectory is not None and self._trajectory.num_frames > 0:
             token = self._run_encoder(self._build_encoder_obs(self._cur_quat))
         elif self._has_upper_body_targets():
-            enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+            lay = self._layout
+            enc_obs = np.zeros(lay.obs_dim, dtype=np.float32)
             for i in range(10):
                 enc_obs[4 + i * NUM_JOINTS : 4 + (i + 1) * NUM_JOINTS] = DEFAULT_ANGLES_ONNX
-                enc_obs[601 + i * 6 : 601 + (i + 1) * 6] = _IDENTITY_6D
+                enc_obs[lay.anchor_hist + i * 6 : lay.anchor_hist + (i + 1) * 6] = _IDENTITY_6D
             self._inject_upper_body(enc_obs)
             token = self._run_encoder(enc_obs)
         else:
@@ -1103,10 +1224,11 @@ class SonicPipeline:
         """
         motion = self._streamed
         assert motion is not None
-        enc_obs = np.zeros(ENCODER_OBS_DIM, dtype=np.float32)
+        lay = self._layout
+        enc_obs = np.zeros(lay.obs_dim, dtype=np.float32)
         enc_obs[0] = float(motion.encode_mode)
         f_curr = min(self._streamed_frame, motion.timesteps - 1)
-        q_base_inv = _quat_conjugate(base_quat)
+        q_left_inv = self._anchor_left_inv(base_quat)
 
         if motion.encode_mode == 0:
             for i in range(10):
@@ -1116,23 +1238,25 @@ class SonicPipeline:
                 q_aligned = _quat_multiply(
                     self._heading_delta_quat, motion.root_quat[f].astype(np.float64)
                 )
-                q_rel = _quat_multiply(q_base_inv, q_aligned)
-                enc_obs[601 + i * 6 : 601 + (i + 1) * 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
+                q_rel = _quat_multiply(q_left_inv, q_aligned)
+                enc_obs[lay.anchor_hist + i * 6 : lay.anchor_hist + (i + 1) * 6] = _rotmat_to_6d(
+                    _quat_to_rotmat(q_rel)
+                )
             if self._has_upper_body_targets():
                 self._inject_upper_body(enc_obs)
         else:
             assert motion.smpl_joints is not None
             for i in range(10):
                 f = min(f_curr + i, motion.timesteps - 1)
-                o = _SMPL_JOINTS_OFFSET + i * 72
+                o = lay.smpl_joints + i * 72
                 enc_obs[o : o + 72] = motion.smpl_joints[f].ravel()
                 q_aligned = _quat_multiply(
                     self._heading_delta_quat, motion.root_quat[f].astype(np.float64)
                 )
-                q_rel = _quat_multiply(q_base_inv, q_aligned)
-                ao = _SMPL_ANCHOR_OFFSET + i * 6
+                q_rel = _quat_multiply(q_left_inv, q_aligned)
+                ao = lay.smpl_anchor + i * 6
                 enc_obs[ao : ao + 6] = _rotmat_to_6d(_quat_to_rotmat(q_rel))
-                wo = _WRISTS_OFFSET + i * 6
+                wo = lay.wrists + i * 6
                 enc_obs[wo : wo + 6] = motion.joint_pos[f][WRIST_ONNX_INDICES]
         return enc_obs
 
@@ -1154,6 +1278,7 @@ class SonicPipeline:
             "traj_frames_total": (self._trajectory.num_frames if self._trajectory else 0),
             "action_norm": float(np.linalg.norm(self._last_action)),
             "upper_body_active": self._has_upper_body_targets(),
+            "checkpoint_variant": self._layout.name,
             "stream_active": self._use_stream,
             "stream_frames": self._streamed.timesteps if self._streamed else 0,
             "stream_frame": self._streamed_frame,

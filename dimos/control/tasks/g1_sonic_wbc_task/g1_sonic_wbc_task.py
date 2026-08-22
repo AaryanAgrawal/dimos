@@ -514,6 +514,20 @@ class G1SonicWBCTask(BaseControlTask):
                 self._zmq_stats["pose"] += 1
                 if "error" in summary:
                     self._zmq_stats["errors"] += 1
+                # Pico pose messages also carry VR 3-point targets and the
+                # operator's joystick yaw (heading_increment) - C++ consumes
+                # both from this topic as well as the planner topic.
+                vr_p = msg.get("vr_position")
+                vr_o = msg.get("vr_orientation")
+                if vr_p is not None and vr_o is not None:
+                    self._pipeline.set_vr_3point(
+                        vr_p.astype("float64").ravel(),
+                        vr_o.astype("float64").ravel(),
+                        t_now=t_now,
+                    )
+                hi = msg.get("heading_increment")
+                if hi is not None:
+                    self._pipeline.apply_heading_increment(float(hi.flat[0]))
         if got_cmd:
             self._on_wire_command(cmd)
 

@@ -114,7 +114,11 @@ class StreamedMotionMerger:
             return result
 
         frame_indices = fields.get("frame_index")
+        # The pico teleop server names this field body_quat_w; the reference
+        # senders use body_quat. The C++ accepts both.
         body_quat = fields.get("body_quat")
+        if body_quat is None:
+            body_quat = fields.get("body_quat_w")
         if frame_indices is None or body_quat is None:
             result.error = "missing frame_index or body_quat"
             return result
