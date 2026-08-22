@@ -27,6 +27,7 @@ TASK_EXPOSES: dict[str, list[str]] = {
         "set_dry_run",
         "reset_runtime_state",
         "start",
+        "set_velocity_command",
         "set_locomotion_mode",
         "list_locomotion_modes",
         "set_base_height",
