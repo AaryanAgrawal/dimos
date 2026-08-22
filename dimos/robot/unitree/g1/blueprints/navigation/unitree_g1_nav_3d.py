@@ -38,6 +38,7 @@ from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNat
 from dimos.navigation.nav_3d.mls_planner.viz import planner_visual_override, render_path
 from dimos.robot.unitree.g1.config import G1
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
+from dimos.robot.unitree.g1.g1_estop import G1EStop
 from dimos.robot.unitree.g1.g1_tf_publisher import (
     MID360_HEIGHT,
     NOMINAL_BASE_HEIGHT,
@@ -136,6 +137,7 @@ unitree_g1_nav_3d = autoconnect(
         lidar_ip=os.getenv("LIDAR_IP", "192.168.123.120"),
     ),
     G1TfPublisher.blueprint(),
+    G1EStop.blueprint(),
     RayTracingVoxelMap.blueprint(
         voxel_size=voxel_size,
         emit_every=1,

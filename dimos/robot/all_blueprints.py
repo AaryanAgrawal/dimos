@@ -202,6 +202,7 @@ all_modules = {
     "front-camera": "dimos.teleop.hosted.blueprints.cloudflare.FrontCamera",
     "g1-connection": "dimos.robot.unitree.g1.connection.G1Connection",
     "g1-connection-base": "dimos.robot.unitree.g1.connection.G1ConnectionBase",
+    "g1-e-stop": "dimos.robot.unitree.g1.g1_estop.G1EStop",
     "g1-high-level-dds-sdk": "dimos.robot.unitree.g1.effectors.high_level.dds_sdk.G1HighLevelDdsSdk",
     "g1-high-level-web-rtc": "dimos.robot.unitree.g1.effectors.high_level.webrtc.G1HighLevelWebRtc",
     "g1-recorder": "dimos.robot.unitree.g1.g1_recorder.G1Recorder",

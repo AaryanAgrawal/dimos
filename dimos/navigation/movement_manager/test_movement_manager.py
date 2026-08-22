@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import math
 import time
 
+from dimos_lcm.std_msgs import Bool  # type: ignore[import-untyped]
 import pytest
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
@@ -139,3 +140,18 @@ def test_tele_cmd_vel_scaling(manager_and_captured):
     assert published.linear.y == pytest.approx(2.0)
     assert published.linear.z == pytest.approx(0.0)
     assert published.angular.z == pytest.approx(0.25)
+
+
+def test_estop_latches_and_blocks_nav_and_teleop(manager_and_captured):
+    """E-STOP halts cmd_vel immediately and stays latched, so a stale False cannot resume motion."""
+    manager, captured = manager_and_captured
+    manager._on_estop(Bool(data=True))
+
+    assert len(captured.cmd_vel) == 1
+    assert captured.cmd_vel[0].linear.x == 0.0
+    assert math.isnan(captured.goal[0].x)
+
+    manager._on_estop(Bool(data=False))
+    manager._on_nav(_twist(lx=0.9))
+    manager._on_teleop(_twist(lx=0.3))
+    assert len(captured.cmd_vel) == 1

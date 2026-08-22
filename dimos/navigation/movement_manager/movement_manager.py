@@ -56,6 +56,7 @@ class MovementManager(Module):
     clicked_point: In[PointStamped]
     nav_cmd_vel: In[Twist]
     tele_cmd_vel: In[Twist]
+    estop: In[Bool]
 
     goal: Out[PointStamped]
     way_point: Out[PointStamped]
@@ -67,6 +68,7 @@ class MovementManager(Module):
         self._lock = threading.Lock()
         self._teleop_active = False
         self._last_teleop_time = 0.0
+        self._estopped = False
 
     @rpc
     def start(self) -> None:
@@ -74,6 +76,7 @@ class MovementManager(Module):
         self.register_disposable(Disposable(self.clicked_point.subscribe(self._on_click)))
         self.register_disposable(Disposable(self.nav_cmd_vel.subscribe(self._on_nav)))
         self.register_disposable(Disposable(self.tele_cmd_vel.subscribe(self._on_teleop)))
+        self.register_disposable(Disposable(self.estop.subscribe(self._on_estop)))
 
     @rpc
     def stop(self) -> None:
@@ -109,7 +112,18 @@ class MovementManager(Module):
         self.goal.publish(cancel)
         logger.debug("Navigation cancelled — waiting for new goal")
 
+    def _on_estop(self, msg: Bool) -> None:
+        # Latched here as well as at the source, so a stale False can never un-stop the robot.
+        if not msg.data or self._estopped:
+            return
+        self._estopped = True
+        logger.error("E-STOP latched, cmd_vel held")
+        self.cmd_vel.publish(Twist())
+        self._cancel_goal()
+
     def _on_nav(self, msg: Twist) -> None:
+        if self._estopped:
+            return
         with self._lock:
             if self._teleop_active:
                 # check if cooldown has expired
@@ -120,6 +134,8 @@ class MovementManager(Module):
             self.cmd_vel.publish(msg)
 
     def _on_teleop(self, msg: Twist) -> None:
+        if self._estopped:
+            return
         with self._lock:
             self._teleop_active = True
             self._last_teleop_time = time.monotonic()
