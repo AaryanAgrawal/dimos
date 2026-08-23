@@ -86,9 +86,16 @@ dimos --viewer none run unitree-go2
 uv run dimos foxglove-bridge
 ```
 
-In the Foxglove app: Open connection → Foxglove WebSocket → `ws://localhost:8765`. Use `--host` and
-`--port` to move the server. `--viewer none` only saves the Rerun overhead — the bridge works with
-Rerun running too.
+In the Foxglove app: Open connection → Foxglove WebSocket → `ws://localhost:8765`. The server binds
+loopback; to reach it from another machine pass `--host 0.0.0.0`, which opens robot control and not
+just sensor data to anyone on the network. `--port` moves it. `--viewer none` only saves the Rerun
+overhead — the bridge works with Rerun running too.
+
+Large clouds can drop before they reach any viewer. LCM sockets take the kernel's default UDP
+receive buffer, and on a machine left at 212992 bytes a 320 KB cloud (20k points) lost most of its
+messages at 10-30 Hz while a 128 KB one arrived lossless at 30 Hz. It is the LCM socket, so every
+consumer sees it, Rerun included. `dimos run` offers the fix; by hand it is
+`sudo sysctl -w net.core.rmem_max=67108864` and the same for `net.core.rmem_default`.
 
 ---
 

@@ -49,7 +49,6 @@ from dimos.visualization.foxglove import converters
 logger = setup_logger()
 
 FOXGLOVE_PORT = 8765
-FOXGLOVE_HOST = "0.0.0.0"  # the Foxglove app usually runs on another machine
 
 _WORKERS = 2  # decode/convert pool; the bus thread only fills mailboxes
 _TELE_CMD_VEL = "tele_cmd_vel"
@@ -170,7 +169,7 @@ class Config(ModuleConfig):
     """Configuration for FoxgloveBridgeModule."""
 
     pubsubs: list[SubscribeAllCapable[Any, Any]] = field(default_factory=list)
-    host: str = FOXGLOVE_HOST
+    host: str | None = None
     port: int = FOXGLOVE_PORT
     max_hz: dict[str, float] = field(default_factory=dict)
 
@@ -195,6 +194,11 @@ class FoxgloveBridgeModule(Module):
         self._min_intervals: dict[str, float] = {}
         self._last_log: dict[str, float] = {}
 
+    @property
+    def host(self) -> str:
+        # teleop drives the robot, so binding wider than loopback is opt-in
+        return self.config.host or self.config.g.listen_host
+
     @rpc
     def start(self) -> None:
         super().start()
@@ -202,7 +206,7 @@ class FoxgloveBridgeModule(Module):
         self._min_intervals = {t: 1.0 / hz for t, hz in self.config.max_hz.items() if hz > 0}
         self._server = foxglove.start_server(
             name="dimos",
-            host=self.config.host,
+            host=self.host,
             port=self.config.port,
             capabilities=[Capability.ClientPublish],
             supported_encodings=["json"],  # what the panels publish against a non-ROS server
@@ -210,7 +214,7 @@ class FoxgloveBridgeModule(Module):
         )
         self._start_workers()
         self._subscribe(_resolve_pubsubs(self.config))
-        logger.info("foxglove bridge listening", host=self.config.host, port=self.config.port)
+        logger.info("foxglove bridge listening", host=self.host, port=self.config.port)
 
     @rpc
     def stop(self) -> None:
@@ -354,7 +358,7 @@ class FoxgloveBridgeModule(Module):
         logger.info("foxglove bridge stopped", dropped=dropped)
 
 
-def run_bridge(host: str = FOXGLOVE_HOST, port: int = FOXGLOVE_PORT) -> None:
+def run_bridge(host: str | None = None, port: int = FOXGLOVE_PORT) -> None:
     """Start a FoxgloveBridgeModule on the running dimos bus and block until interrupted."""
     autoconf(check_only=True)
 

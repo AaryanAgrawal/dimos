@@ -112,6 +112,8 @@ def _stamp(stamp: Any, fallback: messages.Timestamp) -> messages.Timestamp:
 
 def _point_cloud(msg: PointCloud2, ts: messages.Timestamp) -> messages.PointCloud:
     """Pass the packed point buffer through untouched; only the envelope is translated."""
+    if msg.is_bigendian:
+        raise ValueError("got a big-endian cloud, want little-endian: foxglove has no endianness")
     return messages.PointCloud(
         timestamp=ts,
         frame_id=msg.header.frame_id,
@@ -135,6 +137,8 @@ def _raw_image(msg: Image, ts: messages.Timestamp) -> messages.RawImage:
     """dimos writes ROS encoding names, which foxglove RawImage accepts verbatim."""
     if msg.encoding == "jpeg":
         raise ValueError("got jpeg image data, want raw pixels: drop the jpeg_lcm remap")
+    if msg.is_bigendian:
+        raise ValueError("got a big-endian image, want little-endian: foxglove has no endianness")
     return messages.RawImage(
         timestamp=ts,
         frame_id=msg.header.frame_id,

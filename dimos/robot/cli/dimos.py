@@ -863,7 +863,9 @@ def rerun_bridge_cmd(
 
 @main.command(name="foxglove-bridge")
 def foxglove_bridge_cmd(
-    host: str = typer.Option("0.0.0.0", help="Address to bind the Foxglove WebSocket server to"),
+    host: str | None = typer.Option(
+        None, help="Address to bind the Foxglove WebSocket server to (default: listen_host)"
+    ),
     port: int = typer.Option(8765, help="Port for the Foxglove WebSocket server"),
 ) -> None:
     """Launch the Foxglove WebSocket bridge."""

@@ -242,6 +242,19 @@ def test_jpeg_image_is_refused() -> None:
         converters._raw_image(_wire(_image(encoding="jpeg", step=0)), _TIMESTAMP)
 
 
+def test_a_big_endian_buffer_is_refused() -> None:
+    """Big-endian points and pixels are refused rather than served as little-endian bytes."""
+    cloud = _point_cloud2()
+    cloud.is_bigendian = True
+    with pytest.raises(ValueError, match="want little-endian"):
+        converters._point_cloud(_wire(cloud), _TIMESTAMP)
+
+    image = _image()
+    image.is_bigendian = 1
+    with pytest.raises(ValueError, match="want little-endian"):
+        converters._raw_image(_wire(image), _TIMESTAMP)
+
+
 def test_camera_calibration_carries_the_intrinsics() -> None:
     """CameraInfo intrinsics, rectification and projection reach Foxglove as CameraCalibration."""
     calibration = _parsed(converters._camera_calibration(_wire(_camera_info()), _TIMESTAMP))
@@ -325,6 +338,18 @@ def test_wire_type_resolves_the_generated_struct() -> None:
     assert converters.wire_type(resolve_msg_type("sensor_msgs.PointCloud2")) is PointCloud2
     assert converters.wire_type(resolve_msg_type("nav_msgs.GraphNodes3D")) is Path
     assert converters.wire_type(resolve_msg_type("sensor_msgs.RobotState")) is None
+
+
+def test_the_bridge_binds_loopback_unless_asked() -> None:
+    """The default bind is loopback, so teleop reaches the robot from this host only."""
+    module = FoxgloveBridgeModule(pubsubs=[LCMPubSubBase(url=_TEST_BUS)])
+    asked = FoxgloveBridgeModule(pubsubs=[LCMPubSubBase(url=_TEST_BUS)], host="0.0.0.0")
+    try:
+        assert module.host == "127.0.0.1"
+        assert asked.host == "0.0.0.0"
+    finally:
+        module.stop()
+        asked.stop()
 
 
 def test_latest_wins_replaces_the_undrained_payload() -> None:
