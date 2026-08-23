@@ -1,4 +1,4 @@
-# Measured G1 fall: two deliberate falls, peak tilt 81.15 deg, yaw spun at 0.7 rad/s to exercise yaw invariance.
+# SIMULATED orientation. Measured tilt-vs-time of two deliberate G1 falls (peak 81.15 deg), re-encoded as a synthetic pure roll of that angle composed with a 0.7 rad/s yaw ramp, so pitch is identically zero and yaw is a perfect ramp. Round-trips to the measured tilt within 9.4e-08 deg.
 t_s,qw,qx,qy,qz
 0.0008,0.999219719,0.039495251,0.000011057,0.000279745
 0.0216,0.999187823,0.039579576,0.000299227,0.007554007
