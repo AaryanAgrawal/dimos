@@ -22,7 +22,7 @@ framework.
 
 from typing import Literal, TypeAlias
 
-ViewerBackend: TypeAlias = Literal["rerun", "none"]
+ViewerBackend: TypeAlias = Literal["rerun", "none", "foxglove"]
 RerunOpenOption: TypeAlias = Literal["none", "web", "native", "both"]
 
 RERUN_OPEN_DEFAULT: RerunOpenOption = "native"

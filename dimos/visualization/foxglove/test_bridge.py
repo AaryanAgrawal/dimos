@@ -1,0 +1,414 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for the Foxglove bridge converters and its live WebSocket path."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+import json
+import struct
+import threading
+import time
+from typing import Any
+
+from dimos_lcm.geometry_msgs import (
+    Point,
+    Pose,
+    PoseStamped,
+    PoseWithCovariance,
+    Quaternion,
+    Transform,
+    TransformStamped,
+    Twist,
+    TwistWithCovariance,
+    Vector3,
+)
+from dimos_lcm.nav_msgs import MapMetaData, OccupancyGrid, Odometry, Path
+from dimos_lcm.sensor_msgs import CameraInfo, Image, PointCloud2, PointField, RegionOfInterest
+from dimos_lcm.std_msgs import Header, Time
+from dimos_lcm.tf2_msgs import TFMessage
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+import numpy as np
+import pytest
+from websockets.sync.client import connect
+
+from dimos.msgs.helpers import resolve_msg_type
+from dimos.protocol.pubsub.impl.lcmpubsub import LCMPubSubBase
+from dimos.visualization.foxglove import converters
+from dimos.visualization.foxglove.bridge import FoxgloveBridgeModule, _Slot
+
+_TEST_BUS = "udpm://239.255.76.68:7668?ttl=0"  # never the default bus a live stack runs on
+_E2E_PORT = 18765
+_SUBPROTOCOL = "foxglove.sdk.v1"  # https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md
+_LIDAR_CHANNEL = "/lidar#sensor_msgs.PointCloud2"
+_MESSAGE_DATA_OP = 1
+_SUBSCRIPTION_ID = 7
+_STAMP_NS = 12 * converters.NS_PER_S + 34
+_TIMEOUT_S = 10.0
+_POLL_S = 0.2
+
+_CLOUD_BUFFER = np.arange(8, dtype=np.float32).tobytes()
+_TIMESTAMP = converters.timestamp(_STAMP_NS)
+
+
+def _header(sec: int = 12, nsec: int = 34, frame_id: str = "world") -> Header:
+    header = Header()
+    header.seq = 0
+    header.frame_id = frame_id
+    header.stamp = Time()
+    header.stamp.sec = sec
+    header.stamp.nsec = nsec
+    return header
+
+
+def _pose(x: float = 1.0, y: float = 2.0, z: float = 3.0) -> Pose:
+    pose = Pose()
+    pose.position = Point()
+    pose.position.x, pose.position.y, pose.position.z = x, y, z
+    pose.orientation = Quaternion()
+    pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = 0, 0, 0, 1.0
+    return pose
+
+
+def _vector3(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> Vector3:
+    vector = Vector3()
+    vector.x, vector.y, vector.z = x, y, z
+    return vector
+
+
+def _wire(msg: Any) -> Any:
+    """Round-trip a constructed struct through the LCM wire, so tests see decoded values."""
+    return type(msg).lcm_decode(msg.lcm_encode())
+
+
+def _parsed(msg: Any) -> Any:
+    """Parse a foxglove message back through its own protobuf schema so fields can be asserted."""
+    schema = type(msg).get_schema()
+    pool = descriptor_pool.DescriptorPool()
+    for proto in descriptor_pb2.FileDescriptorSet.FromString(schema.data).file:
+        pool.Add(proto)
+    return message_factory.GetMessageClass(pool.FindMessageTypeByName(schema.name)).FromString(
+        msg.encode()
+    )
+
+
+def _point_cloud2() -> PointCloud2:
+    msg = PointCloud2()
+    msg.header = _header(frame_id="lidar")
+    msg.height, msg.width = 1, 2
+    msg.point_step, msg.row_step = 16, 32
+    msg.is_bigendian, msg.is_dense = False, True
+    msg.fields = []
+    for name, offset in (("x", 0), ("y", 4), ("z", 8), ("intensity", 12)):
+        field = PointField()
+        field.name, field.offset, field.datatype, field.count = name, offset, 7, 1
+        msg.fields.append(field)
+    msg.fields_length = 4
+    msg.data, msg.data_length = _CLOUD_BUFFER, len(_CLOUD_BUFFER)
+    return msg
+
+
+def _image(encoding: str = "bgr8", step: int = 9) -> Image:
+    msg = Image()
+    msg.header = _header(frame_id="camera_optical")
+    msg.height, msg.width = 2, 3
+    msg.encoding, msg.is_bigendian, msg.step = encoding, False, step
+    msg.data, msg.data_length = bytes(range(18)), 18
+    return msg
+
+
+def _camera_info() -> CameraInfo:
+    msg = CameraInfo()
+    msg.header = _header(frame_id="camera_optical")
+    msg.height, msg.width = 2, 3
+    msg.distortion_model = "plumb_bob"
+    msg.D, msg.D_length = [0.0] * 5, 5
+    msg.K = [1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0]
+    msg.R = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    msg.P = [1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    msg.binning_x = msg.binning_y = 0
+    msg.roi = RegionOfInterest()
+    msg.roi.x_offset = msg.roi.y_offset = msg.roi.height = msg.roi.width = 0
+    msg.roi.do_rectify = False
+    return msg
+
+
+def _tf_message() -> TFMessage:
+    stamped = TransformStamped()
+    stamped.header = _header(sec=7, nsec=8, frame_id="world")
+    stamped.child_frame_id = "base_link"
+    stamped.transform = Transform()
+    stamped.transform.translation = _vector3(1.0, 2.0, 3.0)
+    stamped.transform.rotation = _pose().orientation
+    msg = TFMessage()
+    msg.transforms, msg.transforms_length = [stamped], 1
+    return msg
+
+
+def _pose_stamped(x: float = 1.0) -> PoseStamped:
+    msg = PoseStamped()
+    msg.header = _header(frame_id="odom")
+    msg.pose = _pose(x)
+    return msg
+
+
+def _odometry() -> Odometry:
+    msg = Odometry()
+    msg.header = _header(frame_id="odom")
+    msg.child_frame_id = "base_link"
+    msg.pose = PoseWithCovariance()
+    msg.pose.pose, msg.pose.covariance = _pose(), [0.0] * 36
+    msg.twist = TwistWithCovariance()
+    msg.twist.twist = Twist()
+    msg.twist.twist.linear, msg.twist.twist.angular = _vector3(), _vector3()
+    msg.twist.covariance = [0.0] * 36
+    return msg
+
+
+def _path() -> Path:
+    msg = Path()
+    msg.header = _header(frame_id="map")
+    msg.poses = [_pose_stamped(1.0), _pose_stamped(2.0)]
+    msg.poses_length = 2
+    return msg
+
+
+def _occupancy_grid() -> OccupancyGrid:
+    msg = OccupancyGrid()
+    msg.header = _header(frame_id="map")
+    msg.info = MapMetaData()
+    msg.info.map_load_time = Time()
+    msg.info.map_load_time.sec = msg.info.map_load_time.nsec = 0
+    msg.info.resolution, msg.info.width, msg.info.height = 0.5, 3, 2
+    msg.info.origin = _pose(0.0, 0.0, 0.0)
+    msg.data, msg.data_length = [-1, 0, 100, 50, 0, -1], 6
+    return msg
+
+
+def test_point_cloud_forwards_the_packed_buffer() -> None:
+    """A PointCloud2's point buffer, stride and field layout reach Foxglove unchanged."""
+    cloud = _parsed(converters._point_cloud(_wire(_point_cloud2()), _TIMESTAMP))
+
+    assert cloud.frame_id == "lidar"
+    assert cloud.point_stride == 16
+    assert cloud.data == _CLOUD_BUFFER
+    assert [(f.name, f.offset, f.type) for f in cloud.fields] == [
+        ("x", 0, 7),
+        ("y", 4, 7),
+        ("z", 8, 7),
+        ("intensity", 12, 7),
+    ]
+    assert (cloud.timestamp.seconds, cloud.timestamp.nanos) == (12, 34)
+
+
+def test_raw_image_forwards_pixels_and_step() -> None:
+    """An Image's pixel buffer, row step and ROS encoding name reach Foxglove unchanged."""
+    image = _parsed(converters._raw_image(_wire(_image()), _TIMESTAMP))
+
+    assert (image.width, image.height, image.step) == (3, 2, 9)
+    assert image.encoding == "bgr8"
+    assert image.data == bytes(range(18))
+    assert image.frame_id == "camera_optical"
+
+
+def test_jpeg_image_is_refused() -> None:
+    """A jpeg-compressed Image is refused rather than served as raw pixels."""
+    with pytest.raises(ValueError, match="want raw pixels"):
+        converters._raw_image(_wire(_image(encoding="jpeg", step=0)), _TIMESTAMP)
+
+
+def test_camera_calibration_carries_the_intrinsics() -> None:
+    """CameraInfo intrinsics, rectification and projection reach Foxglove as CameraCalibration."""
+    calibration = _parsed(converters._camera_calibration(_wire(_camera_info()), _TIMESTAMP))
+
+    assert (calibration.width, calibration.height) == (3, 2)
+    assert calibration.distortion_model == "plumb_bob"
+    assert list(calibration.K) == [1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 1.0]
+    assert list(calibration.P) == [1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert list(calibration.D) == [0.0] * 5
+
+
+def test_frame_transforms_keep_each_transform_stamp() -> None:
+    """Every transform in a TFMessage becomes a FrameTransform carrying its own stamp."""
+    transforms = _parsed(converters._frame_transforms(_wire(_tf_message()), _TIMESTAMP)).transforms
+
+    assert len(transforms) == 1
+    assert (transforms[0].parent_frame_id, transforms[0].child_frame_id) == ("world", "base_link")
+    assert (transforms[0].translation.x, transforms[0].translation.z) == (1.0, 3.0)
+    assert transforms[0].rotation.w == 1.0
+    assert (transforms[0].timestamp.seconds, transforms[0].timestamp.nanos) == (7, 8)
+
+
+def test_pose_stamped_becomes_a_pose_in_frame() -> None:
+    """A PoseStamped's frame and pose reach Foxglove as PoseInFrame."""
+    pose_in_frame = _parsed(converters._pose_in_frame(_wire(_pose_stamped()), _TIMESTAMP))
+
+    assert pose_in_frame.frame_id == "odom"
+    assert (pose_in_frame.pose.position.x, pose_in_frame.pose.position.z) == (1.0, 3.0)
+    assert pose_in_frame.pose.orientation.w == 1.0
+
+
+def test_odometry_publishes_only_its_pose() -> None:
+    """An Odometry contributes its pose; twist and covariance have no Foxglove home."""
+    pose_in_frame = _parsed(converters._odometry_pose(_wire(_odometry()), _TIMESTAMP))
+
+    assert pose_in_frame.frame_id == "odom"
+    assert (pose_in_frame.pose.position.x, pose_in_frame.pose.position.y) == (1.0, 2.0)
+
+
+def test_path_becomes_poses_in_frame() -> None:
+    """A Path's poses reach Foxglove in order under the path's own frame."""
+    poses = _parsed(converters._poses_in_frame(_wire(_path()), _TIMESTAMP))
+
+    assert poses.frame_id == "map"
+    assert [pose.position.x for pose in poses.poses] == [1.0, 2.0]
+
+
+def test_grid_packs_one_int8_cost_per_cell() -> None:
+    """OccupancyGrid costs reach Foxglove as a one-byte-per-cell Grid buffer."""
+    grid = _parsed(converters._grid(_wire(_occupancy_grid()), _TIMESTAMP))
+
+    assert (grid.column_count, grid.row_stride, grid.cell_stride) == (3, 3, 1)
+    assert (grid.cell_size.x, grid.cell_size.y) == (0.5, 0.5)
+    assert grid.data == np.array([-1, 0, 100, 50, 0, -1], dtype=np.int8).tobytes()
+    assert [(f.name, f.offset, f.type) for f in grid.fields] == [("cost", 0, 2)]
+
+
+def test_stamp_falls_back_to_receive_time_without_a_publisher_clock() -> None:
+    """A header stamp of zero seconds means no publisher clock, so receive time is logged."""
+    assert converters.stamp_ns(_wire(_point_cloud2()), 99) == _STAMP_NS
+
+    msg = _point_cloud2()
+    msg.header = _header(sec=0, nsec=0)
+    assert converters.stamp_ns(_wire(msg), 99) == 99
+
+
+def test_json_summarizes_buffers_and_long_arrays() -> None:
+    """Untyped topics serve every wire field as JSON, with buffers reduced to their length."""
+    fields = converters.to_json(_wire(_point_cloud2()))
+
+    assert fields["data"] == 32
+    assert fields["point_step"] == 16
+    assert fields["header"] == {"seq": 0, "stamp": {"sec": 12, "nsec": 34}, "frame_id": "lidar"}
+    assert fields["fields"][0] == {"name": "x", "offset": 0, "datatype": 7, "count": 1}
+    assert converters._jsonable(list(range(converters._MAX_JSON_ITEMS + 1))) == 65
+    assert converters._jsonable(float("nan")) is None
+
+
+def test_wire_type_resolves_the_generated_struct() -> None:
+    """A resolved dimos msg class maps to its own generated struct, or to the one it borrows."""
+    assert converters.wire_type(resolve_msg_type("sensor_msgs.PointCloud2")) is PointCloud2
+    assert converters.wire_type(resolve_msg_type("nav_msgs.GraphNodes3D")) is Path
+    assert converters.wire_type(resolve_msg_type("sensor_msgs.RobotState")) is None
+
+
+def test_latest_wins_replaces_the_undrained_payload() -> None:
+    """A payload landing before a worker drains the slot replaces it and counts one drop."""
+    module = FoxgloveBridgeModule(pubsubs=[LCMPubSubBase(url=_TEST_BUS)])
+    try:
+        slot = _Slot(channel=None, decode=bytes, convert=None)
+        with module._cond:
+            module._offer(slot, b"stale")
+            module._offer(slot, b"fresh")
+        assert (slot.payload, slot.dropped, len(module._pending)) == (b"fresh", 1, 1)
+    finally:
+        module.stop()
+
+
+@contextmanager
+def _bridge(port: int) -> Iterator[FoxgloveBridgeModule]:
+    """A started bridge bound to a private port and the isolated test bus."""
+    module = FoxgloveBridgeModule(
+        pubsubs=[LCMPubSubBase(url=_TEST_BUS)], host="127.0.0.1", port=port
+    )
+    module.start()
+    try:
+        yield module
+    finally:
+        module.stop()
+
+
+def _publish_until(ws: Any, publish: Callable[[], None], match: Callable[[Any], bool]) -> Any:
+    """Republish until a matching server frame arrives; multicast may drop the first datagram."""
+    deadline = time.monotonic() + _TIMEOUT_S
+    while time.monotonic() < deadline:
+        publish()
+        try:
+            frame = ws.recv(timeout=_POLL_S)
+        except TimeoutError:
+            continue
+        parsed = json.loads(frame) if isinstance(frame, str) else frame
+        if match(parsed):
+            return parsed
+    raise TimeoutError(f"foxglove server sent no matching frame within {_TIMEOUT_S}s")
+
+
+def _advertised_channel(ws: Any, publish: Callable[[], None]) -> Any:
+    """Republish until the server advertises, and return the advertised channel."""
+
+    def advertised(frame: Any) -> bool:
+        return isinstance(frame, dict) and frame["op"] == "advertise"
+
+    return _publish_until(ws, publish, advertised)["channels"][0]
+
+
+def _subscribed_frame(ws: Any, channel_id: int, publish: Callable[[], None]) -> Any:
+    """Subscribe to a channel and return the first binary MessageData frame it delivers."""
+    subscription = {"id": _SUBSCRIPTION_ID, "channelId": channel_id}
+    ws.send(json.dumps({"op": "subscribe", "subscriptions": [subscription]}))
+    return _publish_until(ws, publish, lambda frame: isinstance(frame, bytes))
+
+
+def _count_conversions(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Swap in a PointCloud mapping that records every conversion it performs."""
+    conversions: list[int] = []
+    mapping = converters.MAPPINGS[PointCloud2]
+
+    def counted(msg: Any, ts: Any) -> Any:
+        conversions.append(1)
+        return mapping.convert(msg, ts)
+
+    monkeypatch.setitem(
+        converters.MAPPINGS, PointCloud2, converters.Mapping(mapping.channel, counted)
+    )
+    return conversions
+
+
+def test_bridge_advertises_a_topic_before_it_decodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A topic advertises from its type suffix alone and decodes only once a client subscribes."""
+    conversions = _count_conversions(monkeypatch)
+    payload = _point_cloud2().lcm_encode()
+    publisher = LCMPubSubBase(url=_TEST_BUS)
+    try:
+        with (
+            _bridge(_E2E_PORT),
+            connect(f"ws://127.0.0.1:{_E2E_PORT}", subprotocols=[_SUBPROTOCOL]) as ws,
+        ):
+
+            def publish() -> None:
+                publisher.publish(_LIDAR_CHANNEL, payload)
+
+            channel = _advertised_channel(ws, publish)
+            assert (channel["topic"], channel["schemaName"]) == ("/lidar", "foxglove.PointCloud")
+            assert conversions == []
+            frame = _subscribed_frame(ws, channel["id"], publish)
+    finally:
+        publisher.stop()
+
+    assert frame[0] == _MESSAGE_DATA_OP
+    assert struct.unpack("<IQ", frame[1:13]) == (_SUBSCRIPTION_ID, _STAMP_NS)
+    assert conversions
+    assert not [t for t in threading.enumerate() if t.name.startswith("foxglove-bridge")]

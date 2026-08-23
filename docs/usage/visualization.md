@@ -61,6 +61,31 @@ dimos --rerun-web --rerun-open native run unitree-go2
 
 ---
 
+### Foxglove (`foxglove`)
+
+**What you get:**
+- A [Foxglove](https://foxglove.dev) WebSocket server on port 8765
+- Every LCM/Zenoh topic carrying an LCM struct advertised as a Foxglove channel, decoded only while a panel is subscribed to it
+
+Not served: `RobotState`, `JointCommand`, `MotorCommandArray`, `TrajectoryPoint`,
+`TrajectoryStatus` and `EntityMarkers` (no LCM struct), and images remapped through `jpeg_lcm`.
+
+The bridge also runs standalone, so it attaches to a stack that is already running from any branch:
+
+```bash
+# terminal A — any blueprint, on any branch
+dimos --viewer none run unitree-go2
+
+# terminal B — a checkout that has the bridge
+uv run dimos foxglove-bridge
+```
+
+In the Foxglove app: Open connection → Foxglove WebSocket → `ws://localhost:8765`. Use `--host` and
+`--port` to move the server. `--viewer none` only saves the Rerun overhead — the bridge works with
+Rerun running too.
+
+---
+
 ## Rendering with Custom Blueprints
 
 To enable visualization in your own blueprint, use `vis_module`:

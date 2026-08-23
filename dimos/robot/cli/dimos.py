@@ -861,5 +861,16 @@ def rerun_bridge_cmd(
     )
 
 
+@main.command(name="foxglove-bridge")
+def foxglove_bridge_cmd(
+    host: str = typer.Option("0.0.0.0", help="Address to bind the Foxglove WebSocket server to"),
+    port: int = typer.Option(8765, help="Port for the Foxglove WebSocket server"),
+) -> None:
+    """Launch the Foxglove WebSocket bridge."""
+    from dimos.visualization.foxglove.bridge import run_bridge
+
+    run_bridge(host=host, port=port)
+
+
 if __name__ == "__main__":
     cli_main()

@@ -68,6 +68,13 @@ def vis_module(
                 RerunWebSocketServer.blueprint(),
                 WebsocketVisModule.blueprint(),
             )
+        case "foxglove":
+            from dimos.visualization.foxglove.bridge import FoxgloveBridgeModule
+
+            return autoconnect(
+                FoxgloveBridgeModule.blueprint(),
+                WebsocketVisModule.blueprint(),
+            )
         case "none":
             return autoconnect(WebsocketVisModule.blueprint())
         case _:
