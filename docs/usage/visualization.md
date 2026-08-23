@@ -66,9 +66,15 @@ dimos --rerun-web --rerun-open native run unitree-go2
 **What you get:**
 - A [Foxglove](https://foxglove.dev) WebSocket server on port 8765
 - Every LCM/Zenoh topic carrying an LCM struct advertised as a Foxglove channel, decoded only while a panel is subscribed to it
+- Teleop and click-to-navigate from the app, on `tele_cmd_vel` and `clicked_point`
 
 Not served: `RobotState`, `JointCommand`, `MotorCommandArray`, `TrajectoryPoint`,
 `TrajectoryStatus` and `EntityMarkers` (no LCM struct), and images remapped through `jpeg_lcm`.
+
+To drive the robot, add a Teleop panel: its `geometry_msgs/Twist` reaches `tele_cmd_vel`. To send a
+goal, use the 3D panel's Publish tool with type Point: its `geometry_msgs/PointStamped` reaches
+`clicked_point`. The topic each panel publishes on is yours to pick, since the bridge routes on the
+schema. A Teleop panel that goes away mid-drive publishes a zero Twist.
 
 The bridge also runs standalone, so it attaches to a stack that is already running from any branch:
 

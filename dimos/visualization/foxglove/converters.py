@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""dimos LCM wire messages to Foxglove messages, dispatched by the generated struct class."""
+"""dimos LCM wire messages to Foxglove messages, and client-published JSON back to dimos msgs."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ from dimos_lcm.nav_msgs import OccupancyGrid, Odometry, Path
 from dimos_lcm.sensor_msgs import CameraInfo, Image, PointCloud2
 from dimos_lcm.tf2_msgs import TFMessage
 from foxglove import channels, messages
+
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 NS_PER_S = 1_000_000_000
 
@@ -226,6 +230,37 @@ def _jsonable(value: Any) -> Any:
 def to_json(msg: Any) -> dict[str, Any]:
     """Every wire field as JSON, so Plot and Raw Messages panels work on any decodable topic."""
     return cast("dict[str, Any]", _jsonable(msg))
+
+
+def _xyz(part: Any, name: str) -> Vector3:
+    """The x, y and z of one client-payload object as a dimos Vector3."""
+    if not isinstance(part, dict) or not {"x", "y", "z"} & part.keys():
+        raise ValueError(f"got {name}={part!r}, want an object with x, y and z")
+    axes = [float(part.get(axis, 0.0)) for axis in ("x", "y", "z")]
+    if not all(isfinite(axis) for axis in axes):
+        raise ValueError(f"got {name}={part!r}, want finite x, y and z")
+    return Vector3(*axes)
+
+
+def twist(fields: dict[str, Any]) -> Twist:
+    """A Teleop panel message: geometry_msgs/Twist JSON, linear m/s and angular rad/s."""
+    return Twist(
+        linear=_xyz(fields.get("linear"), "linear"), angular=_xyz(fields.get("angular"), "angular")
+    )
+
+
+def point_stamped(fields: dict[str, Any]) -> PointStamped:
+    """A 3D panel Publish click: a PointStamped, or a bare Point when the panel sends one."""
+    header = fields.get("header") or {}
+    stamp = header.get("stamp") or {}
+    point = _xyz(fields.get("point", fields), "point")
+    return PointStamped(
+        x=point.x,
+        y=point.y,
+        z=point.z,
+        ts=float(stamp.get("sec", 0)) + float(stamp.get("nsec", 0)) / NS_PER_S,
+        frame_id=str(header.get("frame_id", "")),
+    )
 
 
 @dataclass(frozen=True)

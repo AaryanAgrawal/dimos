@@ -228,6 +228,8 @@ def monitor_threads(request):
         # HuggingFace safetensors conversion thread - no user cleanup API
         # https://github.com/huggingface/transformers/issues/29513
         "Thread-auto_conversion",
+        # A foreign thread an extension ran Python on: CPython pins is_alive() True, so it never clears
+        "Dummy-",
     ]
 
     def live_new_threads():

@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import json
 import signal
 import sys
 import threading
@@ -27,13 +28,17 @@ from typing import Any
 
 import foxglove
 from foxglove import Channel
-from foxglove.websocket import WebSocketServer
+from foxglove.websocket import Capability, Client, ClientChannel, ServerListener, WebSocketServer
 from reactivex.disposable import Disposable
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.global_config import global_config
 from dimos.core.module import Module, ModuleConfig
+from dimos.core.stream import Out
+from dimos.core.transport_factory import make_transport
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.protocol.pubsub.impl.lcmpubsub import LCMPubSubBase
 from dimos.protocol.pubsub.impl.zenohpubsub import ZenohPubSubBase
 from dimos.protocol.pubsub.spec import SubscribeAllCapable
@@ -47,6 +52,8 @@ FOXGLOVE_PORT = 8765
 FOXGLOVE_HOST = "0.0.0.0"  # the Foxglove app usually runs on another machine
 
 _WORKERS = 2  # decode/convert pool; the bus thread only fills mailboxes
+_TELE_CMD_VEL = "tele_cmd_vel"
+_CLICKED_POINT = "clicked_point"
 
 
 @dataclass
@@ -82,6 +89,83 @@ def _resolve_pubsubs(config: Config) -> list[SubscribeAllCapable[Any, Any]]:
     return config.pubsubs or _default_pubsubs(config.g)
 
 
+@dataclass
+class _Route:
+    """The bridge Out a client-advertised schema publishes on, and the decoder that fills it."""
+
+    stream: str
+    decode: Callable[[dict[str, Any]], Any]
+    moving: bool = False
+    warned: bool = False
+
+
+_ROUTES = {
+    "Twist": _Route(_TELE_CMD_VEL, converters.twist),
+    "PointStamped": _Route(_CLICKED_POINT, converters.point_stamped),
+    "Point": _Route(_CLICKED_POINT, converters.point_stamped),
+}
+
+
+def _route(schema_name: str) -> _Route | None:
+    """The route for a client's advertised schema; None when the bridge serves no Out for it."""
+    for suffix, route in _ROUTES.items():
+        if schema_name.endswith(suffix):
+            return replace(route)  # a copy per channel: one client's state is not another's
+    return None
+
+
+class _TeleopListener(ServerListener):
+    """Republish what the Foxglove Teleop and 3D Publish panels send onto the dimos bus."""
+
+    def __init__(self, bridge: FoxgloveBridgeModule) -> None:
+        self._bridge = bridge
+        self._routes: dict[tuple[int, int], _Route] = {}  # a channel id is unique per client only
+
+    def on_client_advertise(self, client: Client, channel: ClientChannel) -> None:
+        """Accept a client channel whose schema routes to an Out, and refuse the rest."""
+        route = _route(channel.schema_name) if channel.encoding == "json" else None
+        if route is None:
+            logger.warning(
+                "foxglove bridge refused client channel",
+                schema=channel.schema_name,
+                encoding=channel.encoding,
+            )
+            return
+        self._routes[(client.id, channel.id)] = route
+        logger.info(
+            "foxglove bridge accepted client channel",
+            schema=channel.schema_name,
+            stream=route.stream,
+        )
+
+    def on_message_data(self, client: Client, client_channel_id: int, data: bytes) -> None:
+        """Publish one client message on the Out its channel routes to."""
+        route = self._routes.get((client.id, client_channel_id))
+        if route is None:
+            return
+        try:
+            msg = route.decode(json.loads(data))
+            getattr(self._bridge, route.stream).publish(msg)
+            route.moving = route.stream == _TELE_CMD_VEL and not msg.is_zero()
+        except Exception:
+            if route.warned:  # a panel republishes at its own rate, so warn on the first drop only
+                return
+            route.warned = True
+            logger.warning(
+                "foxglove bridge dropped a client message", stream=route.stream, exc_info=True
+            )
+
+    def on_client_unadvertise(self, client: Client, client_channel_id: int) -> None:
+        """Stop the robot when a channel that was driving goes away, so no twist stands."""
+        route = self._routes.pop((client.id, client_channel_id), None)
+        if route is None or not route.moving:  # a channel that never drove must not cancel a goal
+            return
+        try:
+            self._bridge.tele_cmd_vel.publish(Twist.zero())  # the SDK calls this on disconnect too
+        except Exception:
+            logger.warning("foxglove bridge could not stop the robot", exc_info=True)
+
+
 class Config(ModuleConfig):
     """Configuration for FoxgloveBridgeModule."""
 
@@ -96,6 +180,9 @@ class FoxgloveBridgeModule(Module):
 
     config: Config
     dedicated_worker = True
+
+    clicked_point: Out[PointStamped]
+    tele_cmd_vel: Out[Twist]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -114,7 +201,12 @@ class FoxgloveBridgeModule(Module):
         self._stopping = False
         self._min_intervals = {t: 1.0 / hz for t, hz in self.config.max_hz.items() if hz > 0}
         self._server = foxglove.start_server(
-            name="dimos", host=self.config.host, port=self.config.port
+            name="dimos",
+            host=self.config.host,
+            port=self.config.port,
+            capabilities=[Capability.ClientPublish],
+            supported_encodings=["json"],  # what the panels publish against a non-ROS server
+            server_listener=_TeleopListener(self),
         )
         self._start_workers()
         self._subscribe(_resolve_pubsubs(self.config))
@@ -267,6 +359,9 @@ def run_bridge(host: str = FOXGLOVE_HOST, port: int = FOXGLOVE_PORT) -> None:
     autoconf(check_only=True)
 
     bridge = FoxgloveBridgeModule(host=host, port=port)
+    # standalone has no coordinator, so the teleop Outs need the topics a blueprint would assign
+    bridge.tele_cmd_vel.transport = make_transport(f"/{_TELE_CMD_VEL}", Twist)
+    bridge.clicked_point.transport = make_transport(f"/{_CLICKED_POINT}", PointStamped)
     bridge.start()
 
     def _shutdown(*_: object) -> None:
