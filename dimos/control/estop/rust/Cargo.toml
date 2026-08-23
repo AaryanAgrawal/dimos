@@ -1,0 +1,18 @@
+[package]
+name = "dimos-estop"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust latched e-stop module for dimos"
+license = "Apache-2.0"
+
+[[bin]]
+name = "estop"
+path = "src/main.rs"
+
+[dependencies]
+dimos-module = { path = "../../../../native/rust/dimos-module" }
+lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+validator = { version = "0.20", features = ["derive"] }
