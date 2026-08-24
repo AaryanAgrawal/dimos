@@ -158,6 +158,7 @@ class G1SonicWBCTask(BaseControlTask):
         self._zmq_sub = None
         self._zmq_pub = None
         self._zmq_started = False
+        self._zmq_failed = False
         self._left_hand: NDArray | None = None
         self._right_hand: NDArray | None = None
         self._last_pose_msg_t = 0.0
@@ -453,7 +454,7 @@ class G1SonicWBCTask(BaseControlTask):
     # -- ZMQ wire endpoint (D2) ------------------------------------------------
 
     def _zmq_start(self) -> None:
-        if self._zmq_started or not self._config.zmq_enabled:
+        if self._zmq_started or self._zmq_failed or not self._config.zmq_enabled:
             return
         try:
             import zmq
@@ -475,7 +476,15 @@ class G1SonicWBCTask(BaseControlTask):
                 pub=self._config.zmq_pub_endpoint,
             )
         except Exception as exc:
-            logger.warning("G1SonicWBCTask ZMQ unavailable", task=self._name, error=repr(exc))
+            # Give up permanently: retrying (and logging) from the 50 Hz
+            # compute tick starves the control loop badly enough to drop the
+            # robot. One warning, then the wire stays off for this run.
+            logger.warning(
+                "G1SonicWBCTask ZMQ unavailable, wire disabled for this run",
+                task=self._name,
+                error=repr(exc),
+            )
+            self._zmq_failed = True
             self._zmq_started = False
 
     def _zmq_poll(self, t_now: float) -> None:
