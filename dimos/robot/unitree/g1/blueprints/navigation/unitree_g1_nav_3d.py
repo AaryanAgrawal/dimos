@@ -31,7 +31,8 @@ from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
-from dimos.navigation.basic_path_follower.module import BasicPathFollower
+from dimos.navigation.dannav.holonomic_tc.module import DanHolonomicTC
+from dimos.navigation.dannav.local_planner.module import DanLocalPlanner
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
@@ -157,9 +158,22 @@ unitree_g1_nav_3d = autoconnect(
         step_threshold_m=g1_max_step_height,
         step_penalty_weight=4.0,
         viz_publish_hz=planner_viz_hz,
-    ).remappings([(MLSPlannerNative, "global_map", "global_map_unused")]),
+    ).remappings(
+        [
+            (MLSPlannerNative, "global_map", "global_map_unused"),
+            # The resampler sits between the planner and the tracker, so the raw path is its own topic.
+            (MLSPlannerNative, "path", "planner_path"),
+        ]
+    ),
     GoalRelay.blueprint(lidar_height=MID360_HEIGHT),
-    BasicPathFollower.blueprint(speed=0.4, heading_gain=0.4, max_angular=0.5),
+    # MLS paths follow voxel edges; the tracker needs them resampled or it chases corners.
+    DanLocalPlanner.blueprint(resample_spacing_m=0.1).remappings(
+        [(DanLocalPlanner, "odom", "start_pose")]
+    ),
+    # start_pose is the ground-projected pose GoalRelay already publishes for the planner.
+    DanHolonomicTC.blueprint(run_profile="walk").remappings(
+        [(DanHolonomicTC, "odom", "start_pose")]
+    ),
     MovementManager.blueprint(),
 ).global_config(n_workers=10, robot_model="unitree_g1")
 
