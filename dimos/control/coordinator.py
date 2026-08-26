@@ -101,6 +101,7 @@ class ControlCoordinatorConfig(ModuleConfig):
     publish_robot_joint_states: bool = False
     joint_state_frame_id: str = "coordinator"
     log_ticks: bool = False
+    max_joint_speed_rad_s: float | None = None
     hardware: list[HardwareComponent] = field(default_factory=lambda: [])
     tasks: list[TaskConfig] = field(default_factory=lambda: [])
 
@@ -194,6 +195,7 @@ class ControlCoordinator(Module):
 
         # Tick loop (created on start)
         self._tick_loop: TickLoop | None = None
+        self._estopped = False
 
         # Subscription handles for card-routed streams, keyed by stream name
         self._stream_unsubs: dict[str, Callable[[], None]] = {}
@@ -711,7 +713,9 @@ class ControlCoordinator(Module):
         """Latch/clear E-STOP on every task exposing ``set_estop``, making them
         inert so the tick loop stops commanding the hardware within one tick.
         Synchronous RPC (not a stream) so E-STOP can't be dropped under load."""
-        if estopped:
+        changed = self._estopped != estopped
+        self._estopped = estopped
+        if estopped and changed:
             logger.warning("E-STOP latched at coordinator")
         with self._task_lock:
             for task in self._tasks.values():
@@ -945,6 +949,8 @@ class ControlCoordinator(Module):
             publish_robot_callback=publish_robot_cb,
             frame_id=self.config.joint_state_frame_id,
             log_ticks=self.config.log_ticks,
+            max_joint_speed_rad_s=self.config.max_joint_speed_rad_s,
+            estop_callback=self.set_estop,
         )
         self._tick_loop.start()
 

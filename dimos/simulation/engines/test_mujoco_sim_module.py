@@ -26,6 +26,7 @@ import pytest
 
 from dimos.simulation.engines.mujoco_engine import CameraFrame, MujocoEngine
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule, MujocoSimModuleConfig
+from dimos.utils.testing.waiting import wait_until
 
 
 class _FakeData:
@@ -314,6 +315,23 @@ def _write_freejoint_xml(path: Path) -> None:
 </mujoco>
 """.strip()
     )
+
+
+@pytest.mark.mujoco
+def test_engine_step_gate_holds_physics_until_controller_is_ready(tmp_path: Path) -> None:
+    robot_xml = tmp_path / "freejoint.xml"
+    _write_freejoint_xml(robot_xml)
+    controller_ready = False
+    engine = MujocoEngine(config_path=robot_xml, headless=True)
+    engine.set_step_gate(lambda: controller_ready)
+    assert engine.connect() is True
+    try:
+        wait_until(lambda: engine.connected, timeout=1.0, interval=0.001)
+        assert engine.data.time == 0.0
+        controller_ready = True
+        wait_until(lambda: engine.data.time > 0.0, timeout=1.0, interval=0.001)
+    finally:
+        engine.disconnect()
 
 
 def _scene_entity(entity_id: str) -> dict[str, object]:

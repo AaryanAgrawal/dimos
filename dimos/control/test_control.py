@@ -909,6 +909,39 @@ class TestArbitration:
 
 
 class TestTickLoop:
+    def test_joint_speed_limit_estops_before_task_compute(self, mock_adapter: Any) -> None:
+        events: list[str] = []
+        mock_adapter.read_joint_velocities.return_value = [0.0, -35.1, 0.0, 0.0, 0.0, 0.0]
+        hardware = {
+            "arm": ConnectedHardware(
+                mock_adapter,
+                HardwareComponent(
+                    hardware_id="arm",
+                    hardware_type=HardwareType.MANIPULATOR,
+                    joints=make_joints("arm", 6),
+                ),
+            )
+        }
+        task = MagicMock()
+        task.name = "task"
+        task.is_active.return_value = True
+        task.claim.return_value = ResourceClaim(joints=frozenset({"arm/joint1"}))
+        task.compute.side_effect = lambda _state: events.append("compute")
+        tick_loop = TickLoop(
+            tick_rate=100.0,
+            hardware=hardware,
+            hardware_lock=threading.Lock(),
+            tasks={"task": task},
+            task_lock=threading.Lock(),
+            joint_to_hardware={f"arm/joint{i + 1}": "arm" for i in range(6)},
+            max_joint_speed_rad_s=35.0,
+            estop_callback=lambda _estopped: events.append("estop") or True,
+        )
+
+        tick_loop._tick()
+
+        assert events == ["estop", "compute"]
+
     def test_tick_loop_starts_and_stops(self, mock_adapter, wait_until):
         component = HardwareComponent(
             hardware_id="arm",

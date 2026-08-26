@@ -85,6 +85,8 @@ class TickLoop:
         publish_robot_callback: Optional callback, called with (hardware_id, msg)
         frame_id: Frame ID for published JointState
         log_ticks: Whether to log tick information
+        max_joint_speed_rad_s: E-stop threshold for measured joint speed in rad/s
+        estop_callback: Called with True before task computation when the threshold is exceeded
     """
 
     def __init__(
@@ -99,6 +101,8 @@ class TickLoop:
         publish_robot_callback: Callable[[HardwareId, JointState], None] | None = None,
         frame_id: str = "coordinator",
         log_ticks: bool = False,
+        max_joint_speed_rad_s: float | None = None,
+        estop_callback: Callable[[bool], bool] | None = None,
     ) -> None:
         self._tick_rate = tick_rate
         self._hardware = hardware
@@ -110,6 +114,9 @@ class TickLoop:
         self._publish_robot_callback = publish_robot_callback
         self._frame_id = frame_id
         self._log_ticks = log_ticks
+        self._max_joint_speed_rad_s = max_joint_speed_rad_s
+        self._estop_callback = estop_callback
+        self._joint_speed_limit_exceeded = False
 
         self._stop_event = threading.Event()
         self._stop_event.set()  # Initially stopped
@@ -178,6 +185,7 @@ class TickLoop:
         self._tick_count += 1
 
         joint_states, per_hardware = self._read_all_hardware()
+        self._check_joint_speed(joint_states)
         imu_states = self._read_all_imu()
         state = CoordinatorState(joints=joint_states, imu=imu_states, t_now=t_now, dt=dt)
 
@@ -205,6 +213,24 @@ class TickLoop:
                 f"{len(joint_states.joint_positions)} joints, "
                 f"{active} active tasks"
             )
+
+    def _check_joint_speed(self, state: JointStateSnapshot) -> None:
+        limit = self._max_joint_speed_rad_s
+        if limit is None or self._estop_callback is None or not state.joint_velocities:
+            return
+        joint, speed = max(state.joint_velocities.items(), key=lambda item: abs(item[1]))
+        if abs(speed) <= limit:
+            self._joint_speed_limit_exceeded = False
+            return
+        if not self._joint_speed_limit_exceeded:
+            logger.error(
+                "Joint-speed E-STOP threshold exceeded",
+                joint=joint,
+                speed_rad_s=round(abs(speed), 3),
+                limit_rad_s=limit,
+            )
+            self._joint_speed_limit_exceeded = True
+        self._estop_callback(True)
 
     def _read_all_hardware(
         self,

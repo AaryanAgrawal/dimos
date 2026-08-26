@@ -326,6 +326,8 @@ REPLAN_INTERVAL_DEFAULT = 1.0
 REPLAN_INTERVAL_RUNNING = 0.1
 BLEND_FRAMES = 8
 LOOK_AHEAD_FRAMES = 2
+SLOW_WALK_MAX_SPEED_M_S = 0.8  # https://github.com/NVIDIA/GR00T-WholeBodyControl/blob/a0732b642c0333077e127a2f56ab0014c196bca4/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/localmotion_kplanner.hpp#L80
+WALK_MAX_SPEED_M_S = 2.5  # https://github.com/NVIDIA/GR00T-WholeBodyControl/blob/a0732b642c0333077e127a2f56ab0014c196bca4/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/localmotion_kplanner.hpp#L81
 
 _IDENTITY_6D = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
 
@@ -924,9 +926,9 @@ class SonicPipeline:
     def _auto_mode(self, speed: float) -> int:
         if speed < 0.05:
             return 0
-        if speed < 0.4:
+        if speed < SLOW_WALK_MAX_SPEED_M_S:
             return 1
-        if speed < 1.2:
+        if speed < WALK_MAX_SPEED_M_S:
             return 2
         return 3
 
@@ -936,15 +938,19 @@ class SonicPipeline:
             traj = self._trajectory
             start = min(self._traj_frame + LOOK_AHEAD_FRAMES, traj.num_frames - 1)
             for n in range(4):
-                f = min(round(start + n * (50.0 / 30.0)), traj.num_frames - 1)
-                context[n, 0:3] = traj.root_pos[f]
-                context[n, 3:7] = traj.root_quat[f]
-                context[n, 7:36] = traj.joint_pos[f][DDS_TO_ONNX]
+                frame_50hz = start + n * (50.0 / 30.0)
+                f0 = min(math.floor(frame_50hz), traj.num_frames - 1)
+                f1 = min(f0 + 1, traj.num_frames - 1)
+                alpha = frame_50hz - f0 if f0 < traj.num_frames - 1 else 0.0
+                context[n, 0:3] = (1.0 - alpha) * traj.root_pos[f0] + alpha * traj.root_pos[f1]
+                context[n, 3:7] = _quat_lerp(traj.root_quat[f0], traj.root_quat[f1], alpha)
+                joints_onnx = (1.0 - alpha) * traj.joint_pos[f0] + alpha * traj.joint_pos[f1]
+                context[n, 7:36] = joints_onnx[DDS_TO_ONNX]
         else:
             root_pos = np.array([0.0, 0.0, DEFAULT_HEIGHT], dtype=np.float32)
             for n in range(4):
                 context[n, 0:3] = root_pos
-                context[n, 3:7] = self._cur_quat
+                context[n, 3] = 1.0
                 context[n, 7:36] = self._cur_q_dds
         return context
 
@@ -1005,7 +1011,7 @@ class SonicPipeline:
             "mode": np.array([mode], dtype=np.int64),
             "movement_direction": np.asarray(move_dir, dtype=np.float32).reshape(1, 3),
             "facing_direction": np.asarray(face_dir, dtype=np.float32).reshape(1, 3),
-            "random_seed": np.array([42], dtype=np.int64),
+            "random_seed": np.array([1234], dtype=np.int64),
             "has_specific_target": np.zeros((1, 1), dtype=np.int64),
             "specific_target_positions": np.zeros((1, 4, 3), dtype=np.float32),
             "specific_target_headings": np.zeros((1, 4), dtype=np.float32),
@@ -1106,8 +1112,8 @@ class SonicPipeline:
         base_quat_wxyz: NDArray,
         gyro_body: NDArray,
         gravity_body: NDArray,
-    ) -> NDArray:
-        """One 50 Hz policy step. Returns 29 position targets, DDS order."""
+    ) -> NDArray | None:
+        """Return one 50 Hz policy target, or None until its reference is ready."""
         self._step_count += 1
 
         # Input sentries: a non-finite or degenerate input poisons the
@@ -1149,7 +1155,7 @@ class SonicPipeline:
         speed = math.hypot(self._vx, self._vy)
         mode = self._mode_override if self._mode_override is not None else self._auto_mode(speed)
         moving = speed > 0.05 or (self._mode_override is not None and mode not in STATIC_MODES)
-        interval = REPLAN_INTERVAL_RUNNING if speed >= 1.2 else REPLAN_INTERVAL_DEFAULT
+        interval = REPLAN_INTERVAL_RUNNING if mode == 3 else REPLAN_INTERVAL_DEFAULT
         traj_low = (
             self._trajectory is not None
             and self._traj_frame > self._trajectory.num_frames - 20
@@ -1170,6 +1176,9 @@ class SonicPipeline:
             self._submit_planner()
             self._replan_timer = 0.0
             self._needs_replan = False
+
+        if not self._use_stream and self._trajectory is None:
+            return None
 
         # Encoder token
         if self._use_stream and self._streamed is not None and self._streamed.timesteps > 0:

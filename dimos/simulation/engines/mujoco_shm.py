@@ -180,9 +180,16 @@ class ManipShmSet:
     def attach(cls, key: str) -> ManipShmSet:
         """Attach to existing SHM buffers created by the sim side."""
         buffers: dict[str, SharedMemory] = {}
-        for buffer_name in _shm_sizes:
-            name = _buffer_name(key, buffer_name)
-            buffers[buffer_name] = _unregister(SharedMemory(name=name))
+        try:
+            for buffer_name in _shm_sizes:
+                name = _buffer_name(key, buffer_name)
+                buffers[buffer_name] = _unregister(SharedMemory(name=name))
+        except (FileNotFoundError, ValueError) as exc:
+            for buffer in buffers.values():
+                buffer.close()
+            if isinstance(exc, ValueError) and str(exc) != "cannot mmap an empty file":
+                raise
+            raise FileNotFoundError(name) from exc
         return cls(**buffers)
 
     def as_list(self) -> list[SharedMemory]:

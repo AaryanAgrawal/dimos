@@ -94,9 +94,9 @@ class G1SonicWBCTaskConfig:
 class G1SonicWBCTask(BaseControlTask):
     """GEAR-SONIC unified 29-DOF whole-body policy as a coordinator task.
 
-    State machine, caches, and safety semantics mirror G1GrootWBCTask:
-    active-but-unarmed echoes measured positions (pure damping), arm()
-    ramps to the SONIC default pose, dry-run computes without emitting.
+    State machine and caches mirror G1GrootWBCTask from arm() onward.
+    Unarmed and dry-run states emit nothing; live arm() blends from the
+    measured pose into SONIC's balancing targets before full policy control.
     """
 
     def __init__(
@@ -138,12 +138,13 @@ class G1SonicWBCTask(BaseControlTask):
         self._state_seen = False
 
         self._active = False
+        self._estopped = False
         self._armed = False
         self._arming = False
         self._arm_pending = False
         self._dry_run = bool(config.auto_dry_run)
         self._arming_duration = 0.0
-        self._arming_start_t = 0.0
+        self._arming_start_t: float | None = None
         self._ramp_start: NDArray[np.float32] | None = None
         self._last_dry_run_log_t = 0.0
         self._last_diag_log_t = 0.0
@@ -175,7 +176,7 @@ class G1SonicWBCTask(BaseControlTask):
         )
 
     def is_active(self) -> bool:
-        return self._active
+        return self._active and not self._estopped
 
     def _refresh_state_caches(self, state: CoordinatorState) -> bool:
         all_present = True
@@ -195,7 +196,7 @@ class G1SonicWBCTask(BaseControlTask):
         return all_present
 
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
-        if not self._active:
+        if not self._active or self._estopped:
             return None
 
         fresh = self._refresh_state_caches(state)
@@ -209,54 +210,28 @@ class G1SonicWBCTask(BaseControlTask):
 
         if self._arm_pending:
             self._ramp_start = current_29.copy()
-            self._arming_start_t = state.t_now
+            self._arming_start_t = None
+            self._last_targets = None
+            self._reset_policy_state()
             if self._arming_duration > 0.0:
                 self._arming = True
                 self._armed = False
                 logger.info(
-                    "G1SonicWBCTask arming: ramp to SONIC default pose",
+                    "G1SonicWBCTask arming: blend into SONIC policy",
                     task=self._name,
                     ramp_seconds=self._arming_duration,
                 )
             else:
                 self._arming = False
                 self._armed = True
-                self._reset_policy_state()
                 logger.info("G1SonicWBCTask armed (no ramp)", task=self._name)
             self._arm_pending = False
 
         if not self._armed and not self._arming:
             self._last_targets = current_29.tolist()
-            return JointCommandOutput(
-                joint_names=self._joint_names_list,
-                positions=self._last_targets,
-                mode=ControlMode.SERVO_POSITION,
-            )
+            return None
 
-        if self._arming:
-            assert self._ramp_start is not None
-            elapsed = state.t_now - self._arming_start_t
-            alpha = (
-                1.0 if self._arming_duration <= 0.0 else min(1.0, elapsed / self._arming_duration)
-            )
-            target = self._ramp_start + alpha * (self._default_29 - self._ramp_start)
-            self._last_targets = target.tolist()
-            if alpha >= 1.0:
-                self._arming = False
-                self._armed = True
-                self._reset_policy_state()
-                logger.info(
-                    "G1SonicWBCTask ramp complete - policy armed",
-                    task=self._name,
-                    mode="dry-run" if self._dry_run else "live",
-                )
-            return JointCommandOutput(
-                joint_names=self._joint_names_list,
-                positions=self._last_targets,
-                mode=ControlMode.SERVO_POSITION,
-            )
-
-        # Armed: run the pipeline at the decimated rate.
+        # Armed or arming: keep SONIC live so the handoff target balances.
         self._tick_count += 1
         if self._tick_count % self._config.decimation != 0:
             if self._dry_run or self._last_targets is None:
@@ -296,8 +271,26 @@ class G1SonicWBCTask(BaseControlTask):
             gyro_body=gyro,
             gravity_body=gravity,
         )
-        self._last_targets = targets_29.tolist()
-        self._zmq_publish_state(state.t_now, q_29, dq_29, quat, gyro, targets_29)
+        if targets_29 is None:
+            return None
+        output_targets = targets_29
+        if self._arming:
+            assert self._ramp_start is not None
+            if self._arming_start_t is None:
+                self._arming_start_t = state.t_now
+            elapsed = state.t_now - self._arming_start_t
+            alpha = min(1.0, elapsed / self._arming_duration)
+            output_targets = self._ramp_start + alpha * (targets_29 - self._ramp_start)
+            if alpha >= 1.0:
+                self._arming = False
+                self._armed = True
+                logger.info(
+                    "G1SonicWBCTask blend complete - policy armed",
+                    task=self._name,
+                    mode="dry-run" if self._dry_run else "live",
+                )
+        self._last_targets = output_targets.tolist()
+        self._zmq_publish_state(state.t_now, q_29, dq_29, quat, gyro, output_targets)
 
         if (state.t_now - self._last_diag_log_t) >= 5.0:
             logger.info("G1SonicWBCTask", task=self._name, **self._pipeline.snapshot())
@@ -305,7 +298,7 @@ class G1SonicWBCTask(BaseControlTask):
 
         if self._dry_run:
             if (state.t_now - self._last_dry_run_log_t) >= 1.0:
-                max_delta = float(np.max(np.abs(targets_29 - current_29)))
+                max_delta = float(np.max(np.abs(output_targets - current_29)))
                 logger.info(
                     "G1SonicWBCTask DRY-RUN",
                     task=self._name,
@@ -637,6 +630,11 @@ class G1SonicWBCTask(BaseControlTask):
         if not self._active:
             logger.warning("G1SonicWBCTask arm() before start(); ignoring", task=self._name)
             return False
+        if self._estopped:
+            logger.warning(
+                "G1SonicWBCTask arm() while E-STOP is latched; ignoring", task=self._name
+            )
+            return False
         if self._armed or self._arming or self._arm_pending:
             return False
         ramp = ramp_seconds if ramp_seconds is not None else self._config.default_ramp_seconds
@@ -660,6 +658,23 @@ class G1SonicWBCTask(BaseControlTask):
         logger.info("G1SonicWBCTask disarmed (holding current pose)", task=self._name)
         return True
 
+    def set_estop(self, estopped: bool) -> None:
+        if self._estopped == estopped:
+            return
+        self._estopped = estopped
+        if estopped:
+            self._armed = False
+            self._arming = False
+            self._arm_pending = False
+            self._ramp_start = None
+            self._arming_start_t = None
+            self._last_targets = None
+            self._reset_policy_state()
+            with self._cmd_lock:
+                self._cmd[:] = 0.0
+                self._last_cmd_time = 0.0
+        logger.warning("G1SonicWBCTask E-STOP changed", task=self._name, estopped=estopped)
+
     def reset_runtime_state(self, reactivate: bool | None = None) -> bool:
         was_armed = self._armed or self._arming or self._arm_pending
         should_reactivate = was_armed if reactivate is None else bool(reactivate)
@@ -668,7 +683,7 @@ class G1SonicWBCTask(BaseControlTask):
         self._arming = False
         self._arm_pending = False
         self._ramp_start = None
-        self._arming_start_t = 0.0
+        self._arming_start_t = None
         self._last_targets = None
         self._state_seen = False
         self._cached_q_29[:] = self._default_29
@@ -678,7 +693,7 @@ class G1SonicWBCTask(BaseControlTask):
             self._cmd[:] = 0.0
             self._last_cmd_time = 0.0
 
-        if self._active and should_reactivate:
+        if self._active and not self._estopped and should_reactivate:
             self._arming_duration = 0.0
             self._arm_pending = True
 
@@ -693,13 +708,22 @@ class G1SonicWBCTask(BaseControlTask):
         new_val = bool(enabled)
         if new_val == self._dry_run:
             return
+        entering_live = self._dry_run and not new_val
         self._dry_run = new_val
         self._last_dry_run_log_t = 0.0
+        if entering_live and (self._armed or self._arming):
+            self._armed = False
+            self._arming = False
+            self._arm_pending = True
+            self._arming_duration = self._config.default_ramp_seconds
+            self._ramp_start = None
+            self._last_targets = None
         logger.info("G1SonicWBCTask dry_run changed", task=self._name, dry_run=new_val)
 
     def state_snapshot(self) -> dict[str, Any]:
         snap = {
             "active": self._active,
+            "estopped": self._estopped,
             "armed": self._armed,
             "arming": self._arming,
             "arm_pending": self._arm_pending,

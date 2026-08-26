@@ -156,6 +156,7 @@ class _WholeBodySimHooks:
         self._latest_pd_kp: NDArray[np.float64] | None = None
         self._latest_pd_kd: NDArray[np.float64] | None = None
         self._latest_pd_tau: NDArray[np.float64] | None = None
+        self.command_received = False
 
     def pre_step(self, engine: MujocoEngine) -> None:
         shm = self._shm
@@ -163,6 +164,7 @@ class _WholeBodySimHooks:
 
         pos_cmd = shm.read_position_command(dof)
         if pos_cmd is not None:
+            self.command_received = True
             if shm.read_command_mode() == CMD_MODE_PD_TAU:
                 self._latest_pd_pos_target = pos_cmd
             else:
@@ -170,6 +172,7 @@ class _WholeBodySimHooks:
 
         vel_cmd = shm.read_velocity_command(dof)
         if vel_cmd is not None:
+            self.command_received = True
             engine.write_joint_command(JointState(velocity=vel_cmd.tolist()))
 
         kp_cmd = shm.read_kp_command(dof)
@@ -284,6 +287,7 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     # MJCFs that reference meshes by bare filename (G1 GR00T, Go2) need this;
     # self-contained MJCFs with on-disk meshes (xarm scene.xml) don't.
     inject_legacy_assets: bool = False
+    wait_for_first_command: bool = False
     robot_sim_spec: RobotSimSpec | None = None
     # MJCF sensor names used to publish IMU. The module probes these in
     # order and uses the first that exists in the model; if none match
@@ -550,6 +554,8 @@ class MujocoSimModule(
             before=self._sim_hooks.pre_step,
             after=self._publish_shm_and_lcm,
         )
+        if self.config.wait_for_first_command:
+            self._engine.set_step_gate(lambda: self._sim_hooks.command_received)
 
         # Start physics (sim thread spawned inside engine.connect()).
         if not self._engine.connect():

@@ -85,6 +85,7 @@ def _imu_from_unitree_wxyz(
 class G1WholeBodyConnectionConfig(ModuleConfig):
     network_interface: str = Field(default="")
     release_sport_mode: bool = True
+    defer_sport_mode_release: bool = False
     publish_rate_hz: float = 500.0
     frame_id: str = "g1_pelvis"
     mode_machine: int = _MODE_MACHINE_G1
@@ -135,6 +136,8 @@ class G1WholeBodyConnection(Module):
         self._mode_machine_verified: bool = False
         # Guards _low_cmd / _low_state / _mode_machine across DDS, publish, and LCM threads.
         self._lock = threading.Lock()
+        self._sport_release_lock = threading.Lock()
+        self._sport_mode_released = False
         self._stop_event = threading.Event()
         self._publish_thread: Thread | None = None
 
@@ -189,9 +192,13 @@ class G1WholeBodyConnection(Module):
 
         self._crc = CRC()
 
-        if self.config.release_sport_mode:
+        self._sport_mode_released = False
+        if self.config.release_sport_mode and self.config.defer_sport_mode_release:
+            logger.info("Waiting for first motor command before releasing sport mode")
+        elif self.config.release_sport_mode:
             logger.info("Releasing sport mode...")
             self._release_sport_mode()
+            self._sport_mode_released = True
         else:
             logger.info("Skipping sport mode release (release_sport_mode=False)")
 
@@ -369,6 +376,21 @@ class G1WholeBodyConnection(Module):
         if msg.num_joints != _NUM_MOTORS:
             logger.warning(f"Expected {_NUM_MOTORS} motor commands, got {msg.num_joints}; ignoring")
             return
+
+        with self._lock:
+            if (
+                self._low_cmd is None
+                or self._crc is None
+                or self._publisher is None
+                or self._mode_machine is None
+            ):
+                return
+
+        if self.config.release_sport_mode and self.config.defer_sport_mode_release:
+            with self._sport_release_lock:
+                if not self._sport_mode_released:
+                    self._release_sport_mode()
+                    self._sport_mode_released = True
 
         with self._lock:
             if (
