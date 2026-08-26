@@ -21,8 +21,8 @@ modes are reachable at runtime through the coordinator RPC surface:
                             {"mode": "HAPPY_DANCE_WALK"})
 
 Usage:
-    dimos --simulation mujoco run unitree-g1-sonic-wbc    # sim
-    dimos run unitree-g1-sonic-wbc                        # real hardware
+    dimos --simulation mujoco run testing    # sim
+    dimos run testing                        # real hardware
 
 Real hardware note: SONIC uses armature-derived PD gains (SONIC_KP/KD),
 NOT the GR00T gain table. Never run this blueprint while the C++
@@ -72,7 +72,7 @@ _cmd_vel_topic = "/cmd_vel" if global_config.simulation else "/g1/cmd_vel"
 _adapter_address: str | Path
 
 if global_config.simulation and global_config.simulation != "mujoco":
-    raise ValueError("unitree-g1-sonic-wbc only supports --simulation mujoco")
+    raise ValueError("testing only supports --simulation mujoco")
 
 if global_config.simulation == "mujoco":
     from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
@@ -239,7 +239,7 @@ _rerun_config: dict[str, Any] = {
 
 _remappings = [(_G1SonicCoordinator, "twist_command", "cmd_vel")]
 
-unitree_g1_sonic_wbc = (
+testing = (
     autoconnect(
         _backend,
         _coordinator,
