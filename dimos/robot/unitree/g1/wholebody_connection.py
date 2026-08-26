@@ -22,6 +22,7 @@ make_humanoid_joints("g1") (left leg -> right leg -> waist -> left arm -> right 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import threading
 from threading import Thread
 import time
@@ -46,6 +47,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
+from dimos.spec.control import EStop
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -62,6 +64,12 @@ _MODE_MACHINE_G1: int = 5
 # from make_humanoid_joints("g1") agrees on the wire-level name -> motor-index mapping.
 G1_JOINT_NAMES: list[str] = make_humanoid_joints("g1")
 assert len(G1_JOINT_NAMES) == _NUM_MOTORS
+
+
+def _tilt_deg(quaternion: tuple[float, float, float, float]) -> float:
+    """Angle between the pelvis z axis and gravity, from the (w,x,y,z) IMU quaternion."""
+    _w, x, y, _z = quaternion
+    return math.degrees(math.acos(min(1.0, max(-1.0, 1.0 - 2.0 * (x * x + y * y)))))
 
 
 def _imu_from_unitree_wxyz(
@@ -84,6 +92,8 @@ def _imu_from_unitree_wxyz(
 
 class G1WholeBodyConnectionConfig(ModuleConfig):
     network_interface: str = Field(default="")
+    # A standing G1 reads about 2 deg; a fall passes 45 deg on the way down.
+    max_tilt_deg: float = Field(default=45.0, gt=0.0, le=90.0)
     release_sport_mode: bool = True
     publish_rate_hz: float = 500.0
     frame_id: str = "g1_pelvis"
@@ -120,9 +130,13 @@ class G1WholeBodyConnection(Module):
     motor_states: Out[JointState]
     imu: Out[Imu]
 
+    # Bare Spec: a blueprint with nothing able to stop the robot fails to build.
+    _estop: EStop
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
+        self._fallen = False
         self._publisher: ChannelPublisher | None = None
         self._subscriber: ChannelSubscriber | None = None
         self._low_cmd: LowCmd_ | None = None
@@ -356,6 +370,7 @@ class G1WholeBodyConnection(Module):
             self._drain_low_state()
             sample = self._snapshot_motor_imu()
             if sample is not None:
+                self._check_upright(sample)
                 self._publish_motor_state_and_imu(now=time.time(), frame_id=frame_id, sample=sample)
 
             next_tick += period
@@ -364,6 +379,16 @@ class G1WholeBodyConnection(Module):
                 time.sleep(sleep_for)
             else:
                 next_tick = time.perf_counter()
+
+    def _check_upright(self, sample: G1LowStateSnapshot) -> None:
+        """Stop the robot the first time it tilts past the limit; never un-stop it."""
+        if self._fallen:
+            return
+        tilt_deg = _tilt_deg(sample.quaternion)
+        if tilt_deg > self.config.max_tilt_deg:
+            self._fallen = True
+            logger.error(f"E-STOP: fallen, tilt {tilt_deg:.0f} deg")
+            self._estop.set_estop(True)
 
     def _on_motor_command(self, msg: MotorCommandArray) -> None:
         if msg.num_joints != _NUM_MOTORS:

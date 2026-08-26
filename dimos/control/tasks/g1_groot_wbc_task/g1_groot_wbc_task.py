@@ -350,6 +350,7 @@ class G1GrootWBCTask(BaseControlTask):
         self._state_seen = False
 
         self._active = False
+        self._estopped = False
         self._armed = False
         self._arming = False
         self._arm_pending = False
@@ -372,6 +373,13 @@ class G1GrootWBCTask(BaseControlTask):
 
     def is_active(self) -> bool:
         return self._active
+
+    def set_estop(self, estopped: bool) -> None:
+        """Latch: compute() emits nothing from here on. Only stop() clears it."""
+        if not estopped:
+            return
+        self._estopped = True
+        self.disarm()
 
     def _refresh_state_caches(self, state: CoordinatorState) -> bool:
         """Pull current q/dq for the full 29 from ``CoordinatorState``.
@@ -404,7 +412,7 @@ class G1GrootWBCTask(BaseControlTask):
         return all_present
 
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
-        if not self._active:
+        if self._estopped or not self._active:
             return None
 
         # Refresh the last-known-good state caches. If we've never seen
@@ -626,6 +634,7 @@ class G1GrootWBCTask(BaseControlTask):
     def stop(self) -> None:
         """Leave the tick loop.  Re-activation resets policy state."""
         self._active = False
+        self._estopped = False
         self._armed = False
         self._arming = False
         self._arm_pending = False

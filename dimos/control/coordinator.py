@@ -93,6 +93,8 @@ class ControlCoordinatorConfig(ModuleConfig):
     """Configuration for the ControlCoordinator."""
 
     tick_rate: float = 100.0
+    # Off unless a blueprint sets it: a robot-agnostic coordinator has no safe default.
+    max_joint_speed_rad_s: float | None = None
     publish_joint_state: bool = True
     # Transitional: goes away once every consumer reads per-robot streams.
     publish_robot_joint_states: bool = False
@@ -174,6 +176,7 @@ class ControlCoordinator(Module):
 
         # Registered tasks
         self._tasks: dict[TaskName, ControlTask] = {}
+        self._estopped = False
         self._task_lock = threading.Lock()
         self._trajectory_task: JointTrajectoryTask | None = None
 
@@ -496,6 +499,8 @@ class ControlCoordinator(Module):
             else:
                 self._task_commands[task.name] = frozenset()
             self._tasks[task.name] = task
+            if self._estopped:  # registered after a trip: it must not come up live
+                self._apply_estop(task.name, task)
             logger.info(f"Added task {task.name}")
         self._sync_stream_subscriptions()
         return True
@@ -700,18 +705,47 @@ class ControlCoordinator(Module):
             joint_state = JointState(name=names, velocity=velocities)
             self._dispatch("joint_command", joint_state)
 
+    def _unsafe(self, state: "CoordinatorState") -> str:
+        """The first joint moving faster than the robot should, or empty when all are fine."""
+        max_speed = self.config.max_joint_speed_rad_s
+        if max_speed is None:
+            return ""
+        for joint, speed in state.joints.joint_velocities.items():
+            if abs(speed) > max_speed:
+                return f"{joint} at {speed:.1f} rad/s"
+        return ""
+
+    def _check_safe(self, state: "CoordinatorState") -> None:
+        """Latch E-STOP the first tick a joint is flailing."""
+        if self._estopped:
+            return
+        reason = self._unsafe(state)
+        if reason:
+            logger.error(f"E-STOP: {reason}")
+            self.set_estop(True)
+
+    def _apply_estop(self, name: "TaskName", task: "ControlTask") -> None:
+        """Push the latch into one task; a task that fails must not silence the others."""
+        handler = getattr(task, "set_estop", None)
+        if not callable(handler):
+            logger.warning(f"Task {name} cannot be E-STOPped: it has no set_estop")
+            return
+        try:
+            handler(self._estopped)
+        except Exception:
+            logger.exception(f"Task {name} raised on set_estop")
+
     @rpc
     def set_estop(self, estopped: bool) -> bool:
         """Latch/clear E-STOP on every task exposing ``set_estop``, making them
         inert so the tick loop stops commanding the hardware within one tick.
         Synchronous RPC (not a stream) so E-STOP can't be dropped under load."""
-        if estopped:
+        if estopped and not self._estopped:
             logger.warning("E-STOP latched at coordinator")
+        self._estopped = estopped
         with self._task_lock:
-            for task in self._tasks.values():
-                handler = getattr(task, "set_estop", None)
-                if callable(handler):
-                    handler(estopped)
+            for name, task in self._tasks.items():
+                self._apply_estop(name, task)
         return True
 
     @rpc
@@ -906,6 +940,7 @@ class ControlCoordinator(Module):
             publish_robot_callback=publish_robot_cb,
             frame_id=self.config.joint_state_frame_id,
             log_ticks=self.config.log_ticks,
+            safety_callback=self._check_safe,
         )
         self._tick_loop.start()
 

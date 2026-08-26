@@ -340,3 +340,9 @@ def test_projected_gravity_matches_reference_quaternion_order() -> None:
         np.array([0.0, -1.0, 0.0]),
         atol=1e-6,
     )
+
+
+def test_set_estop_latches_and_stops_output(task: G1GrootWBCTask) -> None:
+    """E-STOP disarms and compute() emits nothing after it, so the policy cannot drive."""
+    task.set_estop(True)
+    assert task.compute(MagicMock()) is None

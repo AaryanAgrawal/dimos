@@ -99,6 +99,7 @@ class TickLoop:
         publish_robot_callback: Callable[[HardwareId, JointState], None] | None = None,
         frame_id: str = "coordinator",
         log_ticks: bool = False,
+        safety_callback: Callable[[CoordinatorState], None] | None = None,
     ) -> None:
         self._tick_rate = tick_rate
         self._hardware = hardware
@@ -110,6 +111,7 @@ class TickLoop:
         self._publish_robot_callback = publish_robot_callback
         self._frame_id = frame_id
         self._log_ticks = log_ticks
+        self._safety_callback = safety_callback
 
         self._stop_event = threading.Event()
         self._stop_event.set()  # Initially stopped
@@ -180,6 +182,10 @@ class TickLoop:
         joint_states, per_hardware = self._read_all_hardware()
         imu_states = self._read_all_imu()
         state = CoordinatorState(joints=joint_states, imu=imu_states, t_now=t_now, dt=dt)
+
+        # Before anything is computed, so an unsafe robot gets no command this tick.
+        if self._safety_callback is not None:
+            self._safety_callback(state)
 
         commands = self._compute_all_tasks(state)
 

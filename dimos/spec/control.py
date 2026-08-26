@@ -16,6 +16,13 @@ from typing import Protocol
 
 from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.spec.utils import Spec
+
+
+class EStop(Spec, Protocol):
+    """Stops the robot. Declare it bare and a blueprint without a provider fails to build."""
+
+    def set_estop(self, estopped: bool) -> bool: ...
 
 
 class LocalPlanner(Protocol):
