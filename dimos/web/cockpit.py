@@ -156,6 +156,15 @@ class Teleop(Panel):
     boost: float = field(default=2.0, kw_only=True)
     publish_hz: float = field(default=15.0, kw_only=True)
     watchdog_ms: float = field(default=300.0, kw_only=True)
+    forward_m_s: float | None = field(default=None, kw_only=True)
+    backward_m_s: float | None = field(default=None, kw_only=True)
+    left_m_s: float | None = field(default=None, kw_only=True)
+    right_m_s: float | None = field(default=None, kw_only=True)
+    ccw_rad_s: float | None = field(default=None, kw_only=True)
+    cw_rad_s: float | None = field(default=None, kw_only=True)
+    speed_fraction: float = field(default=1.0, kw_only=True)
+    speed_fraction_step: float = field(default=0.05, kw_only=True)
+    max_speed_fraction: float = field(default=1.0, kw_only=True)
     title: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
@@ -165,20 +174,71 @@ class Teleop(Panel):
         _check_rate("boost", self.boost)
         _check_rate("publish_hz", self.publish_hz)
         _check_rate("watchdog_ms", self.watchdog_ms)
+        for name, value in (
+            ("forward_m_s", self.forward_m_s),
+            ("backward_m_s", self.backward_m_s),
+            ("left_m_s", self.left_m_s),
+            ("right_m_s", self.right_m_s),
+            ("ccw_rad_s", self.ccw_rad_s),
+            ("cw_rad_s", self.cw_rad_s),
+        ):
+            if value is not None:
+                _check_rate(name, value)
+        _check_rate("speed_fraction", self.speed_fraction)
+        _check_rate("speed_fraction_step", self.speed_fraction_step)
+        _check_rate("max_speed_fraction", self.max_speed_fraction)
+        if self.speed_fraction > self.max_speed_fraction:
+            raise ValueError("speed_fraction cannot exceed max_speed_fraction")
 
     def _channel_requests(self) -> tuple[ChannelRequest, ...]:
+        params = {
+            "maxLinear": self.max_linear,
+            "maxAngular": self.max_angular,
+            "boost": self.boost,
+            "watchdogMs": self.watchdog_ms,
+        }
+        extended = any(
+            value is not None
+            for value in (
+                self.forward_m_s,
+                self.backward_m_s,
+                self.left_m_s,
+                self.right_m_s,
+                self.ccw_rad_s,
+                self.cw_rad_s,
+            )
+        ) or (
+            self.speed_fraction != 1.0
+            or self.speed_fraction_step != 0.05
+            or self.max_speed_fraction != 1.0
+        )
+        if extended:
+            forward = self.forward_m_s or self.max_linear
+            backward = self.backward_m_s or self.max_linear
+            left = self.left_m_s or self.max_linear
+            right = self.right_m_s or self.max_linear
+            ccw = self.ccw_rad_s or self.max_angular
+            cw = self.cw_rad_s or self.max_angular
+            params |= {
+                "maxLinear": max(forward, backward, left, right) * self.max_speed_fraction,
+                "maxAngular": max(ccw, cw) * self.max_speed_fraction,
+                "forward": forward,
+                "backward": backward,
+                "left": left,
+                "right": right,
+                "ccw": ccw,
+                "cw": cw,
+                "speedFraction": self.speed_fraction,
+                "speedFractionStep": self.speed_fraction_step,
+                "maxSpeedFraction": self.max_speed_fraction,
+            }
         return (
             ChannelRequest(
                 self.stream,
                 "tx",
                 "twist.json.v1",
                 self.publish_hz,
-                {
-                    "maxLinear": self.max_linear,
-                    "maxAngular": self.max_angular,
-                    "boost": self.boost,
-                    "watchdogMs": self.watchdog_ms,
-                },
+                params,
             ),
         )
 

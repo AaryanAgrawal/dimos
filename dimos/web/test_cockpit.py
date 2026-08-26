@@ -107,6 +107,24 @@ def test_default_preset() -> None:
     assert manifest == GO2_MANIFEST
 
 
+def test_teleop_directional_speed_range() -> None:
+    manifest = manifest_of(
+        cockpit(
+            layout=Teleop(
+                forward_m_s=0.96,
+                backward_m_s=0.45,
+                speed_fraction=0.1,
+                max_speed_fraction=3.0,
+            )
+        )
+    )
+    params = manifest["channels"][0]["params"]
+    assert params["forward"] == 0.96
+    assert params["backward"] == 0.45
+    assert params["speedFraction"] == 0.1
+    assert params["maxLinear"] == 2.88
+
+
 def test_blueprint_pickles() -> None:
     # Blueprint kwargs cross the forkserver Pipe; the manifest dict must
     # survive a pickle round-trip unchanged.

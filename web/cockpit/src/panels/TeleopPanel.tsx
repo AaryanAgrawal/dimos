@@ -161,6 +161,36 @@ function TeleopControls({ spec, teleop, ch }: {
             </div>
           ))}
         </div>
+        <div className={styles.speedControl}>
+          <button
+            type="button"
+            onClick={() => machine.changeSpeed(-machine.config.speedFractionStep)}
+          >
+            -
+          </button>
+          <span>{(snap.speedFraction * 100).toFixed(0)}%</span>
+          <button
+            type="button"
+            onClick={() => machine.changeSpeed(machine.config.speedFractionStep)}
+          >
+            +
+          </button>
+          <span>[ / ]</span>
+        </div>
+        <div className={styles.speedReadout}>
+          <span>
+            W/S +{(machine.config.forward * snap.speedFraction).toFixed(2)} / -
+            {(machine.config.backward * snap.speedFraction).toFixed(2)} m/s
+          </span>
+          <span>
+            Q/E +{(machine.config.left * snap.speedFraction).toFixed(2)} / -
+            {(machine.config.right * snap.speedFraction).toFixed(2)} m/s
+          </span>
+          <span>
+            A/D +{(machine.config.ccw * snap.speedFraction).toFixed(2)} / -
+            {(machine.config.cw * snap.speedFraction).toFixed(2)} rad/s
+          </span>
+        </div>
         <div className={styles.readout} data-testid={`teleop-${ch}-readout`}>
           <span>vx {snap.vx.toFixed(2)}</span>
           <span>vy {snap.vy.toFixed(2)}</span>

@@ -23,9 +23,9 @@ from dimos.robot.unitree.g1.blueprints.basic.unitree_g1_groot_wbc import (
     unitree_g1_groot_wbc,
 )
 from dimos.robot.unitree.g1.g1_recorder import G1Recorder
-from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.visualization.rerun.websocket_server import RerunWebSocketServer
+from dimos.web.cockpit import Teleop, cockpit
 from dimos.web.websocket_vis.websocket_vis_module import WebsocketVisModule
 
 _RECORDING_DIR = default_recording_dir()
@@ -41,29 +41,26 @@ _CW_MAX_RAD_S = 1.21
 unitree_g1_groot_characterization = (
     autoconnect(
         unitree_g1_groot_wbc,
-        KeyboardTeleop.blueprint(
-            instance_name="G1 GR00T Characterization",
-            forward_speed_m_s=_FORWARD_MAX_M_S,
-            backward_speed_m_s=_BACKWARD_MAX_M_S,
-            left_speed_m_s=_LEFT_MAX_M_S,
-            right_speed_m_s=_RIGHT_MAX_M_S,
-            ccw_speed_rad_s=_CCW_MAX_RAD_S,
-            cw_speed_rad_s=_CW_MAX_RAD_S,
-            adjustable_speed=True,
-            speed_fraction=0.10,  # Start at 10% so the first command is a low-speed smoke test.
-            speed_fraction_step=0.05,  # Twenty levels resolve the response curve without typing.
-            max_speed_fraction=3.0,  # 100% is the Run-mode reference, not a GR00T limit.
-            ramp_enabled=True,
-            linear_ramp_rate_m_s2=0.10,  # Full forward scale takes 9.6 s to reach.
-            angular_ramp_rate_rad_s2=0.20,  # Full CCW scale takes 9.7 s to reach.
-            boost_multiplier=1.0,
-            slow_multiplier=1.0,
+        cockpit(
+            layout=Teleop(
+                forward_m_s=_FORWARD_MAX_M_S,
+                backward_m_s=_BACKWARD_MAX_M_S,
+                left_m_s=_LEFT_MAX_M_S,
+                right_m_s=_RIGHT_MAX_M_S,
+                ccw_rad_s=_CCW_MAX_RAD_S,
+                cw_rad_s=_CW_MAX_RAD_S,
+                speed_fraction=0.10,
+                speed_fraction_step=0.05,
+                max_speed_fraction=3.0,
+                boost=1.0,
+                publish_hz=20.0,
+                watchdog_ms=300.0,
+            )
         ),
         G1Recorder.blueprint(db_path=str(_RECORDING_DIR / "mem2.db")),
     )
     .remappings(
         [
-            (KeyboardTeleop, "cmd_vel", "tele_cmd_vel"),
             (G1Recorder, "pointlio_odometry", "odometry"),
             (G1Recorder, "pointlio_lidar", "lidar"),
             (G1Recorder, "sim_odom", "odom"),

@@ -73,6 +73,18 @@
   color: #8b949e;
 }
 
+.speedControl {
+  composes: readout;
+  align-items: center;
+}
+
+.speedReadout {
+  composes: readout;
+  flex-direction: column;
+  gap: 0.2rem;
+  text-align: center;
+}
+
 .boost {
   color: #d29922;
 }

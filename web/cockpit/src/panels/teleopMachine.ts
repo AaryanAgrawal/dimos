@@ -34,6 +34,15 @@ export interface TeleopHooks {
 export interface TeleopConfig {
   maxLinear: number;
   maxAngular: number;
+  forward: number;
+  backward: number;
+  left: number;
+  right: number;
+  ccw: number;
+  cw: number;
+  speedFraction: number;
+  speedFractionStep: number;
+  maxSpeedFraction: number;
   boost: number;
   publishHz: number;
 }
@@ -41,6 +50,15 @@ export interface TeleopConfig {
 export const TELEOP_DEFAULTS: TeleopConfig = {
   maxLinear: 0.8,
   maxAngular: 1.0,
+  forward: 0.8,
+  backward: 0.8,
+  left: 0.8,
+  right: 0.8,
+  ccw: 1.0,
+  cw: 1.0,
+  speedFraction: 1.0,
+  speedFractionStep: 0.05,
+  maxSpeedFraction: 1.0,
   boost: 2.0,
   publishHz: 15,
 };
@@ -53,9 +71,31 @@ function finitePositive(value: unknown, fallback: number): number {
  * cadence. Params crossed the wire, so junk falls back per-field. */
 export function teleopConfigFromChannel(spec: ChannelSpec | undefined): TeleopConfig {
   const params = spec?.params ?? {};
+  const maxLinear = finitePositive(params.maxLinear, TELEOP_DEFAULTS.maxLinear);
+  const maxAngular = finitePositive(params.maxAngular, TELEOP_DEFAULTS.maxAngular);
+  const maxSpeedFraction = finitePositive(
+    params.maxSpeedFraction,
+    TELEOP_DEFAULTS.maxSpeedFraction,
+  );
+  const speedFraction = Math.min(
+    finitePositive(params.speedFraction, TELEOP_DEFAULTS.speedFraction),
+    maxSpeedFraction,
+  );
   return {
-    maxLinear: finitePositive(params.maxLinear, TELEOP_DEFAULTS.maxLinear),
-    maxAngular: finitePositive(params.maxAngular, TELEOP_DEFAULTS.maxAngular),
+    maxLinear,
+    maxAngular,
+    forward: finitePositive(params.forward, maxLinear),
+    backward: finitePositive(params.backward, maxLinear),
+    left: finitePositive(params.left, maxLinear),
+    right: finitePositive(params.right, maxLinear),
+    ccw: finitePositive(params.ccw, maxAngular),
+    cw: finitePositive(params.cw, maxAngular),
+    speedFraction,
+    speedFractionStep: finitePositive(
+      params.speedFractionStep,
+      TELEOP_DEFAULTS.speedFractionStep,
+    ),
+    maxSpeedFraction,
     boost: finitePositive(params.boost, TELEOP_DEFAULTS.boost),
     publishHz: finitePositive(spec?.maxHz, TELEOP_DEFAULTS.publishHz),
   };
@@ -64,7 +104,14 @@ export function teleopConfigFromChannel(spec: ChannelSpec | undefined): TeleopCo
 const MOTION_CODES = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE"]);
 const BOOST_CODES = new Set(["ShiftLeft", "ShiftRight"]);
 /** Codes the panel intercepts (preventDefault) while it has focus. */
-export const HANDLED_CODES = new Set([...MOTION_CODES, ...BOOST_CODES, "Space", "Escape"]);
+export const HANDLED_CODES = new Set([
+  ...MOTION_CODES,
+  ...BOOST_CODES,
+  "BracketLeft",
+  "BracketRight",
+  "Space",
+  "Escape",
+]);
 
 /** Release/e-stop burst schedule: send now, repeat twice over 200 ms. */
 const BURST_DELAYS_MS = [100, 200];
@@ -80,6 +127,7 @@ export interface TeleopSnapshot {
   vy: number;
   wz: number;
   boosted: boolean;
+  speedFraction: number;
 }
 
 export class TeleopMachine {
@@ -89,6 +137,7 @@ export class TeleopMachine {
   #reason: string | null = null;
   #pressed = new Set<string>();
   #seq = 0;
+  #speedFraction: number;
   #command = { vx: 0, vy: 0, wz: 0, boosted: false };
   #interval: ReturnType<typeof setInterval> | null = null;
   #burstTimers: ReturnType<typeof setTimeout>[] = [];
@@ -98,6 +147,7 @@ export class TeleopMachine {
   constructor(config: TeleopConfig, send: Pick<TeleopHooks, "control" | "datagram">) {
     this.config = config;
     this.#send = send;
+    this.#speedFraction = config.speedFraction;
     this.#snapshot = this.#buildSnapshot();
   }
 
@@ -176,6 +226,12 @@ export class TeleopMachine {
   }
 
   keyDown(code: string): void {
+    if (code === "BracketLeft" || code === "BracketRight") {
+      if (this.#phase !== "armed") return;
+      const direction = code === "BracketRight" ? 1 : -1;
+      this.changeSpeed(direction * this.config.speedFractionStep);
+      return;
+    }
     if (!MOTION_CODES.has(code) && !BOOST_CODES.has(code)) return;
     if (this.#phase !== "armed") return;
     this.#pressed.add(code);
@@ -184,6 +240,16 @@ export class TeleopMachine {
       this.#sendCurrent();
       this.#interval ??= setInterval(() => this.#sendCurrent(), 1000 / this.config.publishHz);
     }
+    this.#emit();
+  }
+
+  changeSpeed(delta: number): void {
+    if (this.#phase !== "armed") return;
+    this.#speedFraction = Math.min(
+      this.config.maxSpeedFraction,
+      Math.max(0, this.#speedFraction + delta),
+    );
+    if (this.#anyMotionHeld()) this.#sendCurrent();
     this.#emit();
   }
 
@@ -212,12 +278,12 @@ export class TeleopMachine {
     let vx = 0;
     let vy = 0;
     let wz = 0;
-    if (held.has("KeyW")) vx = this.config.maxLinear;
-    if (held.has("KeyS")) vx = -this.config.maxLinear;
-    if (held.has("KeyQ")) vy = this.config.maxLinear;
-    if (held.has("KeyE")) vy = -this.config.maxLinear;
-    if (held.has("KeyA")) wz = this.config.maxAngular;
-    if (held.has("KeyD")) wz = -this.config.maxAngular;
+    if (held.has("KeyW")) vx = this.config.forward * this.#speedFraction;
+    if (held.has("KeyS")) vx = -this.config.backward * this.#speedFraction;
+    if (held.has("KeyQ")) vy = this.config.left * this.#speedFraction;
+    if (held.has("KeyE")) vy = -this.config.right * this.#speedFraction;
+    if (held.has("KeyA")) wz = this.config.ccw * this.#speedFraction;
+    if (held.has("KeyD")) wz = -this.config.cw * this.#speedFraction;
     const boosted = held.has("ShiftLeft") || held.has("ShiftRight");
     const k = boosted ? this.config.boost : 1;
     this.#sendTwist(vx * k, vy * k, wz * k, boosted);
@@ -257,6 +323,7 @@ export class TeleopMachine {
       phase: this.#phase,
       reason: this.#reason,
       pressed: new Set(this.#pressed),
+      speedFraction: this.#speedFraction,
       ...this.#command,
     };
   }

@@ -101,6 +101,26 @@ describe("TeleopMachine", () => {
     expect(twists(sent).at(-1)?.vx).toBe(TELEOP_DEFAULTS.maxLinear);
   });
 
+  it("steps asymmetric directional speeds without exceeding the configured range", () => {
+    const { machine, sent } = makeMachine({
+      ...TELEOP_DEFAULTS,
+      forward: 0.96,
+      backward: 0.45,
+      speedFraction: 0.1,
+      speedFractionStep: 0.05,
+      maxSpeedFraction: 0.15,
+    });
+    machine.arm();
+    machine.onRelayMsg({ t: "teleop_started" });
+    sent.length = 0;
+    machine.keyDown("KeyS");
+    expect(twists(sent).at(-1)?.vx).toBeCloseTo(-0.045);
+    machine.keyDown("BracketRight");
+    expect(twists(sent).at(-1)?.vx).toBeCloseTo(-0.0675);
+    machine.keyDown("BracketRight");
+    expect(snap(machine).speedFraction).toBeCloseTo(0.15);
+  });
+
   it("the last release sends zero now plus two repeats, then goes silent", () => {
     const { machine, sent } = armed();
     machine.keyDown("KeyW");
@@ -198,6 +218,15 @@ describe("teleopConfigFromChannel", () => {
     expect(teleopConfigFromChannel(base)).toEqual({
       maxLinear: 0.5,
       maxAngular: 0.9,
+      forward: 0.5,
+      backward: 0.5,
+      left: 0.5,
+      right: 0.5,
+      ccw: 0.9,
+      cw: 0.9,
+      speedFraction: 1.0,
+      speedFractionStep: 0.05,
+      maxSpeedFraction: 1.0,
       boost: 3,
       publishHz: 10,
     });
