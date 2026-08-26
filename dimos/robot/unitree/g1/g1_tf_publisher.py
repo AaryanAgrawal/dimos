@@ -35,7 +35,13 @@ from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Imu import Imu
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
+from dimos.robot.unitree.g1.wholebody_connection import (
+    G1_JOINT_NAMES,
+    imu_from_unitree_wxyz,
+)
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -110,9 +116,36 @@ def mount_transforms(
     ]
 
 
+def lowstate_messages(sample: Any, ts: float) -> tuple[JointState, Imu]:
+    """Convert one Unitree LowState sample into recordable G1 sensor messages."""
+    states = [sample.motor_state[index] for index in range(len(G1_JOINT_NAMES))]
+    unitree_imu = sample.imu_state
+    quaternion = tuple(float(value) for value in unitree_imu.quaternion)
+    gyroscope = tuple(float(value) for value in unitree_imu.gyroscope)
+    accelerometer = tuple(float(value) for value in unitree_imu.accelerometer)
+    return (
+        JointState(
+            ts=ts,
+            frame_id="g1_pelvis",
+            name=G1_JOINT_NAMES,
+            position=[float(state.q) for state in states],
+            velocity=[float(state.dq) for state in states],
+            effort=[float(state.tau_est) for state in states],
+        ),
+        imu_from_unitree_wxyz(
+            (quaternion[0], quaternion[1], quaternion[2], quaternion[3]),
+            (gyroscope[0], gyroscope[1], gyroscope[2]),
+            (accelerometer[0], accelerometer[1], accelerometer[2]),
+            frame_id="g1_pelvis",
+            ts=ts,
+        ),
+    )
+
+
 class G1TfPublisherConfig(ModuleConfig):
     network_interface: str = "eth0"
     publish_hz: float = Field(default=20.0, gt=0.0)
+    lowstate_hz: float = Field(default=200.0, gt=0.0)
 
 
 class G1TfPublisher(Module):
@@ -121,6 +154,8 @@ class G1TfPublisher(Module):
     config: G1TfPublisherConfig
 
     tf: Out[TFMessage]
+    motor_states: Out[JointState]
+    imu: Out[Imu]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -190,10 +225,12 @@ class G1TfPublisher(Module):
         return subscriber
 
     def _reader_loop(self) -> None:
-        period = 1.0 / self.config.publish_hz
+        period = 1.0 / self.config.lowstate_hz
         while not self._stop_event.is_set():
+            started = time.monotonic()
             sample = self._subscriber.Read(period)
             if sample is not None:
+                self._publish_lowstate(sample, time.time())
                 waist = (
                     float(sample.motor_state[_WAIST_YAW_IDX].q),
                     float(sample.motor_state[_WAIST_ROLL_IDX].q),
@@ -204,7 +241,12 @@ class G1TfPublisher(Module):
                 if not self._waist_live:
                     self._waist_live = True
                     logger.info("First LowState received - waist edge is live")
-            self._stop_event.wait(period)
+            self._stop_event.wait(max(0.0, period - (time.monotonic() - started)))
+
+    def _publish_lowstate(self, sample: Any, now: float) -> None:
+        motor_states, imu = lowstate_messages(sample, now)
+        self.motor_states.publish(motor_states)
+        self.imu.publish(imu)
 
     async def _publish_loop(self) -> None:
         period = 1.0 / self.config.publish_hz

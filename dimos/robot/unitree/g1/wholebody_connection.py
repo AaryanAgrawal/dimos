@@ -64,7 +64,7 @@ G1_JOINT_NAMES: list[str] = make_humanoid_joints("g1")
 assert len(G1_JOINT_NAMES) == _NUM_MOTORS
 
 
-def _imu_from_unitree_wxyz(
+def imu_from_unitree_wxyz(
     quaternion: tuple[float, float, float, float],
     gyroscope: tuple[float, float, float],
     accelerometer: tuple[float, float, float],
@@ -338,7 +338,7 @@ class G1WholeBodyConnection(Module):
         )
         # Unitree reports quaternions as (w,x,y,z); Imu/Quaternion stores (x,y,z,w).
         self.imu.publish(
-            _imu_from_unitree_wxyz(
+            imu_from_unitree_wxyz(
                 sample.quaternion,
                 sample.gyroscope,
                 sample.accelerometer,

@@ -16,6 +16,7 @@
 import os
 import sys
 import threading
+import time
 from typing import Any
 
 import pygame
@@ -57,6 +58,48 @@ _HELP_TEXT_COLOR = (150, 150, 150)
 _INDICATOR_RADIUS = 15
 
 
+def _approach(current: float, target: float, max_delta: float) -> float:
+    """Move current toward target by at most max_delta."""
+    if current < target:
+        return min(current + max_delta, target)
+    return max(current - max_delta, target)
+
+
+def _bounded_fraction(current: float, delta: float, maximum: float = 1.0) -> float:
+    return min(maximum, max(0.0, current + delta))
+
+
+def _directional_twist(
+    keys_held: set[int],
+    *,
+    forward_speed_m_s: float,
+    backward_speed_m_s: float,
+    left_speed_m_s: float,
+    right_speed_m_s: float,
+    ccw_speed_rad_s: float,
+    cw_speed_rad_s: float,
+    fraction: float,
+    multiplier: float,
+) -> Twist:
+    twist = Twist(linear=Vector3(), angular=Vector3())
+    if pygame.K_w in keys_held:
+        twist.linear.x = forward_speed_m_s * fraction
+    if pygame.K_s in keys_held:
+        twist.linear.x = -backward_speed_m_s * fraction
+    if pygame.K_q in keys_held:
+        twist.linear.y = left_speed_m_s * fraction
+    if pygame.K_e in keys_held:
+        twist.linear.y = -right_speed_m_s * fraction
+    if pygame.K_a in keys_held:
+        twist.angular.z = ccw_speed_rad_s * fraction
+    if pygame.K_d in keys_held:
+        twist.angular.z = -cw_speed_rad_s * fraction
+    twist.linear.x *= multiplier
+    twist.linear.y *= multiplier
+    twist.angular.z *= multiplier
+    return twist
+
+
 class KeyboardTeleop(Module):
     """Pygame-based keyboard control. Outputs Twist on cmd_vel.
 
@@ -93,6 +136,19 @@ class KeyboardTeleop(Module):
         slow_multiplier: float = DEFAULT_SLOW_MULTIPLIER,
         publish_only_when_active: bool = False,
         disable_movement: bool = False,
+        forward_speed_m_s: float | None = None,
+        backward_speed_m_s: float | None = None,
+        left_speed_m_s: float | None = None,
+        right_speed_m_s: float | None = None,
+        ccw_speed_rad_s: float | None = None,
+        cw_speed_rad_s: float | None = None,
+        adjustable_speed: bool = False,
+        speed_fraction: float = 1.0,
+        speed_fraction_step: float = 0.05,
+        max_speed_fraction: float = 1.0,
+        ramp_enabled: bool = False,
+        linear_ramp_rate_m_s2: float = 0.25,
+        angular_ramp_rate_rad_s2: float = 0.5,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -111,7 +167,23 @@ class KeyboardTeleop(Module):
         # from another source (e.g. nav-stack-driven precision controller)
         # but still want the operator's live e_max input.
         self.disable_movement = disable_movement
+        self.forward_speed_m_s = linear_speed if forward_speed_m_s is None else forward_speed_m_s
+        self.backward_speed_m_s = linear_speed if backward_speed_m_s is None else backward_speed_m_s
+        self.left_speed_m_s = linear_speed if left_speed_m_s is None else left_speed_m_s
+        self.right_speed_m_s = linear_speed if right_speed_m_s is None else right_speed_m_s
+        self.ccw_speed_rad_s = angular_speed if ccw_speed_rad_s is None else ccw_speed_rad_s
+        self.cw_speed_rad_s = angular_speed if cw_speed_rad_s is None else cw_speed_rad_s
+        self.adjustable_speed = adjustable_speed
+        self.max_speed_fraction = max(1.0, max_speed_fraction)
+        self.speed_fraction = min(self.max_speed_fraction, max(0.0, speed_fraction))
+        self.speed_fraction_step = speed_fraction_step
+        self.ramp_enabled = ramp_enabled
+        self.linear_ramp_rate_m_s2 = linear_ramp_rate_m_s2
+        self.angular_ramp_rate_rad_s2 = angular_ramp_rate_rad_s2
+        self._sent_twist = Twist()
+        self._last_control_t = time.monotonic()
         self._was_active = False
+        self._window_height = 500 if adjustable_speed else _WINDOW_HEIGHT
         # Namespaced instances (e.g. "robot0/keyboardteleop") get their own
         # window title so multi-robot teleop windows are distinguishable.
         self._window_title = self.config.instance_name or "Keyboard Teleop"
@@ -122,6 +194,8 @@ class KeyboardTeleop(Module):
 
         self._keys_held = set()
         self._stop_event.clear()
+        self._sent_twist = Twist()
+        self._last_control_t = time.monotonic()
 
         self._thread = threading.Thread(target=self._pygame_loop, daemon=True)
         self._thread.start()
@@ -146,7 +220,9 @@ class KeyboardTeleop(Module):
             raise RuntimeError("_keys_held not initialized")
 
         pygame.init()
-        self._screen = pygame.display.set_mode((_WINDOW_WIDTH, _WINDOW_HEIGHT), pygame.SWSURFACE)
+        self._screen = pygame.display.set_mode(
+            (_WINDOW_WIDTH, self._window_height), pygame.SWSURFACE
+        )
         pygame.display.set_caption(self._window_title)
         self._clock = pygame.time.Clock()
         self._font = pygame.font.Font(None, _FONT_SIZE)
@@ -164,6 +240,7 @@ class KeyboardTeleop(Module):
                         stop_twist = Twist()
                         stop_twist.linear = Vector3(0, 0, 0)
                         stop_twist.angular = Vector3(0, 0, 0)
+                        self._sent_twist = stop_twist
                         self.cmd_vel.publish(stop_twist)
                         logger.warning("EMERGENCY STOP!")
                     elif event.key == pygame.K_ESCAPE:
@@ -175,39 +252,22 @@ class KeyboardTeleop(Module):
                         self.operator_command.publish(Int8(GATE_SKIP))
                     elif event.key == pygame.K_BACKSPACE:
                         self.operator_command.publish(Int8(GATE_QUIT))
+                    elif self.adjustable_speed and event.key == pygame.K_LEFTBRACKET:
+                        self._change_speed_fraction(-self.speed_fraction_step)
+                    elif self.adjustable_speed and event.key == pygame.K_RIGHTBRACKET:
+                        self._change_speed_fraction(self.speed_fraction_step)
+                    elif self.adjustable_speed and event.key == pygame.K_HOME:
+                        self.speed_fraction = 0.0
+                    elif self.adjustable_speed and event.key == pygame.K_END:
+                        self.speed_fraction = self.max_speed_fraction
+                    elif self.adjustable_speed and event.key == pygame.K_r:
+                        self.ramp_enabled = not self.ramp_enabled
                     elif pygame.K_0 <= event.key <= pygame.K_9:
                         # 0 → 0.0 m, 1 → 0.1 m, …, 9 → 0.9 m corridor half-width.
                         self.e_max.publish(Float32(data=(event.key - pygame.K_0) * 0.1))
 
                 elif event.type == pygame.KEYUP:
                     self._keys_held.discard(event.key)
-
-            # Generate Twist message from held keys
-            twist = Twist()
-            twist.linear = Vector3(0, 0, 0)
-            twist.angular = Vector3(0, 0, 0)
-
-            # Movement keys (WASD/QE) — guarded by disable_movement so the
-            # window can run as a pure e_max slider (0-9 keys stay live in
-            # the KEYDOWN handler above).
-            if not self.disable_movement:
-                # Forward/backward (W/S)
-                if pygame.K_w in self._keys_held:
-                    twist.linear.x = self.linear_speed
-                if pygame.K_s in self._keys_held:
-                    twist.linear.x = -self.linear_speed
-
-                # Strafe left/right (Q/E)
-                if pygame.K_q in self._keys_held:
-                    twist.linear.y = self.linear_speed
-                if pygame.K_e in self._keys_held:
-                    twist.linear.y = -self.linear_speed
-
-                # Turning (A/D)
-                if pygame.K_a in self._keys_held:
-                    twist.angular.z = self.angular_speed
-                if pygame.K_d in self._keys_held:
-                    twist.angular.z = -self.angular_speed
 
             # Apply speed modifiers (Shift = boost, Ctrl = slow)
             speed_multiplier = 1.0
@@ -216,9 +276,8 @@ class KeyboardTeleop(Module):
             elif pygame.K_LCTRL in self._keys_held or pygame.K_RCTRL in self._keys_held:
                 speed_multiplier = self.slow_multiplier
 
-            twist.linear.x *= speed_multiplier
-            twist.linear.y *= speed_multiplier
-            twist.angular.z *= speed_multiplier
+            target_twist = self._target_twist(speed_multiplier)
+            twist = self._ramped_twist(target_twist)
 
             if self.publish_only_when_active:
                 active = twist.linear.x != 0 or twist.linear.y != 0 or twist.angular.z != 0
@@ -240,6 +299,58 @@ class KeyboardTeleop(Module):
 
         pygame.quit()
 
+    def _change_speed_fraction(self, delta: float) -> None:
+        self.speed_fraction = _bounded_fraction(self.speed_fraction, delta, self.max_speed_fraction)
+
+    def _target_twist(self, multiplier: float) -> Twist:
+        if self.disable_movement or self._keys_held is None:
+            return Twist(linear=Vector3(), angular=Vector3())
+        fraction = self.speed_fraction if self.adjustable_speed else 1.0
+        return _directional_twist(
+            self._keys_held,
+            forward_speed_m_s=self.forward_speed_m_s,
+            backward_speed_m_s=self.backward_speed_m_s,
+            left_speed_m_s=self.left_speed_m_s,
+            right_speed_m_s=self.right_speed_m_s,
+            ccw_speed_rad_s=self.ccw_speed_rad_s,
+            cw_speed_rad_s=self.cw_speed_rad_s,
+            fraction=fraction,
+            multiplier=multiplier,
+        )
+
+    def _ramped_twist(self, target: Twist) -> Twist:
+        now = time.monotonic()
+        dt = min(0.1, max(0.0, now - self._last_control_t))
+        self._last_control_t = now
+        if not self.ramp_enabled:
+            self._sent_twist = target
+            return target
+        self._sent_twist = Twist(
+            linear=Vector3(
+                _approach(
+                    self._sent_twist.linear.x,
+                    target.linear.x,
+                    self.linear_ramp_rate_m_s2 * dt,
+                ),
+                _approach(
+                    self._sent_twist.linear.y,
+                    target.linear.y,
+                    self.linear_ramp_rate_m_s2 * dt,
+                ),
+                0.0,
+            ),
+            angular=Vector3(
+                0.0,
+                0.0,
+                _approach(
+                    self._sent_twist.angular.z,
+                    target.angular.z,
+                    self.angular_ramp_rate_rad_s2 * dt,
+                ),
+            ),
+        )
+        return self._sent_twist
+
     def _update_display(self, twist: Twist) -> None:
         if self._screen is None or self._font is None or self._keys_held is None:
             raise RuntimeError("Not initialized correctly")
@@ -250,10 +361,13 @@ class KeyboardTeleop(Module):
 
         # Determine active speed multiplier
         speed_mult_text = ""
+        speed_multiplier = 1.0
         if pygame.K_LSHIFT in self._keys_held or pygame.K_RSHIFT in self._keys_held:
             speed_mult_text = f" [BOOST {self.boost_multiplier:g}x]"
+            speed_multiplier = self.boost_multiplier
         elif pygame.K_LCTRL in self._keys_held or pygame.K_RCTRL in self._keys_held:
             speed_mult_text = f" [SLOW {self.slow_multiplier:g}x]"
+            speed_multiplier = self.slow_multiplier
 
         texts = [
             self._window_title + speed_mult_text,
@@ -264,6 +378,18 @@ class KeyboardTeleop(Module):
             "",
             "Keys: " + ", ".join([pygame.key.name(k).upper() for k in self._keys_held if k < 256]),
         ]
+        if self.adjustable_speed:
+            mode = "RAMP" if self.ramp_enabled else "STEP"
+            texts.insert(2, f"Setpoint: {self.speed_fraction * 100:.0f}% [{mode}]")
+            scale = self.speed_fraction * speed_multiplier
+            texts[3:3] = [
+                f"Selected W/S: +{self.forward_speed_m_s * scale:.2f} / "
+                f"-{self.backward_speed_m_s * scale:.2f} m/s",
+                f"Selected Q/E: +{self.left_speed_m_s * scale:.2f} / "
+                f"-{self.right_speed_m_s * scale:.2f} m/s",
+                f"Selected A/D: +{self.ccw_speed_rad_s * scale:.2f} / "
+                f"-{self.cw_speed_rad_s * scale:.2f} rad/s",
+            ]
 
         for i, text in enumerate(texts):
             if text:
@@ -277,7 +403,7 @@ class KeyboardTeleop(Module):
         else:
             pygame.draw.circle(self._screen, (0, 255, 0), (450, 30), _INDICATOR_RADIUS)
 
-        y_pos = 280
+        y_pos = self._window_height - 120 if self.adjustable_speed else 280
         if self.disable_movement:
             help_texts = [
                 "Movement disabled (e_max slider mode)",
@@ -293,6 +419,13 @@ class KeyboardTeleop(Module):
                 "Enter: Advance | K: Skip | Backspace: Quit (tools)",
                 "0-9: e_max corridor (0.0-0.9 m, for RG)",
             ]
+            if self.adjustable_speed:
+                help_texts = [
+                    "WS: Move | AD: Turn | QE: Strafe",
+                    f"[ / ]: -/+ {self.speed_fraction_step * 100:g}% | "
+                    f"Home/End: 0/{self.max_speed_fraction * 100:g}% | R: Step/Ramp",
+                    "Space: immediate zero | ESC: Quit",
+                ]
         for text in help_texts:
             surf = self._font.render(text, True, _HELP_TEXT_COLOR)
             self._screen.blit(surf, (20, y_pos))

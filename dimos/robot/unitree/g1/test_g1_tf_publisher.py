@@ -15,6 +15,7 @@
 """The published mount tree composes back to the g1.urdf geometry."""
 
 import math
+from types import SimpleNamespace
 
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -23,6 +24,7 @@ from dimos.robot.unitree.g1.g1_tf_publisher import (
     D435_PITCH,
     MID360_PITCH,
     base_to_torso,
+    lowstate_messages,
     mount_transforms,
     torso_to_mid360,
 )
@@ -123,3 +125,45 @@ def test_pelvis_height_matches_config_note() -> None:
 
 def test_mid360_pitch_constant_matches_urdf() -> None:
     assert math.isclose(MID360_PITCH, 0.04014257279586953)
+
+
+def test_lowstate_messages_preserve_all_joint_and_pelvis_imu_values() -> None:
+    """Every measured motor and pelvis IMU field survives the LowState conversion."""
+    motors = [SimpleNamespace(q=i + 0.1, dq=i + 0.2, tau_est=i + 0.3) for i in range(29)]
+    sample = SimpleNamespace(
+        motor_state=motors,
+        imu_state=SimpleNamespace(
+            quaternion=[1.0, 0.1, 0.2, 0.3],
+            gyroscope=[0.4, 0.5, 0.6],
+            accelerometer=[0.7, 0.8, 9.81],
+        ),
+    )
+
+    joints, imu = lowstate_messages(sample, 42.5)
+
+    assert (
+        len(joints.name) == len(joints.position) == len(joints.velocity) == len(joints.effort) == 29
+    )
+    assert joints.position[0] == 0.1
+    assert joints.velocity[-1] == 28.2
+    assert joints.effort[-1] == 28.3
+    assert joints.frame_id == "g1_pelvis"
+    assert joints.ts == 42.5
+    assert (imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w) == (
+        0.1,
+        0.2,
+        0.3,
+        1.0,
+    )
+    assert (imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z) == (
+        0.4,
+        0.5,
+        0.6,
+    )
+    assert (imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z) == (
+        0.7,
+        0.8,
+        9.81,
+    )
+    assert imu.frame_id == "g1_pelvis"
+    assert imu.ts == 42.5
