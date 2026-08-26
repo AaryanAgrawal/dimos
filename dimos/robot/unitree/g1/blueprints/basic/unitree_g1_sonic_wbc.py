@@ -23,6 +23,8 @@ modes are reachable at runtime through the coordinator RPC surface:
 Usage:
     dimos --simulation mujoco run g1-sonic-testing    # sim
     dimos run g1-sonic-testing                        # real hardware
+    uv run python \
+        dimos/robot/unitree/g1/blueprints/basic/demo_g1_sonic_real_hardware_dry_run.py
 
 Real hardware note: SONIC uses armature-derived PD gains (SONIC_KP/KD),
 NOT the GR00T gain table. Never run this blueprint while the C++
