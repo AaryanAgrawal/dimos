@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "recording": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/data/g1_groot_characterization_2026-08-27.db",
+    "recording_sha256": "d402164b15f745ccdd917b76093768263c6d470cdf012c5f7f8fb92096d43df4",
+    "git_sha": "74a94aabd671d096834771ca42782a21a7afc915",
+    "git_dirty": false,
+    "seed": 0,
+    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/plant_fit.py data/g1_groot_characterization_2026-08-27.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/tuned --seed=0 --candidate 0.013836205 0.000563844 3.25"
+  },
+  "method": {
+    "mode": "candidate_validation",
+    "train_validation_split": "alternating levels from each direction's highest eight",
+    "open_loop_channels": [
+      "joint_q",
+      "joint_dq",
+      "joint_tau",
+      "root_p",
+      "root_R"
+    ],
+    "bounds": {
+      "leg_armature_kg_m2": [
+        0.005,
+        0.08
+      ],
+      "leg_damping_nm_s_rad": [
+        0.0001,
+        0.08
+      ],
+      "leg_frictionloss_nm": [
+        0.1,
+        3.5
+      ]
+    },
+    "acceptance": {
+      "heldout_normalized_residual_lt": 1.0,
+      "transient_mean_nrmse_lt": 0.15,
+      "transient_worst_nrmse_lt": 0.2
+    },
+    "promotion_gate": "full actual DimOS blueprint replay with the same response thresholds"
+  },
+  "evaluations": [
+    {
+      "physics": {
+        "leg_armature_kg_m2": 0.013836205,
+        "leg_damping_nm_s_rad": 0.000563844,
+        "leg_frictionloss_nm": 3.25,
+        "foot_slide_friction": 1.0,
+        "foot_contact_time_constant_s": 0.02
+      },
+      "train_normalized_residual": {
+        "mean": 0.8739006853475186,
+        "by_channel": {
+          "joint_q": 0.8681589590387868,
+          "joint_dq": 0.8193609852984388,
+          "joint_tau": 0.8825000766341712,
+          "root_p": 0.9394629188645296,
+          "root_R": 0.8600204869016671
+        },
+        "by_direction": {
+          "forward": 0.8770848023724571,
+          "backward": 0.8391237537102686,
+          "left": 0.8702693064043923,
+          "right": 0.900989547116283,
+          "ccw": 0.867250805222892,
+          "cw": 0.8886858972588187
+        }
+      },
+      "validation_normalized_residual": {
+        "mean": 0.8765782142542133,
+        "by_channel": {
+          "joint_q": 0.8662499697781759,
+          "joint_dq": 0.817065016399395,
+          "joint_tau": 0.8818724874901358,
+          "root_p": 0.9361948041084199,
+          "root_R": 0.8815087934949403
+        },
+        "by_direction": {
+          "forward": 0.8962644329080302,
+          "backward": 0.8827928545403004,
+          "left": 0.8817414936909523,
+          "right": 0.8539040995899819,
+          "ccw": 0.8841897642122308,
+          "cw": 0.8605766405837846
+        }
+      },
+      "transient_nrmse_by_direction": {
+        "forward": 0.06978176168019466,
+        "backward": 0.16111826726152406,
+        "left": 0.17824029287049,
+        "right": 0.15855748771635167,
+        "ccw": 0.14021705184466396,
+        "cw": 0.15576380643685858
+      },
+      "transient_mean_nrmse": 0.14394644463501383,
+      "transient_worst_nrmse": 0.17824029287049,
+      "min_pelvis_height_m": 0.7167670142994315,
+      "max_abs_roll_rad": 0.12248905927856017,
+      "max_abs_pitch_rad": 0.166971536347867,
+      "screen_passed": true
+    }
+  ],
+  "best": {
+    "physics": {
+      "leg_armature_kg_m2": 0.013836205,
+      "leg_damping_nm_s_rad": 0.000563844,
+      "leg_frictionloss_nm": 3.25,
+      "foot_slide_friction": 1.0,
+      "foot_contact_time_constant_s": 0.02
+    },
+    "train_normalized_residual": {
+      "mean": 0.8739006853475186,
+      "by_channel": {
+        "joint_q": 0.8681589590387868,
+        "joint_dq": 0.8193609852984388,
+        "joint_tau": 0.8825000766341712,
+        "root_p": 0.9394629188645296,
+        "root_R": 0.8600204869016671
+      },
+      "by_direction": {
+        "forward": 0.8770848023724571,
+        "backward": 0.8391237537102686,
+        "left": 0.8702693064043923,
+        "right": 0.900989547116283,
+        "ccw": 0.867250805222892,
+        "cw": 0.8886858972588187
+      }
+    },
+    "validation_normalized_residual": {
+      "mean": 0.8765782142542133,
+      "by_channel": {
+        "joint_q": 0.8662499697781759,
+        "joint_dq": 0.817065016399395,
+        "joint_tau": 0.8818724874901358,
+        "root_p": 0.9361948041084199,
+        "root_R": 0.8815087934949403
+      },
+      "by_direction": {
+        "forward": 0.8962644329080302,
+        "backward": 0.8827928545403004,
+        "left": 0.8817414936909523,
+        "right": 0.8539040995899819,
+        "ccw": 0.8841897642122308,
+        "cw": 0.8605766405837846
+      }
+    },
+    "transient_nrmse_by_direction": {
+      "forward": 0.06978176168019466,
+      "backward": 0.16111826726152406,
+      "left": 0.17824029287049,
+      "right": 0.15855748771635167,
+      "ccw": 0.14021705184466396,
+      "cw": 0.15576380643685858
+    },
+    "transient_mean_nrmse": 0.14394644463501383,
+    "transient_worst_nrmse": 0.17824029287049,
+    "min_pelvis_height_m": 0.7167670142994315,
+    "max_abs_roll_rad": 0.12248905927856017,
+    "max_abs_pitch_rad": 0.166971536347867,
+    "screen_passed": true
+  },
+  "mujoco_model": {
+    "path": "dimos/robot/unitree/g1/characterization/results/2026-08-27/tuned/g1_groot_tuned.mjb",
+    "sha256": "dc230bf19876cb851823ad91eaa90d430389ddbeb9df083f8eb88a46bbe98162"
+  }
+}

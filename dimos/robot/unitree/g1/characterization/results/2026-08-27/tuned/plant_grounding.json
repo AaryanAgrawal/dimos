@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "hardware_recording_sha256": "d402164b15f745ccdd917b76093768263c6d470cdf012c5f7f8fb92096d43df4",
+    "git_sha": "74a94aabd671d096834771ca42782a21a7afc915",
+    "git_dirty": false,
+    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-corrected-v2.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/tuned --video --video-speed=6",
+    "seed": 0,
+    "groot_model_sha256": {
+      "balance.onnx": "f645da599d4ca3d29ed273c8f4712620bb680d34977469ca3aeabe5bb9631c18",
+      "walk.onnx": "7c82255b6905ffcc4468fa7f8ddcf7b70db168cf1042107ccab887cb6a8e5407"
+    },
+    "mujoco_model_sha256": "548ab7da31800639e10002ae6de6871ae2f9a9aa010faa3b638e28a49eca6a50",
+    "simulation_label": "SIMULATED open-loop MuJoCo plant"
+  },
+  "method": {
+    "n_segments": 8,
+    "segment_duration_s": 8.0,
+    "physics_dt_s": 0.005,
+    "reinitialization_clip_range_s": [
+      0.05,
+      0.8
+    ],
+    "physics_override": null
+  },
+  "health": {
+    "motor_command_rate_hz": 99.08467889583162,
+    "motor_state_rate_hz": 495.37073343569153,
+    "imu_rate_hz": 494.9615293839981,
+    "motor_command_max_gap_s": 0.28148984909057617,
+    "motor_state_max_gap_s": 0.16093969345092773,
+    "imu_max_gap_s": 0.16093969345092773,
+    "overlap_s": 517.3973350524902,
+    "dof": 29,
+    "status": "warn",
+    "warnings": [
+      "motor_command timing is too sparse for 50 Hz policy replay",
+      "motor_states timing is too sparse for plant scoring",
+      "IMU timing is too sparse for plant initialization"
+    ]
+  },
+  "groot_command_contract": {
+    "kp_max_abs_error_nm_rad": 0.0,
+    "kd_max_abs_error_nm_s_rad": 0.0,
+    "dq_max_abs_rad_s": 0.0,
+    "matching_command_fraction": 1.0,
+    "joint_order_matches": true,
+    "status": "pass"
+  },
+  "plans": [
+    {
+      "seed": 0,
+      "start_epoch_s": 1787787383.7371674,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 18
+    },
+    {
+      "seed": 1,
+      "start_epoch_s": 1787787424.0310366,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 21
+    },
+    {
+      "seed": 2,
+      "start_epoch_s": 1787787473.1348162,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 21
+    },
+    {
+      "seed": 3,
+      "start_epoch_s": 1787787535.2512755,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 21
+    },
+    {
+      "seed": 4,
+      "start_epoch_s": 1787787649.6552715,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 16
+    },
+    {
+      "seed": 5,
+      "start_epoch_s": 1787787719.6628041,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 19
+    },
+    {
+      "seed": 6,
+      "start_epoch_s": 1787787763.8442395,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 19
+    },
+    {
+      "seed": 7,
+      "start_epoch_s": 1787787835.340157,
+      "duration_s": 7.995182991027832,
+      "reinitializations": 18
+    }
+  ],
+  "scores": [
+    {
+      "joint_q_rmse_rad": 0.022343759137126905,
+      "joint_q_p90_abs_rad": 0.026073407159029914,
+      "joint_dq_rmse_rad_s": 0.26349735945496594,
+      "joint_dq_p90_abs_rad_s": 0.21325931900961734,
+      "joint_tau_rmse_nm": 2.2273046782553885,
+      "joint_tau_p90_abs_nm": 3.028602619669278,
+      "root_position_rmse_m": 0.03769156957942045,
+      "root_position_p90_m": 0.04974435903405393,
+      "root_rotation_rmse_rad": 0.03745531303069681,
+      "root_rotation_p90_rad": 0.06844906139728311,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.021799967355747886,
+      "joint_q_p90_abs_rad": 0.0291355887899223,
+      "joint_dq_rmse_rad_s": 0.29948528505586103,
+      "joint_dq_p90_abs_rad_s": 0.28700282829674023,
+      "joint_tau_rmse_nm": 2.430551736500983,
+      "joint_tau_p90_abs_nm": 3.073125901216784,
+      "root_position_rmse_m": 0.036523486301502345,
+      "root_position_p90_m": 0.04303065929068921,
+      "root_rotation_rmse_rad": 0.03402310540618169,
+      "root_rotation_p90_rad": 0.05835932124336291,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.018627747285449282,
+      "joint_q_p90_abs_rad": 0.024470502088922718,
+      "joint_dq_rmse_rad_s": 0.2946217700083559,
+      "joint_dq_p90_abs_rad_s": 0.28060375684139094,
+      "joint_tau_rmse_nm": 2.1702519741471344,
+      "joint_tau_p90_abs_nm": 2.679163683951127,
+      "root_position_rmse_m": 0.033906592368629467,
+      "root_position_p90_m": 0.03983142465741644,
+      "root_rotation_rmse_rad": 0.019887042796602954,
+      "root_rotation_p90_rad": 0.031246610784034238,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.029089189433679448,
+      "joint_q_p90_abs_rad": 0.04327935887173311,
+      "joint_dq_rmse_rad_s": 0.35726458611494916,
+      "joint_dq_p90_abs_rad_s": 0.45435818781984744,
+      "joint_tau_rmse_nm": 3.495037475980897,
+      "joint_tau_p90_abs_nm": 4.825329367601839,
+      "root_position_rmse_m": 0.051456395760007136,
+      "root_position_p90_m": 0.07463271202720434,
+      "root_rotation_rmse_rad": 0.055287030811578486,
+      "root_rotation_p90_rad": 0.09291072751945223,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.033691298515205026,
+      "joint_q_p90_abs_rad": 0.046667960220808866,
+      "joint_dq_rmse_rad_s": 0.41857012200807403,
+      "joint_dq_p90_abs_rad_s": 0.5487222964349167,
+      "joint_tau_rmse_nm": 3.998458254948839,
+      "joint_tau_p90_abs_nm": 5.647120518435268,
+      "root_position_rmse_m": 0.06348026752605226,
+      "root_position_p90_m": 0.0884734345535174,
+      "root_rotation_rmse_rad": 0.10674913975026802,
+      "root_rotation_p90_rad": 0.1581454508108266,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.04100319957728279,
+      "joint_q_p90_abs_rad": 0.050368345932931796,
+      "joint_dq_rmse_rad_s": 0.48391391852061605,
+      "joint_dq_p90_abs_rad_s": 0.6283622351875082,
+      "joint_tau_rmse_nm": 4.396176171439011,
+      "joint_tau_p90_abs_nm": 6.348144050482947,
+      "root_position_rmse_m": 0.0679225572469288,
+      "root_position_p90_m": 0.09403979666151012,
+      "root_rotation_rmse_rad": 0.13879081433590557,
+      "root_rotation_p90_rad": 0.2516024389784012,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.030483638703318668,
+      "joint_q_p90_abs_rad": 0.0389217005991606,
+      "joint_dq_rmse_rad_s": 0.42982674516066127,
+      "joint_dq_p90_abs_rad_s": 0.5261029125685989,
+      "joint_tau_rmse_nm": 3.326125202028201,
+      "joint_tau_p90_abs_nm": 4.627518635091919,
+      "root_position_rmse_m": 0.05065460386672614,
+      "root_position_p90_m": 0.06988509433601586,
+      "root_rotation_rmse_rad": 0.0917043478328427,
+      "root_rotation_p90_rad": 0.15408366397900713,
+      "n_steps": 1600
+    },
+    {
+      "joint_q_rmse_rad": 0.02289343502678593,
+      "joint_q_p90_abs_rad": 0.030755509964337582,
+      "joint_dq_rmse_rad_s": 0.3304219964177648,
+      "joint_dq_p90_abs_rad_s": 0.2961931867780103,
+      "joint_tau_rmse_nm": 2.533170598116904,
+      "joint_tau_p90_abs_nm": 3.342080186117938,
+      "root_position_rmse_m": 0.053477547207081914,
+      "root_position_p90_m": 0.05692599818357965,
+      "root_rotation_rmse_rad": 0.07392180318061939,
+      "root_rotation_p90_rad": 0.08664388143099365,
+      "n_steps": 1600
+    }
+  ]
+}
