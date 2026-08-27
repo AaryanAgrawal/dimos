@@ -4,9 +4,9 @@
     "hardware_recording_sha256": "d402164b15f745ccdd917b76093768263c6d470cdf012c5f7f8fb92096d43df4",
     "simulation_recording": "/tmp/g1-groot-full-replay-v1.db",
     "simulation_recording_sha256": "ffe71a2d165b4a3856d28d9478e0fac7ac7f5ac0b236618bc8ae3d4216c2aebc",
-    "git_sha": "07447699743f9aa4b0c961d788040afd2a6dbe17",
+    "git_sha": "d513ac340bcdb62b63db9efd2364be8ccc79abcd",
     "git_dirty": false,
-    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-full-replay-v1.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/raw --video --video-speed=6",
+    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-full-replay-v1.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/raw --baseline-plant",
     "groot_model_sha256": {
       "balance.onnx": "f645da599d4ca3d29ed273c8f4712620bb680d34977469ca3aeabe5bb9631c18",
       "walk.onnx": "7c82255b6905ffcc4468fa7f8ddcf7b70db168cf1042107ccab887cb6a8e5407"
@@ -1484,11 +1484,70 @@
       }
     ]
   },
-  "video": {
-    "path": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/results/2026-08-27/raw/hardware_vs_sim.mp4",
-    "frame_count": 1586,
-    "fps": 30.0,
-    "playback_speed": 6.0,
-    "source_duration_s": 317.0
+  "baseline_subtracted_transient_error": {
+    "directions": [
+      {
+        "direction": "forward",
+        "unit": "m/s",
+        "n_levels": 8,
+        "n_samples": 152,
+        "rmse": 0.09507420091601614,
+        "nrmse": 0.12260906178196622,
+        "reference_peak": 0.7754255642628202,
+        "predicted_peak": 0.8000544830534084
+      },
+      {
+        "direction": "backward",
+        "unit": "m/s",
+        "n_levels": 8,
+        "n_samples": 152,
+        "rmse": 0.09109290920803587,
+        "nrmse": 0.14510475223514074,
+        "reference_peak": 0.6277734381877497,
+        "predicted_peak": 0.5426948525011172
+      },
+      {
+        "direction": "left",
+        "unit": "m/s",
+        "n_levels": 8,
+        "n_samples": 152,
+        "rmse": 0.11022456975106974,
+        "nrmse": 0.2126189276252282,
+        "reference_peak": 0.5184137225325329,
+        "predicted_peak": 0.48711785751732917
+      },
+      {
+        "direction": "right",
+        "unit": "m/s",
+        "n_levels": 8,
+        "n_samples": 152,
+        "rmse": 0.20459121813070733,
+        "nrmse": 0.2294881189055508,
+        "reference_peak": 0.8915111558124272,
+        "predicted_peak": 0.5960390464724191
+      },
+      {
+        "direction": "ccw",
+        "unit": "rad/s",
+        "n_levels": 8,
+        "n_samples": 152,
+        "rmse": 0.3151757197265949,
+        "nrmse": 0.1840756843384373,
+        "reference_peak": 1.712207241599168,
+        "predicted_peak": 2.0869014936846204
+      },
+      {
+        "direction": "cw",
+        "unit": "rad/s",
+        "n_levels": 8,
+        "n_samples": 152,
+        "rmse": 0.22776561404792425,
+        "nrmse": 0.22396529270186402,
+        "reference_peak": 1.0169683494268869,
+        "predicted_peak": 1.2760423945060182
+      }
+    ],
+    "mean_nrmse": 0.18631030626469788,
+    "worst_nrmse": 0.2294881189055508
   }
 }

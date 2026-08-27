@@ -4,10 +4,10 @@
     "recording": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/data/g1_groot_characterization_2026-08-27.db",
     "recording_size_bytes": 1039794176,
     "recording_sha256": "d402164b15f745ccdd917b76093768263c6d470cdf012c5f7f8fb92096d43df4",
-    "git_sha": "07447699743f9aa4b0c961d788040afd2a6dbe17",
+    "git_sha": "d513ac340bcdb62b63db9efd2364be8ccc79abcd",
     "git_dirty": false,
     "seed": 0,
-    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-full-replay-v1.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/raw --video --video-speed=6",
+    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-full-replay-v1.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/raw --baseline-plant",
     "reference": "Point-LIO world_T_pelvis; measured reference, not ground truth"
   },
   "result": {

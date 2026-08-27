@@ -2,9 +2,9 @@
   "schema_version": 1,
   "provenance": {
     "hardware_recording_sha256": "d402164b15f745ccdd917b76093768263c6d470cdf012c5f7f8fb92096d43df4",
-    "git_sha": "07447699743f9aa4b0c961d788040afd2a6dbe17",
+    "git_sha": "d513ac340bcdb62b63db9efd2364be8ccc79abcd",
     "git_dirty": false,
-    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-full-replay-v1.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/raw --video --video-speed=6",
+    "command": "/home/dimos/aaryan-dimensional/workspace/dimos-g1-characterization/dimos/robot/unitree/g1/characterization/report.py data/g1_groot_characterization_2026-08-27.db --simulation=/tmp/g1-groot-full-replay-v1.db --out=dimos/robot/unitree/g1/characterization/results/2026-08-27/raw --baseline-plant",
     "seed": 0,
     "groot_model_sha256": {
       "balance.onnx": "f645da599d4ca3d29ed273c8f4712620bb680d34977469ca3aeabe5bb9631c18",
@@ -20,7 +20,14 @@
     "reinitialization_clip_range_s": [
       0.05,
       0.8
-    ]
+    ],
+    "physics_override": {
+      "leg_armature_kg_m2": 0.01,
+      "leg_damping_nm_s_rad": 0.001,
+      "leg_frictionloss_nm": 0.1,
+      "foot_slide_friction": 1.0,
+      "foot_contact_time_constant_s": 0.02
+    }
   },
   "health": {
     "motor_command_rate_hz": 99.08467889583162,
