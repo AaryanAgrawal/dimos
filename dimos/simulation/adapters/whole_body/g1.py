@@ -29,6 +29,7 @@ from pathlib import Path
 import time
 from typing import Any
 
+from dimos.hardware.spec import JointLimits
 from dimos.hardware.whole_body.spec import (
     POS_STOP,
     IMUState,
@@ -165,6 +166,9 @@ class SimMujocoG1WholeBodyAdapter:
             gyroscope=gyro,
             accelerometer=accel,
         )
+
+    def get_limits(self) -> JointLimits | None:
+        return None
 
     def write_motor_commands(self, commands: list[MotorCommand]) -> bool:
         if not self.is_connected():

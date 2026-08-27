@@ -74,6 +74,10 @@ from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.g1.config import G1
+from dimos.robot.unitree.g1.frames import (
+    pointlio_ground_z_m,
+    world_T_pelvis_from_mid360_odometry,
+)
 from dimos.robot.unitree.g1.g1_rerun import (
     G1_RERUN_ROOT,
     g1_costmap,
@@ -89,7 +93,7 @@ from dimos.visualization.vis_module import vis_module
 # str()/open(); using ``get_data(...)`` at import time would block the
 # whole CLI on a multi-GB download every time the module is imported.
 _GROOT_MODEL_DIR = LfsPath("groot")
-_MJCF_PATH = LfsPath("mujoco_sim/g1_gear_wbc.xml")
+_EMPTY_SCENE_PATH = LfsPath("mujoco_sim/scene_empty.xml")
 _ROBOT_ONLY_MJCF_PATH = Path(__file__).resolve().parents[2] / "assets" / "g1_29dof.xml"
 _ROBOT_MESHDIR = LfsPath("g1_urdf/meshes")
 
@@ -188,17 +192,19 @@ if global_config.simulation == "mujoco":
 
     def _legacy_mujoco_backend() -> Any:
         return MujocoSimModule.blueprint(
-            address=_MJCF_PATH,
+            scene_xml=_EMPTY_SCENE_PATH,
+            robot_mjcf=_ROBOT_ONLY_MJCF_PATH,
+            robot_meshdir=_ROBOT_MESHDIR,
+            robot_id="",
             headless=True,
             dof=_G1_NUM_MOTORS,
             **_mujoco_lidar_kwargs(_MUJOCO_LIDAR_CAMERA, _MUJOCO_LIDAR_CAMERAS),
-            inject_legacy_assets=True,
             robot_sim_spec=_g1_sim_spec,
         )
 
     def _scene_mujoco_backend() -> tuple[Any, str | Path]:
         if global_config.scene_package is None:
-            return _legacy_mujoco_backend(), _MJCF_PATH
+            return _legacy_mujoco_backend(), _ROBOT_ONLY_MJCF_PATH
 
         scene_path = Path(str(global_config.scene_package)).expanduser()
         if scene_path.suffix.lower() == ".mjb":
@@ -219,7 +225,7 @@ if global_config.simulation == "mujoco":
 
         package = resolve_scene_package(global_config.scene_package)
         if package is None:
-            return _legacy_mujoco_backend(), _MJCF_PATH
+            return _legacy_mujoco_backend(), _ROBOT_ONLY_MJCF_PATH
         if package.mujoco_scene_path is None:
             raise ValueError(f"scene package has no MuJoCo scene artifact: {package.metadata_path}")
 
@@ -391,38 +397,17 @@ def _g1_nav_path(path: NavPath) -> Any:
 # /odometry, whose world frame is the lidar boot pose (ground ~1.2 m below 0).
 _G1_ROOT = G1_RERUN_ROOT if global_config.simulation == "mujoco" else "world/odometry/g1"
 
-_G1_URDF_PATH = Path(__file__).resolve().parents[2] / "g1.urdf"
 # Nominal standing pelvis height; matches G1GrootWBCTask's height_cmd.
 _G1_NOMINAL_PELVIS_Z = 0.74
-_g1_pelvis_mid360_cache: list[Any] = []
-
-
-def _g1_pelvis_to_mid360() -> Any:
-    """Rest-pose pelvis->mid360_link transform from the G1 URDF (cached)."""
-    if not _g1_pelvis_mid360_cache:
-        from importlib import import_module
-
-        import numpy as np
-
-        urdf = import_module("yourdfpy").URDF.load(str(_G1_URDF_PATH), load_meshes=False)
-        urdf.update_cfg(np.zeros(len(urdf.actuated_joint_names)))
-        _g1_pelvis_mid360_cache.append(urdf.get_transform("mid360_link", "pelvis"))
-    return _g1_pelvis_mid360_cache[0]
 
 
 def _g1_real_odometry_root(odom: Any) -> Any:
     """Robot-mesh root: pelvis pose from the LIO's mid360 odometry (rest offset)."""
-    import numpy as np
     import rerun as rr
 
     from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 
-    t_world_mid360 = np.eye(4)
-    # The MID-360 is mounted upside down (the URDF doesn't carry the flip):
-    # un-roll by Rx(pi) == diag(1, -1, -1).
-    t_world_mid360[:3, :3] = odom.orientation.to_rotation_matrix() @ np.diag([1.0, -1.0, -1.0])
-    t_world_mid360[:3, 3] = (odom.x, odom.y, odom.z)
-    t_world_pelvis = t_world_mid360 @ np.linalg.inv(_g1_pelvis_to_mid360())
+    t_world_pelvis = world_T_pelvis_from_mid360_odometry(odom)
     q = Quaternion.from_rotation_matrix(t_world_pelvis[:3, :3])
     return rr.Transform3D(
         translation=t_world_pelvis[:3, 3].tolist(),
@@ -432,7 +417,7 @@ def _g1_real_odometry_root(odom: Any) -> Any:
 
 def _g1_real_ground_z() -> float:
     """Ground height in the LIO boot frame: -(mount z + nominal pelvis z)."""
-    return -(float(_g1_pelvis_to_mid360()[2, 3]) + _G1_NOMINAL_PELVIS_Z)
+    return pointlio_ground_z_m(_G1_NOMINAL_PELVIS_Z)
 
 
 def _g1_real_costmap(grid: Any) -> Any:
