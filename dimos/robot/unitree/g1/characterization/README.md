@@ -8,7 +8,7 @@ hardware mem2
 ├── fresh Point-LIO world_T_mid360 + measured waist FK -> world_T_pelvis
 │   └── directional gain, delay, time constant, motion floor, observed envelope
 └── motor_command + motor_states + IMU
-    └── seeded open-loop clips against the production G1 MuJoCo model
+    └── seeded open-loop q/dq/torque/root clips against the production G1 MuJoCo model
 
 same cmd_vel ──► actual unitree-g1-groot-replay blueprint
              └── SIMULATED pelvis ground truth vs Point-LIO measured reference
@@ -28,6 +28,10 @@ The replay comparison checks the piecewise-constant twist level sequence consume
 duplicate event counts may differ without changing that signal; transition timing and ZOH error are
 reported separately. No planner limits are emitted until a second run observes saturation and
 improves lateral/yaw fit health.
+
+A tuned plant is retained only when it improves held-out low-level clips and does not worsen the
+worst six-direction response error. The first five-knob fit was rejected by that second gate, so the
+stock MuJoCo replay remains the canonical raw baseline.
 
 ## Run
 

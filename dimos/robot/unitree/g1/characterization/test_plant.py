@@ -20,9 +20,11 @@ import numpy as np
 
 from dimos.control.tasks.g1_groot_wbc_task.g1_groot_wbc_task import G1_GROOT_KD, G1_GROOT_KP
 from dimos.robot.unitree.g1.characterization.plant import (
+    PlantPrediction,
     build_replay_plan,
     groot_command_contract,
     sample_replay_plans,
+    score_prediction,
 )
 from dimos.robot.unitree.g1.characterization.recording import G1PlantRecording, G1Recording
 from dimos.robot.unitree.g1.wholebody_connection import G1_JOINT_NAMES
@@ -76,6 +78,25 @@ def test_plan_schedule_is_seeded_and_fixed() -> None:
     assert not np.array_equal(first.reinitialize, different.reinitialize)
     np.testing.assert_allclose(first.step_t_s + first.physics_dt_s, first.step_t_s + 0.005)
     assert first.command_q_rad.shape == first.reference_q_rad.shape == (1000, 2)
+    assert first.reference_tau_est_nm.shape == (1000, 2)
+
+
+def test_score_includes_measured_motor_torque() -> None:
+    plant, high_level = _recordings()
+    plan = build_replay_plan(plant, high_level, duration_s=1.0)
+    prediction = PlantPrediction(
+        q_rad=plan.reference_q_rad,
+        dq_rad_s=plan.reference_dq_rad_s,
+        tau_nm=plan.reference_tau_est_nm + 2.0,
+        root_world_p_m=plan.reference_root_world_p_m,
+        root_world_q_xyzw=plan.reference_root_world_q_xyzw,
+    )
+
+    score = score_prediction(plan, prediction)
+
+    assert score.joint_tau_rmse_nm == 2.0
+    assert score.joint_tau_p90_abs_nm == 2.0
+    assert score.joint_q_rmse_rad == 0.0
 
 
 def test_sampled_windows_cover_the_recording_deterministically() -> None:

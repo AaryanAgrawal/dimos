@@ -87,6 +87,7 @@ class PlantReplayPlan:
     root_world_velocity: NDArray[np.float64]
     reference_q_rad: NDArray[np.float64]
     reference_dq_rad_s: NDArray[np.float64]
+    reference_tau_est_nm: NDArray[np.float64]
     reference_root_world_p_m: NDArray[np.float64]
     reference_root_world_q_xyzw: NDArray[np.float64]
 
@@ -110,6 +111,8 @@ class PlantScore:
     joint_q_p90_abs_rad: float
     joint_dq_rmse_rad_s: float
     joint_dq_p90_abs_rad_s: float
+    joint_tau_rmse_nm: float
+    joint_tau_p90_abs_nm: float
     root_position_rmse_m: float
     root_position_p90_m: float
     root_rotation_rmse_rad: float
@@ -344,6 +347,9 @@ def build_replay_plan(
         reference_dq_rad_s=_linear_sample(
             plant.motor_state_t_s, plant.motor_state_dq_rad_s, reference_t_s
         ),
+        reference_tau_est_nm=_linear_sample(
+            plant.motor_state_t_s, plant.motor_state_tau_est_nm, reference_t_s
+        ),
         reference_root_world_p_m=reference_p,
         reference_root_world_q_xyzw=reference_q,
     )
@@ -385,6 +391,7 @@ def score_prediction(plan: PlantReplayPlan, prediction: PlantPrediction) -> Plan
     """Score only signals measured on both sides, in their physical units."""
     q_error = prediction.q_rad - plan.reference_q_rad
     dq_error = prediction.dq_rad_s - plan.reference_dq_rad_s
+    tau_error = prediction.tau_nm - plan.reference_tau_est_nm
     position_error = np.linalg.norm(
         prediction.root_world_p_m - plan.reference_root_world_p_m, axis=1
     )
@@ -397,6 +404,8 @@ def score_prediction(plan: PlantReplayPlan, prediction: PlantPrediction) -> Plan
         joint_q_p90_abs_rad=float(np.quantile(np.abs(q_error), 0.9)),
         joint_dq_rmse_rad_s=float(np.sqrt(np.mean(dq_error**2))),
         joint_dq_p90_abs_rad_s=float(np.quantile(np.abs(dq_error), 0.9)),
+        joint_tau_rmse_nm=float(np.sqrt(np.mean(tau_error**2))),
+        joint_tau_p90_abs_nm=float(np.quantile(np.abs(tau_error), 0.9)),
         root_position_rmse_m=float(np.sqrt(np.mean(position_error**2))),
         root_position_p90_m=float(np.quantile(position_error, 0.9)),
         root_rotation_rmse_rad=float(np.sqrt(np.mean(rotation_error**2))),

@@ -224,18 +224,20 @@ def _plot_comparison(aligned: AlignedTrajectories, out_path: Path) -> None:
 
 
 def _plot_plant_scores(scores: list[PlantScore], out_path: Path) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     values = (
         ("joint q RMSE (rad)", [score.joint_q_rmse_rad for score in scores]),
         ("joint dq RMSE (rad/s)", [score.joint_dq_rmse_rad_s for score in scores]),
+        ("joint torque RMSE (N m)", [score.joint_tau_rmse_nm for score in scores]),
         ("root position RMSE (m)", [score.root_position_rmse_m for score in scores]),
         ("root rotation RMSE (rad)", [score.root_rotation_rmse_rad for score in scores]),
     )
-    for axis, (label, score_values) in zip(axes.flat, values, strict=True):
+    for axis, (label, score_values) in zip(axes.flatten()[:-1], values, strict=True):
         axis.bar(np.arange(len(scores)), score_values)
         axis.set_xlabel("seeded segment")
         axis.set_ylabel(label)
         axis.grid(axis="y", alpha=0.25)
+    axes.flat[-1].axis("off")
     fig.suptitle("SIMULATED baseline G1 plant vs hardware clips")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
