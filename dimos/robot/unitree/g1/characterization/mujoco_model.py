@@ -37,6 +37,36 @@ class G1MujocoBinding:
     actuators: NDArray[np.int64]
 
 
+@dataclass(frozen=True)
+class G1MujocoPhysics:
+    """Candidate MuJoCo leg-drive and foot-contact parameters in SI units."""
+
+    leg_armature_kg_m2: float
+    leg_damping_nm_s_rad: float
+    leg_frictionloss_nm: float
+    foot_slide_friction: float
+    foot_contact_time_constant_s: float
+
+    def __post_init__(self) -> None:
+        values = vars(self)
+        invalid = {name: value for name, value in values.items() if not np.isfinite(value)}
+        if invalid:
+            raise ValueError(f"MuJoCo physics values must be finite; got {invalid}")
+        if min(values.values()) < 0.0:
+            raise ValueError(f"MuJoCo physics values must be non-negative; got {values}")
+        if self.foot_contact_time_constant_s == 0.0:
+            raise ValueError("foot contact time constant must be positive")
+
+
+G1_BASELINE_MUJOCO_PHYSICS = G1MujocoPhysics(
+    leg_armature_kg_m2=0.01,
+    leg_damping_nm_s_rad=0.001,
+    leg_frictionloss_nm=0.1,
+    foot_slide_friction=1.0,
+    foot_contact_time_constant_s=0.02,
+)
+
+
 def build_g1_mujoco_spec() -> mujoco.MjSpec:
     """Compose the same empty scene, robot MJCF, and mesh tree as the blueprint."""
     scene = Path(get_data("mujoco_sim")) / "scene_empty.xml"
@@ -77,3 +107,21 @@ def g1_mujoco_binding(model: mujoco.MjModel, motor_names: tuple[str, ...]) -> G1
         joint_qvel=np.asarray(qvel, dtype=np.int64),
         actuators=np.asarray(actuator, dtype=np.int64),
     )
+
+
+def apply_g1_mujoco_physics(
+    model: mujoco.MjModel,
+    motor_names: tuple[str, ...],
+    physics: G1MujocoPhysics,
+) -> None:
+    """Apply leg-drive and foot-contact values to one compiled G1 model."""
+    binding = g1_mujoco_binding(model, motor_names)
+    leg_dofs = binding.joint_qvel[:12]
+    model.dof_armature[leg_dofs] = physics.leg_armature_kg_m2
+    model.dof_damping[leg_dofs] = physics.leg_damping_nm_s_rad
+    model.dof_frictionloss[leg_dofs] = physics.leg_frictionloss_nm
+    for side in ("left", "right"):
+        body_id = _model_id(model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_ankle_roll_link")
+        foot_geoms = np.flatnonzero(model.geom_bodyid == body_id)
+        model.geom_friction[foot_geoms, 0] = physics.foot_slide_friction
+        model.geom_solref[foot_geoms, 0] = physics.foot_contact_time_constant_s

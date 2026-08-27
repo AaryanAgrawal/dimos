@@ -32,7 +32,11 @@ from dimos.robot.unitree.g1.characterization.recording import (
     G1Recording,
     measured_pelvis_pose,
 )
-from dimos.robot.unitree.g1.characterization.response import body_velocity
+from dimos.robot.unitree.g1.characterization.response import (
+    ResponseSpan,
+    body_velocity,
+    response_spans,
+)
 from dimos.robot.unitree.g1.frames import pointlio_ground_z_m
 
 _NOMINAL_PELVIS_HEIGHT_M = 0.74  # GR00T height command; fixes Point-LIO boot z to floor z=0.
@@ -101,6 +105,18 @@ class PlantPrediction:
     tau_nm: NDArray[np.float64]
     root_world_p_m: NDArray[np.float64]
     root_world_q_xyzw: NDArray[np.float64]
+
+
+@dataclass(frozen=True)
+class DirectionalPlantReplay:
+    """One labelled low-level replay window from a held twist level."""
+
+    direction: str
+    command: float
+    unit: str
+    split: str
+    span_start_epoch_s: float
+    plan: PlantReplayPlan
 
 
 @dataclass(frozen=True)
@@ -385,6 +401,106 @@ def sample_replay_plans(
         )
         for index, start_s in enumerate(starts)
     )
+
+
+def _span_label(span: ResponseSpan) -> tuple[str, str]:
+    directions = {
+        (0, 1): ("forward", "m/s"),
+        (0, -1): ("backward", "m/s"),
+        (1, 1): ("left", "m/s"),
+        (1, -1): ("right", "m/s"),
+        (2, 1): ("ccw", "rad/s"),
+        (2, -1): ("cw", "rad/s"),
+    }
+    return directions[(span.axis, span.sign)]
+
+
+def _spans_by_direction(recording: G1Recording) -> dict[str, list[ResponseSpan]]:
+    by_direction: dict[str, dict[float, ResponseSpan]] = {}
+    for span in response_spans(recording):
+        direction, _ = _span_label(span)
+        level = round(abs(span.command), 6)
+        previous = by_direction.setdefault(direction, {}).get(level)
+        if previous is None or span.end_s - span.start_s > previous.end_s - previous.start_s:
+            by_direction[direction][level] = span
+    return {
+        direction: sorted(spans.values(), key=lambda item: abs(item.command))
+        for direction, spans in by_direction.items()
+    }
+
+
+def _directional_replay(
+    plant: G1PlantRecording,
+    high_level: G1Recording,
+    span: ResponseSpan,
+    *,
+    level_split: str,
+    response_window_s: float,
+    pre_roll_s: float,
+    seed: int,
+) -> DirectionalPlantReplay:
+    overlap_start_s = _overlap_start(plant, high_level)
+    start_epoch_s = max(overlap_start_s, span.start_s - pre_roll_s)
+    end_epoch_s = min(span.end_s, span.start_s + response_window_s)
+    direction, unit = _span_label(span)
+    plan = build_replay_plan(
+        plant,
+        high_level,
+        start_s=start_epoch_s - overlap_start_s,
+        duration_s=end_epoch_s - start_epoch_s,
+        seed=seed,
+    )
+    return DirectionalPlantReplay(
+        direction,
+        abs(span.command),
+        unit,
+        level_split,
+        span.start_s,
+        plan,
+    )
+
+
+def directional_replay_plans(
+    plant: G1PlantRecording,
+    high_level: G1Recording,
+    *,
+    levels_per_direction: int = 8,
+    response_window_s: float = 2.0,
+    pre_roll_s: float = 0.25,
+    seed: int = 0,
+    split: str = "all",
+) -> tuple[DirectionalPlantReplay, ...]:
+    """Select equal, disjoint command levels for train and validation replay."""
+    if levels_per_direction < 2 or response_window_s <= 0.0 or pre_roll_s < 0.0:
+        raise ValueError("need at least two levels and non-negative replay durations")
+    if split not in {"all", "train", "validation"}:
+        raise ValueError(f"split must be all, train, or validation; got {split!r}")
+    by_direction = _spans_by_direction(high_level)
+    selected: list[DirectionalPlantReplay] = []
+    for direction_index, direction in enumerate(
+        ("forward", "backward", "left", "right", "ccw", "cw")
+    ):
+        spans = by_direction.get(direction, [])
+        if len(spans) < levels_per_direction:
+            raise ValueError(
+                f"{direction} has {len(spans)} distinct command levels; need {levels_per_direction}"
+            )
+        for level_index, span in enumerate(spans[-levels_per_direction:]):
+            level_split = "train" if level_index % 2 == 0 else "validation"
+            if split != "all" and split != level_split:
+                continue
+            selected.append(
+                _directional_replay(
+                    plant,
+                    high_level,
+                    span,
+                    level_split=level_split,
+                    response_window_s=response_window_s,
+                    pre_roll_s=pre_roll_s,
+                    seed=seed + direction_index * levels_per_direction + level_index,
+                )
+            )
+    return tuple(selected)
 
 
 def score_prediction(plan: PlantReplayPlan, prediction: PlantPrediction) -> PlantScore:

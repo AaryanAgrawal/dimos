@@ -24,6 +24,8 @@ from scipy.spatial.transform import Rotation
 
 from dimos.robot.unitree.g1.characterization.mujoco_model import (
     G1MujocoBinding,
+    G1MujocoPhysics,
+    apply_g1_mujoco_physics,
     build_g1_mujoco_spec,
     g1_mujoco_binding,
 )
@@ -49,8 +51,14 @@ def _snap(
 class G1MujocoBackend:
     """One immutable production model reused across fixed plant replay plans."""
 
-    def __init__(self, motor_names: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        motor_names: tuple[str, ...],
+        physics: G1MujocoPhysics | None = None,
+    ) -> None:
         self._model = build_g1_mujoco_spec().compile()
+        if physics is not None:
+            apply_g1_mujoco_physics(self._model, motor_names, physics)
         self._binding = g1_mujoco_binding(self._model, motor_names)
 
     def model_sha256(self) -> str:

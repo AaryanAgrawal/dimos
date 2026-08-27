@@ -38,6 +38,10 @@ from dimos.robot.unitree.g1.characterization.comparison import (
     compare_trajectories,
     read_simulation,
 )
+from dimos.robot.unitree.g1.characterization.mujoco_model import (
+    G1_BASELINE_MUJOCO_PHYSICS,
+    G1MujocoPhysics,
+)
 from dimos.robot.unitree.g1.characterization.plant import (
     PLANT_CLIP_RANGE_S,
     PlantScore,
@@ -60,6 +64,7 @@ from dimos.robot.unitree.g1.characterization.response import (
     body_velocity,
     characterize,
     direction_results,
+    directional_transient_errors,
     fit_trajectory_steps,
 )
 from dimos.utils.data import get_data
@@ -260,6 +265,7 @@ def _plant_report(
     command: str | None,
     n_segments: int,
     segment_duration_s: float,
+    physics: G1MujocoPhysics | None,
 ) -> None:
     plant = read_plant_recording(db_path)
     health = plant_health(plant)
@@ -273,7 +279,7 @@ def _plant_report(
         segment_duration_s=segment_duration_s,
         seed=0,
     )
-    backend = G1MujocoBackend(plant.motor_names)
+    backend = G1MujocoBackend(plant.motor_names, physics)
     predictions = [backend.rollout(plan) for plan in plans]
     scores = [
         score_prediction(plan, prediction)
@@ -296,6 +302,7 @@ def _plant_report(
             "segment_duration_s": segment_duration_s,
             "physics_dt_s": plans[0].physics_dt_s,
             "reinitialization_clip_range_s": PLANT_CLIP_RANGE_S,
+            "physics_override": asdict(physics) if physics is not None else None,
         },
         "health": asdict(health),
         "groot_command_contract": asdict(contract),
@@ -324,6 +331,7 @@ def write_report(
     video_playback_speed: float = 6.0,
     plant_segments: int = 8,
     plant_segment_duration_s: float = 8.0,
+    plant_physics: G1MujocoPhysics | None = None,
 ) -> CharacterizationResult:
     """Analyze one real recording and write its evidence bundle."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -357,6 +365,7 @@ def write_report(
         command=command,
         n_segments=plant_segments,
         segment_duration_s=plant_segment_duration_s,
+        physics=plant_physics,
     )
     if simulation_db is not None:
         simulation = read_simulation(simulation_db)
@@ -369,6 +378,7 @@ def write_report(
             simulation.sim_world_q_pelvis_xyzw,
         )
         simulation_directions = direction_results(simulation_steps)
+        transient_errors = directional_transient_errors(recording, simulation)
         comparison_artifact = {
             "schema_version": 1,
             "provenance": {
@@ -385,6 +395,11 @@ def write_report(
             "simulated_directional_response": {
                 "directions": [asdict(direction) for direction in simulation_directions],
                 "steps": [asdict(step) for step in simulation_steps],
+            },
+            "baseline_subtracted_transient_error": {
+                "directions": [asdict(error) for error in transient_errors],
+                "mean_nrmse": float(np.mean([error.nrmse for error in transient_errors])),
+                "worst_nrmse": float(np.max([error.nrmse for error in transient_errors])),
             },
         }
         _plot_comparison(aligned, out_dir / "hardware_vs_sim.png")
@@ -415,6 +430,7 @@ def main() -> None:
     parser.add_argument("--video-speed", type=float, default=6.0)
     parser.add_argument("--plant-segments", type=int, default=8)
     parser.add_argument("--plant-segment-duration", type=float, default=8.0)
+    parser.add_argument("--baseline-plant", action="store_true")
     args = parser.parse_args()
     if args.video and args.simulation is None:
         parser.error("--video needs --simulation")
@@ -428,6 +444,7 @@ def main() -> None:
         video_playback_speed=args.video_speed,
         plant_segments=args.plant_segments,
         plant_segment_duration_s=args.plant_segment_duration,
+        plant_physics=G1_BASELINE_MUJOCO_PHYSICS if args.baseline_plant else None,
     )
     print(json.dumps(asdict(result.health), indent=2))
 

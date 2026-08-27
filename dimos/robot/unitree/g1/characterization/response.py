@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from itertools import pairwise
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,6 +33,9 @@ from dimos.robot.unitree.g1.characterization.recording import (
     measured_pelvis_pose,
     pointlio_pose_sample_mask,
 )
+
+if TYPE_CHECKING:
+    from dimos.robot.unitree.g1.characterization.comparison import G1SimulationRecording
 
 _AXES = ("vx", "vy", "wz")
 _DIRECTIONS = {
@@ -103,6 +106,26 @@ class DirectionResult:
     deadtime_median_s: float | None
     deadtime_p10_p90_s: tuple[float, float] | None
     ceiling_observed: bool
+
+
+@dataclass(frozen=True)
+class DirectionTransientError:
+    """Baseline-subtracted transient discrepancy in one command direction."""
+
+    direction: str
+    unit: str
+    n_levels: int
+    n_samples: int
+    rmse: float
+    nrmse: float
+    reference_peak: float
+    predicted_peak: float
+
+
+@dataclass(frozen=True)
+class _VelocityTrack:
+    t_s: NDArray[np.float64]
+    body_twist: NDArray[np.float64]
 
 
 @dataclass(frozen=True)
@@ -408,6 +431,169 @@ def direction_results(steps: list[StepFit]) -> tuple[DirectionResult, ...]:
             direction,
             _UNITS[axis],
             [step for step in steps if step.direction == direction],
+        )
+        for (axis, _sign), direction in _DIRECTIONS.items()
+    )
+
+
+def _span_response(
+    span: ResponseSpan,
+    track: _VelocityTrack,
+    relative_t_s: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    baseline = (track.t_s >= span.start_s - 0.35) & (track.t_s < span.start_s)
+    if not np.any(baseline):
+        raise ValueError(f"no velocity baseline before command at {span.start_s}s")
+    baseline_speed = float(np.median(track.body_twist[baseline, span.axis]))
+    speed = np.interp(
+        span.start_s + relative_t_s,
+        track.t_s,
+        track.body_twist[:, span.axis],
+    )
+    return span.sign * (speed - baseline_speed)
+
+
+def _transient_tracks(
+    reference: G1Recording,
+    predicted: G1SimulationRecording,
+) -> tuple[_VelocityTrack, _VelocityTrack]:
+    reference_track = _VelocityTrack(*body_velocity(reference))
+    predicted_track = _VelocityTrack(
+        *_body_velocity_from_pose(
+            predicted.sim_t_s,
+            predicted.sim_world_p_pelvis_m,
+            predicted.sim_world_q_pelvis_xyzw,
+        )
+    )
+    return reference_track, predicted_track
+
+
+def _transient_spans(
+    command_t_s: NDArray[np.float64],
+    command_body_twist: NDArray[np.float64],
+    direction: str,
+    levels: int,
+    split: str,
+) -> list[ResponseSpan]:
+    distinct: dict[float, ResponseSpan] = {}
+    for span in _response_spans_from_commands(command_t_s, command_body_twist):
+        if _DIRECTIONS[(span.axis, span.sign)] != direction:
+            continue
+        level = round(abs(span.command), 6)
+        previous = distinct.get(level)
+        if previous is None or span.end_s - span.start_s > previous.end_s - previous.start_s:
+            distinct[level] = span
+    spans = sorted(distinct.values(), key=lambda span: abs(span.command))[-levels:]
+    if len(spans) != levels:
+        raise ValueError(f"{direction} has {len(spans)} levels; need {levels}")
+    if split == "all":
+        return spans
+    parity = 0 if split == "train" else 1
+    return [span for index, span in enumerate(spans) if index % 2 == parity]
+
+
+def _matched_transient_spans(
+    reference: G1Recording,
+    predicted: G1SimulationRecording,
+    direction: str,
+    levels: int,
+    split: str,
+) -> list[tuple[ResponseSpan, ResponseSpan]]:
+    reference_spans = _transient_spans(
+        reference.command_t_s,
+        reference.command_body_twist,
+        direction,
+        levels,
+        split,
+    )
+    predicted_spans = _transient_spans(
+        predicted.command_t_s,
+        predicted.command_body_twist,
+        direction,
+        levels,
+        split,
+    )
+    predicted_by_level = {round(abs(span.command), 6): span for span in predicted_spans}
+    missing = [
+        span.command
+        for span in reference_spans
+        if round(abs(span.command), 6) not in predicted_by_level
+    ]
+    if missing:
+        raise ValueError(f"{direction} replay is missing command levels {missing}")
+    return [(span, predicted_by_level[round(abs(span.command), 6)]) for span in reference_spans]
+
+
+def _transient_error(
+    direction: str,
+    unit: str,
+    spans: list[tuple[ResponseSpan, ResponseSpan]],
+    reference: _VelocityTrack,
+    predicted: _VelocityTrack,
+    response_window_s: float,
+    sample_period_s: float,
+) -> DirectionTransientError:
+    pairs = []
+    for reference_span, predicted_span in spans:
+        duration_s = min(
+            response_window_s,
+            reference_span.end_s - reference_span.start_s,
+            predicted_span.end_s - predicted_span.start_s,
+        )
+        relative_t_s = np.arange(sample_period_s, duration_s, sample_period_s)
+        pairs.append(
+            (
+                _span_response(reference_span, reference, relative_t_s),
+                _span_response(predicted_span, predicted, relative_t_s),
+            )
+        )
+    reference_values = np.concatenate([pair[0] for pair in pairs])
+    predicted_values = np.concatenate([pair[1] for pair in pairs])
+    rmse = float(np.sqrt(np.mean((predicted_values - reference_values) ** 2)))
+    scale = float(np.max(np.abs(reference_values)))
+    if scale <= 0.0:
+        raise ValueError(f"{direction} reference transient scale is zero")
+    return DirectionTransientError(
+        direction,
+        unit,
+        len(spans),
+        len(reference_values),
+        rmse,
+        rmse / scale,
+        scale,
+        float(np.max(np.abs(predicted_values))),
+    )
+
+
+def directional_transient_errors(
+    reference: G1Recording,
+    predicted: G1SimulationRecording,
+    *,
+    levels_per_direction: int = 8,
+    response_window_s: float = 2.0,
+    sample_period_s: float = 0.1,
+    split: str = "all",
+) -> tuple[DirectionTransientError, ...]:
+    """Compare Ivan-style baseline-subtracted step responses at fixed levels."""
+    if response_window_s <= 0.0 or sample_period_s <= 0.0:
+        raise ValueError("response window and sample period must be positive")
+    if split not in {"all", "train", "validation"}:
+        raise ValueError(f"split must be all, train, or validation; got {split!r}")
+    tracks = _transient_tracks(reference, predicted)
+    return tuple(
+        _transient_error(
+            direction,
+            _UNITS[axis],
+            _matched_transient_spans(
+                reference,
+                predicted,
+                direction,
+                levels_per_direction,
+                split,
+            ),
+            *tracks,
+            response_window_s,
+            sample_period_s,
         )
         for (axis, _sign), direction in _DIRECTIONS.items()
     )

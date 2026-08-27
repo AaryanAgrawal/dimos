@@ -22,6 +22,7 @@ from dimos.control.tasks.g1_groot_wbc_task.g1_groot_wbc_task import G1_GROOT_KD,
 from dimos.robot.unitree.g1.characterization.plant import (
     PlantPrediction,
     build_replay_plan,
+    directional_replay_plans,
     groot_command_contract,
     sample_replay_plans,
     score_prediction,
@@ -110,6 +111,52 @@ def test_sampled_windows_cover_the_recording_deterministically() -> None:
     np.testing.assert_allclose(starts, repeated_starts)
     assert 0.0 <= starts[0] < 9.5
     assert 28.5 <= starts[-1] <= 38.0
+
+
+def test_directional_windows_hold_out_alternating_command_levels() -> None:
+    plant, high_level = _recordings()
+    command = np.zeros_like(high_level.command_body_twist)
+    directions = ((0, 1), (0, -1), (1, 1), (1, -1), (2, 1), (2, -1))
+    cursor = 100
+    for axis, sign in directions:
+        for level in (0.1, 0.2, 0.3, 0.4):
+            command[cursor : cursor + 80, axis] = sign * level
+            cursor += 100
+    high_level = replace(high_level, command_body_twist=command)
+
+    train = directional_replay_plans(
+        plant,
+        high_level,
+        levels_per_direction=4,
+        response_window_s=0.4,
+        pre_roll_s=0.1,
+        seed=9,
+        split="train",
+    )
+    validation = directional_replay_plans(
+        plant,
+        high_level,
+        levels_per_direction=4,
+        response_window_s=0.4,
+        pre_roll_s=0.1,
+        seed=9,
+        split="validation",
+    )
+
+    assert len(train) == len(validation) == 12
+    assert {item.direction for item in train} == {
+        "forward",
+        "backward",
+        "left",
+        "right",
+        "ccw",
+        "cw",
+    }
+    assert {round(item.command, 1) for item in train} == {0.1, 0.3}
+    assert {round(item.command, 1) for item in validation} == {0.2, 0.4}
+    assert {item.span_start_epoch_s for item in train}.isdisjoint(
+        {item.span_start_epoch_s for item in validation}
+    )
 
 
 def test_groot_contract_checks_every_command_and_joint_order() -> None:
