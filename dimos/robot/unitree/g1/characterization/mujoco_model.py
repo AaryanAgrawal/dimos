@@ -125,3 +125,5 @@ def apply_g1_mujoco_physics(
         foot_geoms = np.flatnonzero(model.geom_bodyid == body_id)
         model.geom_friction[foot_geoms, 0] = physics.foot_slide_friction
         model.geom_solref[foot_geoms, 0] = physics.foot_contact_time_constant_s
+    # Armature changes inertial constants that MuJoCo normally derives during compilation.
+    mujoco.mj_setConst(model, mujoco.MjData(model))

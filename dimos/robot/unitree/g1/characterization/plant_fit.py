@@ -287,8 +287,9 @@ def _fit_provenance(recording_path: Path, seed: int) -> dict[str, object]:
     }
 
 
-def _fit_method() -> dict[str, object]:
+def _fit_method(mode: str) -> dict[str, object]:
     return {
+        "mode": mode,
         "train_validation_split": "alternating levels from each direction's highest eight",
         "open_loop_channels": _PLANT_CHANNELS,
         "bounds": {
@@ -313,11 +314,12 @@ def _write_artifact(
     best: FitEvaluation,
     model_path: Path,
     model_sha256: str,
+    mode: str,
 ) -> None:
     artifact = {
         "schema_version": 1,
         "provenance": _fit_provenance(recording_path, seed),
-        "method": _fit_method(),
+        "method": _fit_method(mode),
         "evaluations": [asdict(evaluation) for evaluation in evaluations],
         "best": asdict(best),
         "mujoco_model": {"path": str(model_path), "sha256": model_sha256},
@@ -342,8 +344,7 @@ def _fit_replays(
 
 
 def _fit_evaluations(
-    values: NDArray[np.float64],
-    args: argparse.Namespace,
+    physics_candidates: list[G1MujocoPhysics],
     plant: G1PlantRecording,
     recording: G1Recording,
     replays: _FitReplays,
@@ -358,14 +359,17 @@ def _fit_evaluations(
             replays.stock_train,
             replays.stock_validation,
         )
-        for physics in _refine_friction(values, args.friction_refinements)
+        for physics in physics_candidates
     ]
 
 
-def run_fit(args: argparse.Namespace) -> FitEvaluation:
-    recording = read_recording(args.recording)
-    plant = read_plant_recording(args.recording)
-    replays = _fit_replays(plant, recording, args.seed)
+def _physics_candidates(
+    args: argparse.Namespace,
+    plant: G1PlantRecording,
+    replays: _FitReplays,
+) -> tuple[str, list[G1MujocoPhysics]]:
+    if args.candidate is not None:
+        return "candidate_validation", [_physics(np.asarray(args.candidate))]
     values = _search_open_loop(
         plant,
         replays.train,
@@ -374,7 +378,15 @@ def run_fit(args: argparse.Namespace) -> FitEvaluation:
         maxiter=args.maxiter,
         popsize=args.popsize,
     )
-    evaluations = _fit_evaluations(values, args, plant, recording, replays)
+    return "seeded_search", _refine_friction(values, args.friction_refinements)
+
+
+def run_fit(args: argparse.Namespace) -> FitEvaluation:
+    recording = read_recording(args.recording)
+    plant = read_plant_recording(args.recording)
+    replays = _fit_replays(plant, recording, args.seed)
+    mode, physics_candidates = _physics_candidates(args, plant, replays)
+    evaluations = _fit_evaluations(physics_candidates, plant, recording, replays)
     best = _best(evaluations)
     args.out.mkdir(parents=True, exist_ok=True)
     model_path = args.out / "g1_groot_tuned.mjb"
@@ -387,6 +399,7 @@ def run_fit(args: argparse.Namespace) -> FitEvaluation:
         best,
         model_path,
         model_sha256,
+        mode,
     )
     return best
 
@@ -399,6 +412,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--maxiter", type=int, default=4)
     parser.add_argument("--popsize", type=int, default=4)
     parser.add_argument("--friction-refinements", type=int, default=7)
+    parser.add_argument(
+        "--candidate",
+        type=float,
+        nargs=3,
+        metavar=("ARMATURE_KG_M2", "DAMPING_NM_S_RAD", "FRICTIONLOSS_NM"),
+    )
     return parser.parse_args()
 
 

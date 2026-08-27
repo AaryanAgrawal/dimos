@@ -32,6 +32,7 @@ def test_physics_override_changes_only_leg_drives_and_feet() -> None:
     names = tuple(G1_JOINT_NAMES)
     binding = g1_mujoco_binding(model, names)
     original_armature = model.dof_armature.copy()
+    original_mass_at_qpos0 = model.dof_M0.copy()
     original_damping = model.dof_damping.copy()
     original_frictionloss = model.dof_frictionloss.copy()
     original_friction = model.geom_friction.copy()
@@ -42,6 +43,10 @@ def test_physics_override_changes_only_leg_drives_and_feet() -> None:
     np.testing.assert_allclose(model.dof_armature[binding.joint_qvel[:12]], 0.03)
     np.testing.assert_allclose(model.dof_damping[binding.joint_qvel[:12]], 0.02)
     np.testing.assert_allclose(model.dof_frictionloss[binding.joint_qvel[:12]], 0.8)
+    assert not np.array_equal(
+        model.dof_M0[binding.joint_qvel[:12]],
+        original_mass_at_qpos0[binding.joint_qvel[:12]],
+    )
     np.testing.assert_array_equal(
         model.dof_armature[binding.joint_qvel[12:]],
         original_armature[binding.joint_qvel[12:]],
