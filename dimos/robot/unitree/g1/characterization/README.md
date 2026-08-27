@@ -1,5 +1,7 @@
 # G1 GR00T characterization
 
+## Workflow
+
 This package applies Ivan's Go2 process to G1 without changing the GR00T policy or its commands:
 
 ```text
@@ -32,6 +34,8 @@ Each trace uses its own sent-command timestamp `t0`, so replay transport delay i
 plant delay. Point-LIO is a measured reference, not ground truth; only the MuJoCo root pose is
 SIMULATED ground truth.
 
+## What was tuned
+
 The identified settings apply only to the 12 leg joints. Waist and arm physics, foot friction,
 contact time, GR00T ONNX weights, external twists, gains, and control rates remain unchanged.
 
@@ -40,6 +44,24 @@ contact time, GR00T ONNX weights, external twists, gains, and control rates rema
 | leg armature | 0.010000000 | 0.013836205 | kg m^2 |
 | leg damping | 0.001000000 | 0.000563844 | N m s/rad |
 | leg friction loss | 0.100000000 | 3.250000000 | N m |
+
+## Findings
+
+The actual DimOS GR00T blueprint completed the full 317.2 s SIMULATED MuJoCo replay with the exact
+hardware command sequence and remained upright.
+
+| metric | stock | tuned | change |
+|---|---:|---:|---:|
+| mean six-direction response NRMSE | 18.6310% | 14.2549% | -23.5% |
+| worst-direction response NRMSE | 22.9488% | 18.5812% | -19.0% |
+| position RMSE | 5.212 m | 4.337 m | -16.8% |
+| yaw RMSE | 0.792 rad | 0.418 rad | -47.2% |
+
+The tuned plant improved the held-out normalized low-level residual by 12.34%, and every measured
+held-out channel improved. The minimum pelvis height was 0.716 m, with maximum absolute roll of
+0.123 rad and pitch of 0.167 rad. Backward response worsened from 14.51% to 15.04% NRMSE but stayed
+below the 20% per-direction gate. These results use held-out command levels from one hardware run,
+not a second independent hardware validation recording.
 
 ## Reproduce
 
