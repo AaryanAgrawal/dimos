@@ -47,7 +47,7 @@ from dimos.control.hardware_interface import (
     ConnectedWholeBody,
 )
 from dimos.control.routing import Routing
-from dimos.control.task import ControlTask
+from dimos.control.task import ControlTask, CoordinatorState
 from dimos.control.tasks.trajectory_task.trajectory_task import (
     JointTrajectoryTask,
     TrajectoryCancellationResult,
@@ -705,7 +705,7 @@ class ControlCoordinator(Module):
             joint_state = JointState(name=names, velocity=velocities)
             self._dispatch("joint_command", joint_state)
 
-    def _unsafe(self, state: "CoordinatorState") -> str:
+    def _unsafe(self, state: CoordinatorState) -> str:
         """The first joint moving faster than the robot should, or empty when all are fine."""
         max_speed = self.config.max_joint_speed_rad_s
         if max_speed is None:
@@ -715,7 +715,7 @@ class ControlCoordinator(Module):
                 return f"{joint} at {speed:.1f} rad/s"
         return ""
 
-    def _check_safe(self, state: "CoordinatorState") -> None:
+    def _check_safe(self, state: CoordinatorState) -> None:
         """Latch E-STOP the first tick a joint is flailing."""
         if self._estopped:
             return
@@ -724,7 +724,7 @@ class ControlCoordinator(Module):
             logger.error(f"E-STOP: {reason}")
             self.set_estop(True)
 
-    def _apply_estop(self, name: "TaskName", task: "ControlTask") -> None:
+    def _apply_estop(self, name: TaskName, task: ControlTask) -> None:
         """Push the latch into one task; a task that fails must not silence the others."""
         handler = getattr(task, "set_estop", None)
         if not callable(handler):
