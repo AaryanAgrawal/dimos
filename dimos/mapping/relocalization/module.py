@@ -42,7 +42,6 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
-import numpy as np
 import reactivex as rx
 from reactivex import Subject, operators as ops
 
@@ -67,8 +66,10 @@ MAP_SUFFIX = ".pc2.lcm"
 class Fix(NamedTuple):
     """What one relocalization attempt concluded."""
 
-    # 4x4 placing live points into the prior map: p_map = transform @ p_world.
-    transform: np.ndarray
+    # Where the live frame sits in the prior map: `map` -> `world`, the pose
+    # of the robot's world origin expressed in the map. The TF tree wants the
+    # other direction, which `accept_relocalization` takes care of.
+    transform: Transform
     fitness: float  # in [0, 1], strategy-defined
     # Diagnostics: logged, never acted on. `rmse` is how tightly the matched
     # points sit where fitness only counts how many matched; `margin` is how
@@ -127,15 +128,7 @@ class RelocalizationModule(Module):
 
     def accept_relocalization(self, fix: Fix, source: str = "") -> None:
         """Publish a fix an implementation already decided to believe."""
-        # fix.transform maps world points into the map; the TF tree wants the
-        # frame transform, which is its inverse.
-        self.submit(
-            Transform.from_matrix(
-                fix.transform, frame_id=FRAME_MAP, child_frame_id=FRAME_WORLD
-            ).inverse(),
-            fix.fitness,
-            source,
-        )
+        self.submit(fix.transform.inverse(), fix.fitness, source)
 
     def submit(self, tf: Transform, fitness: float, source: str = "") -> None:
         """Publish a ``world -> map`` fix; fitness in [0, 1] is impl-defined."""

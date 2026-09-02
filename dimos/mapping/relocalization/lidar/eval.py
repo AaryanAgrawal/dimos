@@ -430,7 +430,7 @@ def run_probes(
             if frames >= max_frames:
                 break
 
-        T = fix.transform
+        T = fix.transform.to_matrix()
         truth_points = np.asarray(cloud.pointcloud.points)
         moved = applied(T, cloud)
         translation, rotation, tilt = identity_error(T)

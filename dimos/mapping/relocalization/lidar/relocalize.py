@@ -38,7 +38,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
-from dimos.mapping.relocalization.module import Fix
+from dimos.mapping.relocalization.module import FRAME_MAP, FRAME_WORLD, Fix
+from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.protocol.service.spec import BaseConfig
 
 if TYPE_CHECKING:
@@ -175,7 +176,7 @@ class LidarRelocalizer:
         return _Prepared(coarse=coarse, fpfh=fpfh, fine=fine)
 
     def align(self, local_map: PointCloud) -> Fix:
-        """The 4x4 T placing ``local_map`` into the prior map (p_map = T @ p_local).
+        """Where ``local_map`` sits in the prior map, as a ``map`` -> ``world`` Transform.
 
         Always answers, however poor the answer. :meth:`relocalize` is the
         one to call - this is for a caller that wants to see a refused fix,
@@ -233,7 +234,9 @@ class LidarRelocalizer:
         scored.sort(key=lambda r: r.fitness, reverse=True)
         best = scored[0]
         return Fix(
-            transform=np.asarray(best.transformation),
+            transform=Transform.from_matrix(
+                np.asarray(best.transformation), frame_id=FRAME_MAP, child_frame_id=FRAME_WORLD
+            ),
             fitness=float(best.fitness),
             rmse=float(best.inlier_rmse),
             margin=float(best.fitness - scored[1].fitness) if len(scored) > 1 else 0.0,

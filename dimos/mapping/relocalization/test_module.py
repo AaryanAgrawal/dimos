@@ -47,15 +47,20 @@ def test_accept_relocalization_inverts_the_fix():
     """A Fix maps world points into the map; the TF tree wants the frame transform."""
     T = np.eye(4)
     T[:3, 3] = [3.0, -1.0, 0.0]  # the map sits 3 m +x of where the robot thought it was
+    placement = Transform.from_matrix(T, frame_id="map", child_frame_id="world")
     m = RelocalizationModule.__new__(RelocalizationModule)
     m._world_to_map = Subject()
     m.config = Config()
     got = []
     m._world_to_map.subscribe(got.append)
 
-    m.accept_relocalization(Fix(transform=T, fitness=0.9), "test")
+    m.accept_relocalization(Fix(transform=placement, fitness=0.9), "test")
     assert (got[0].frame_id, got[0].child_frame_id) == ("world", "map")
     np.testing.assert_allclose(got[0].to_matrix(), np.linalg.inv(T), atol=1e-9)
+
+    # ... which makes submit's frame check a check on the Fix's own stamping.
+    with pytest.raises(AssertionError):
+        m.accept_relocalization(Fix(transform=Transform.from_matrix(T), fitness=0.9), "unstamped")
 
 
 def test_premap_defines_the_map_frame_and_waits_for_a_fix(tmp_path):
@@ -83,7 +88,7 @@ def test_relocalizer_refuses_below_its_own_threshold(monkeypatch):
     """One config surface: the relocalizer holds the knobs and the accept decision."""
     from dimos.mapping.relocalization.lidar import relocalize as lidar
 
-    fix = Fix(transform=np.eye(4), fitness=0.4, rmse=0.1, margin=0.0)
+    fix = Fix(transform=Transform(), fitness=0.4, rmse=0.1, margin=0.0)
     monkeypatch.setattr(lidar.LidarRelocalizer, "_prepare", lambda self, cloud: None)
     monkeypatch.setattr(lidar.LidarRelocalizer, "align", lambda self, cloud: fix)
 
