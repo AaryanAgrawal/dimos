@@ -19,6 +19,7 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.stream import In
 from dimos.core.transport import LCMTransport
 from dimos.mapping.costmapper import CostMapper
+from dimos.mapping.relocalization.fiducial.module import FiducialRelocalization
 from dimos.mapping.relocalization.go2.module import Go2Relocalization
 from dimos.mapping.voxels.module import VoxelGridMapper
 from dimos.memory.module import Recorder, RecorderConfig, pose_setter_for
@@ -100,6 +101,12 @@ unitree_go2_relocalization = autoconnect(
     unitree_go2,
     Go2Relocalization.blueprint(),
 ).global_config(n_workers=11)
+
+# Tag sightings only, no pointcloud premap: `-o fiducialrelocalization.marker_map_file=<survey>`.
+unitree_go2_fiducial_relocalization = autoconnect(
+    unitree_go2_markers,
+    FiducialRelocalization.blueprint(),
+).global_config(n_workers=12)
 
 unitree_go2_memory = autoconnect(
     unitree_go2,

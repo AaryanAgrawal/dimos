@@ -39,8 +39,13 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
+from dimos.perception.fiducial.marker_aggregation import AggregationConfig
 from dimos.perception.fiducial.marker_pose import camera_optical_frame_id, is_fisheye_model
-from dimos.perception.fiducial.marker_transformer import DetectMarkers, MarkersPerFrame
+from dimos.perception.fiducial.marker_transformer import (
+    AggregateTagBursts,
+    DetectMarkers,
+    MarkersPerFrame,
+)
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -61,6 +66,8 @@ class MarkerDetectionStreamModuleConfig(ModuleConfig):
     speed_limit_max_dps: float = Field(15.0, gt=0.0)
     tf_lookup_tolerance: float = Field(0.5, ge=0.0)
     camera_info: CameraInfo | None = None
+    # Per-glimpse gates + aggregation for aggregated_detections; first pose only after (min_observations - 1) * quality_window_s (1.0 s at defaults), the floor latency of a fix.
+    aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
 
 
 class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
@@ -71,10 +78,17 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
     color_image: In[Image]
     tf: In[TFMessage]
     detections: Out[Detection3DArray]
+    # One gated, aggregated pose per (marker, visit), not a per-frame mirror; same message type.
+    aggregated_detections: Out[Detection3DArray]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._warned_distortion_model = False
+        self._aggregate = AggregateTagBursts(
+            self.aggregated_detections.publish,
+            self.config.aggregation,
+            self.config.world_frame,
+        )
 
     def pipeline(self, stream: Stream[Image]) -> Stream[Detection3DArray]:
         result: Stream[Any] = stream.transform(
@@ -101,6 +115,8 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
                 )
             ),
         )
+        # tap yields every observation unchanged, so OpenCV runs once per frame
+        markers = markers.tap(self._aggregate)
         return markers.transform(MarkersPerFrame(frame_id=self.config.world_frame))
 
     def _maybe_warn_distortion(self, camera_info: CameraInfo) -> None:
@@ -157,9 +173,9 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
         Module.start(self)
 
         data_inputs = {name: port for name, port in self.inputs.items() if port is not self.tf}
-        if len(data_inputs) != 1 or len(self.outputs) != 1:
+        if len(data_inputs) != 1 or len(self.outputs) != 2:
             raise TypeError(
-                f"{self.__class__.__name__} must have exactly one In and one Out port, "
+                f"{self.__class__.__name__} must have exactly one In and two Out ports, "
                 f"found {len(data_inputs)} In and {len(self.outputs)} Out"
             )
 
