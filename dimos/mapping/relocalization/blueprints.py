@@ -138,7 +138,29 @@ class RecordingPlayer(Module):
 
 def _fine_points(cloud: Any) -> Any:
     """The premap is millimetre-scale; draw it at that size, not the 5 cm default."""
-    return cloud.to_rerun(voxel_size=0.0025)
+    return cloud.to_rerun(voxel_size=0.0015)
+
+
+# Off until asked for. The question this demo answers is whether the premap
+# and the live map land on top of each other, and the raw scans, the live
+# global map and the raycaster's region box all sit in the same space and
+# bury it. Toggle any of them back on in the viewer.
+HIDDEN = ("world/global_map", "world/lidar", "world/region_bounds")
+
+
+def _view() -> Any:
+    """The default 3D view, with the noisy entities off."""
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    return rrb.Blueprint(
+        rrb.Spatial3DView(
+            origin="world",
+            background=rrb.Background(kind="SolidColor", color=[0, 0, 0]),
+            line_grid=rrb.LineGrid3D(plane=rr.components.Plane3D.XY.with_distance(0.5)),
+            overrides={path: rrb.EntityBehavior(visible=False) for path in HIDDEN},
+        ),
+    )
 
 
 relocalize_mid360 = autoconnect(
@@ -149,5 +171,8 @@ relocalize_mid360 = autoconnect(
     # demo that looks wrong and an eval that scores badly are one bug.
     RayTracingVoxelMap.blueprint(voxel_size=0.1, world_frame=FRAME_WORLD, global_emit_every=5),
     LidarRelocalization.blueprint(map_file=DATASET, publish_loaded_map=True),
-    vis_module("rerun", {"visual_override": {"world/loaded_map": _fine_points}}),
+    vis_module(
+        "rerun",
+        {"visual_override": {"world/loaded_map": _fine_points}, "blueprint": _view},
+    ),
 ).global_config(n_workers=5, robot_model="relocalize_mid360")
