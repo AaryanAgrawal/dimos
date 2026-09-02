@@ -88,7 +88,7 @@ def test_relocalizer_refuses_below_its_own_threshold(monkeypatch):
     """One config surface: the relocalizer holds the knobs and the accept decision."""
     from dimos.mapping.relocalization.lidar import relocalize as lidar
 
-    fix = Fix(transform=Transform(), fitness=0.4, rmse=0.1, margin=0.0)
+    fix = lidar.LidarFix(transform=Transform(), fitness=0.4, rmse=0.1, margin=0.0)
     monkeypatch.setattr(lidar.LidarRelocalizer, "_prepare", lambda self, cloud: None)
     monkeypatch.setattr(lidar.LidarRelocalizer, "align", lambda self, cloud: fix)
 

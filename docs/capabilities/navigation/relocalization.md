@@ -189,9 +189,11 @@ that contract: every relocalizer, whatever it matches, loads a prior map and
 answers with a `Fix`, so it publishes the same two things: `tf`, and the placed
 prior map on `loaded_map`. The base owns both ports, `map_file` and the
 `.pc2.lcm` load behind it, and `accept_relocalization(fix)`, which inverts a
-fix into the `world → map` transform and republishes it. A `Fix` carries its
-placement as a `Transform` stamped `map → world`, so `submit`'s frame check
-doubles as a check that the implementation stamped it right. The loaded map lands in
+fix into the `world → map` transform and republishes it. A `Fix` is two
+fields: the placement, as a `Transform` stamped `map → world`, and a fitness in
+[0, 1]. Two is all a lidar, apriltag and GPS fix have in common; a strategy
+with more to report subclasses it, as `LidarFix` does with the ICP inlier RMSE
+and the RANSAC restart margin. The loaded map lands in
 `self.premap`, stamped into the `map` frame, and is republished on `loaded_map`
 only once a fix can resolve that frame.
 

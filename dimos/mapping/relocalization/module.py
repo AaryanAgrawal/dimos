@@ -40,7 +40,8 @@ MRO and ``start()`` chains through ``super()``.
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from typing import Any
 
 import reactivex as rx
 from reactivex import Subject, operators as ops
@@ -63,20 +64,20 @@ PUBLISH_INTERVAL = 2.0  # TF and loaded_map republish period
 MAP_SUFFIX = ".pc2.lcm"
 
 
-class Fix(NamedTuple):
-    """What one relocalization attempt concluded."""
+@dataclass(frozen=True)
+class Fix:
+    """What one relocalization attempt concluded.
+
+    Two fields, because two is all a GPS fix, an apriltag fix and a lidar fix
+    have in common. A strategy with more to report subclasses this - see
+    :class:`~dimos.mapping.relocalization.lidar.relocalize.LidarFix`.
+    """
 
     # Where the live frame sits in the prior map: `map` -> `world`, the pose
     # of the robot's world origin expressed in the map. The TF tree wants the
     # other direction, which `accept_relocalization` takes care of.
     transform: Transform
     fitness: float  # in [0, 1], strategy-defined
-    # Diagnostics: logged, never acted on. `rmse` is how tightly the matched
-    # points sit where fitness only counts how many matched; `margin` is how
-    # far the winning hypothesis beat the runner-up, near zero for a place
-    # the map matches in several spots equally well.
-    rmse: float = 0.0
-    margin: float = 0.0
 
 
 class Config(ModuleConfig):

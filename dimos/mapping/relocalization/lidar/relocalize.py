@@ -34,6 +34,7 @@ how to tune one for a rig that is not in ``PRESETS`` yet.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
@@ -49,6 +50,24 @@ if TYPE_CHECKING:
     # open3d ships no stubs, so mypy still widens them to Any.
     from open3d.geometry import PointCloud
     from open3d.pipelines.registration import Feature, RegistrationResult
+
+
+@dataclass(frozen=True)
+class LidarFix(Fix):
+    """A :class:`Fix` plus what the ICP/RANSAC pipeline saw producing it.
+
+    Logged and evaluated, never acted on - the accept decision is
+    ``fitness`` against ``fitness_threshold``, as it is for any strategy.
+    """
+
+    # Inlier RMSE: how tightly the matched points sit, where fitness only
+    # counts how many matched. Unlike fitness it does not inflate when the
+    # correspondence distance is widened.
+    rmse: float
+    # Best minus runner-up fitness across restarts. A place that matches many
+    # parts of the map equally well scores near zero here however confident
+    # any single hypothesis looks; with one restart it is 0.
+    margin: float
 
 
 class _Prepared(NamedTuple):
@@ -175,7 +194,7 @@ class LidarRelocalizer:
         fine = normals(cloud.voxel_down_sample(cfg.voxel_fine), cfg.voxel_fine)
         return _Prepared(coarse=coarse, fpfh=fpfh, fine=fine)
 
-    def align(self, local_map: PointCloud) -> Fix:
+    def align(self, local_map: PointCloud) -> LidarFix:
         """Where ``local_map`` sits in the prior map, as a ``map`` -> ``world`` Transform.
 
         Always answers, however poor the answer. :meth:`relocalize` is the
@@ -233,7 +252,7 @@ class LidarRelocalizer:
         ]
         scored.sort(key=lambda r: r.fitness, reverse=True)
         best = scored[0]
-        return Fix(
+        return LidarFix(
             transform=Transform.from_matrix(
                 np.asarray(best.transformation), frame_id=FRAME_MAP, child_frame_id=FRAME_WORLD
             ),
@@ -242,7 +261,7 @@ class LidarRelocalizer:
             margin=float(best.fitness - scored[1].fitness) if len(scored) > 1 else 0.0,
         )
 
-    def relocalize(self, local_map: PointCloud) -> Fix | None:
+    def relocalize(self, local_map: PointCloud) -> LidarFix | None:
         """The fix, or ``None`` when nothing cleared ``config.fitness_threshold``.
 
         Refusing is a real answer and the common one for a place the prior
