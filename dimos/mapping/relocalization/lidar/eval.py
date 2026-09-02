@@ -298,13 +298,18 @@ def coverage(name: str, cloud: PointCloud2) -> float:
 
 
 @lru_cache(maxsize=32)
-def probe_starts(name: str, samples: int) -> tuple[float, ...]:
+def probe_starts(name: str, samples: int, half_step: bool = False) -> tuple[float, ...]:
     """``samples`` starts spread evenly over the dataset's window.
 
     Deliberately unfiltered. A stretch the premap never saw is not a broken
     question - it is the negative half of the test, and the only place a
     false fix can be caught. Coverage labels each probe afterwards; it does
     not decide which ones are asked.
+
+    ``half_step`` shifts every start by half the spacing, giving a disjoint
+    set of the same size over the same window - the holdout. A config tuned
+    on one set and still good on the other did not merely memorise which
+    handful of places happen to be easy.
     """
     ds = DATASETS[name]
     _, store = fixtures(name)
@@ -314,8 +319,11 @@ def probe_starts(name: str, samples: int) -> tuple[float, ...]:
     if last < lo:
         raise ValueError(f"the {lo}-{hi}s window leaves no room for a probe")
     if samples == 1:
-        return (lo,)
-    return tuple(float(t) for t in np.linspace(lo, last, samples))
+        return (lo + (last - lo) / 2 if half_step else lo,)
+    starts = np.linspace(lo, last, samples)
+    if half_step:
+        starts = starts[:-1] + np.diff(starts) / 2
+    return tuple(float(t) for t in starts)
 
 
 @lru_cache(maxsize=8)
@@ -357,15 +365,16 @@ def run_probes(
     samples: int,
     voxel: float,
     config: RelocalizeConfig,
+    half_step: bool = False,
     echo: bool = False,
 ) -> list[Probe]:
-    """Relocalize ``frames`` accumulated scans from each covered start."""
+    """Relocalize ``frames`` accumulated scans from each start."""
     premap, _ = fixtures(name)
     # The premap's preprocessing depends on the config but not the probe, so
     # it is paid once per trial rather than once per probe.
     target = prepare(premap.pointcloud, config)
     probes: list[Probe] = []
-    for start in probe_starts(name, samples):
+    for start in probe_starts(name, samples, half_step):
         cloud = local_map(name, frames, start, voxel)
         t0, c0 = time.monotonic(), time.process_time()
         fix = relocalize(premap.pointcloud, cloud.pointcloud, config, prepared=target)
@@ -666,6 +675,85 @@ def tune(
             f"  {t.values[0]:4.0%} hit  {t.values[1]:4.0%} false  {t.values[2]:7.3f} m  "
             f"{t.values[3]:5.2f}s wall  {t.values[4]:5.1f}s cpu  {t.params}"
         )
+
+
+def config_from_params(params: dict[str, Any]) -> tuple[RelocalizeConfig, float, int]:
+    """Rebuild a trial's ``(config, cutoff, frames)`` from the params optuna recorded."""
+    fields = set(RelocalizeConfig.model_fields)
+    config = RelocalizeConfig(**{k: v for k, v in params.items() if k in fields})
+    return config, float(params["fitness_threshold"]), int(params["frames"])
+
+
+@app.command()
+def verify(
+    study_name: str = typer.Option(..., "--study", help="Study whose front to re-measure"),
+    top: int = typer.Option(8, "--top", help="Candidates to verify, cheapest latency first"),
+    repeats: int = typer.Option(10, "--repeats", "-r", help="Re-runs per candidate per probe set"),
+    samples: int = typer.Option(10, "--samples", "-s", help="Probes per run"),
+    voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
+    min_hit: float = typer.Option(1.0, "--min-hit", help="Hit rate a trial needed to qualify"),
+    dataset: str = DatasetOpt,
+    recording: str | None = RecordingOpt,
+    premap: str | None = PremapOpt,
+    lidar: str | None = LidarOpt,
+    start_s: float | None = FromOpt,
+    stop_s: float | None = ToOpt,
+) -> None:
+    """Re-measure a study's best configs, on its own probes and on fresh ones.
+
+    A trial's score is one draw of ``samples`` probes against an unseeded
+    RANSAC, so the trials that top a front are partly the lucky ones. This
+    runs each candidate ``repeats`` times to get a rate worth trusting, and
+    again on the half-step holdout, where a config that merely learned which
+    handful of places are easy will fall over.
+    """
+    import optuna
+
+    from dimos.evals.tuning import STORAGE
+
+    name = _register(dataset, recording, premap, lidar, start_s, stop_s)
+    study = optuna.load_study(study_name=study_name, storage=STORAGE)
+    clean = [t for t in study.trials if t.values and t.values[0] >= min_hit and t.values[1] == 0.0]
+    if not clean:
+        raise typer.BadParameter(
+            f"{study_name}: no trial reached {min_hit:.0%} hit with no false fixes"
+        )
+    clean.sort(key=lambda t: t.values[3])
+    print(
+        f"{study_name}: verifying {min(top, len(clean))} of {len(clean)} clean trials, {repeats}x each"
+    )
+    print()
+    print("  trial   probes hit      false     err_m   lat_s  frames grav ornt stg rst")
+
+    for trial in clean[:top]:
+        config, cutoff, frames = config_from_params(trial.params)
+        for label, half in (("tuned ", False), ("holdout", True)):
+            runs = [
+                summarize(
+                    run_probes(
+                        name,
+                        frames=frames,
+                        samples=samples,
+                        voxel=voxel,
+                        config=config,
+                        half_step=half,
+                    ),
+                    cutoff,
+                )
+                for _ in range(repeats)
+            ]
+            hit = [r[0] for r in runs]
+            false = [r[1] for r in runs]
+            err = [r[2] for r in runs if r[2] < NO_FIX_M]
+            p = trial.params
+            print(
+                f"  t{trial.number:<5d} {label:8s} {np.mean(hit):4.0%}+-{np.std(hit):<4.0%} "
+                f"{np.mean(false):4.0%}+-{np.std(false):<4.0%} "
+                f"{(np.mean(err) if err else float('nan')):6.3f} "
+                f"{np.mean([r[3] for r in runs]):6.2f}  {frames:5d} "
+                f"  {str(p['gravity_aligned'])[0]}    {str(p['orient_normals'])[0]}"
+                f"  {p['icp_stages']:2d}  {p['ransac_restarts']:2d}"
+            )
 
 
 if __name__ == "__main__":

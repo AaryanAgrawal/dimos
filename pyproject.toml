@@ -705,6 +705,9 @@ module = [
     "pxr.*",
     "trimesh",
     "trimesh.*",
+    # dev-group only (tuning), so absent from the default sync and from CI
+    "optuna",
+    "optuna.*",
 ]
 ignore_missing_imports = true
 

@@ -8,15 +8,18 @@ searches `RelocalizeConfig` for a better tradeoff between those.
     uv run python -m dimos.mapping.relocalization.lidar.eval run --frames 10 --view
     uv run python -m dimos.mapping.relocalization.lidar.eval tune --trials 100
 
-`run` needs nothing extra. `tune` needs optuna, which lives in the `dev`
-group - and `default-groups = ["tests"]`, so a plain `uv sync` does not
-install it:
+`run` needs nothing extra. `tune` and `verify` need optuna, which lives in
+the `dev` group, and this project sets `default-groups = ["tests"]` - so a
+plain `uv run` not only skips optuna, it *uninstalls* it as extraneous.
+Ask for the group on every invocation:
 
-    uv sync --group dev
+    uv run --group dev python -m dimos.mapping.relocalization.lidar.eval tune --trials 200
 
-On a machine where the maturin extensions are already built, prefer
-`VIRTUAL_ENV=$PWD/.venv uv pip install "optuna>=4.9.0"`, since `uv sync`
-prunes `dimos_voxel_ray_tracing` and `accumulate` needs it.
+`run` is unaffected and needs no group. Note that `uv sync` also prunes the
+maturin extensions (`dimos_voxel_ray_tracing`, which `accumulate` needs), so
+on a box where those are already built, re-add them with
+`uv run maturin develop --uv -m dimos/mapping/ray_tracing/rust/py/Cargo.toml`
+rather than re-syncing.
 
 ## What the eval needs
 
