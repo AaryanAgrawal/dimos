@@ -400,23 +400,42 @@ def probe_starts(name: str, samples: int, half_step: bool = False) -> tuple[floa
     false fix can be caught. Coverage labels each probe afterwards; it does
     not decide which ones are asked.
 
-    ``half_step`` shifts every start by half the spacing, giving a disjoint
-    set of the same size over the same window - the holdout. A config tuned
-    on one set and still good on the other did not merely memorise which
-    handful of places happen to be easy.
+    ``half_step`` returns the same number of starts, offset from the tuned
+    ones and over the same window - the holdout. A config tuned on one set
+    and still good on the other did not merely memorise which handful of
+    places happen to be easy, and the two rates are comparable only because
+    the counts match.
     """
+    if samples < 1:
+        raise ValueError(f"samples must be at least 1, got {samples}")
     ds = DATASETS[name]
     _, store = fixtures(name)
     lidar = store.stream(ds.lidar_stream, PointCloud2)
-    lo, hi = ds.window or (0.0, lidar.get_time_range()[1] - lidar.get_time_range()[0])
+    span = lidar.get_time_range()[1] - lidar.get_time_range()[0]
+    lo, hi = ds.window or (0.0, span)
+    # A window may name an end past the recording - `--from` with no `--to`
+    # does exactly that - and probes scheduled out there have no scans.
+    hi = min(hi, span)
     last = hi - PROBE_RESERVE_S
     if last < lo:
         raise ValueError(f"the {lo}-{hi}s window leaves no room for a probe")
     if samples == 1:
         return (lo + (last - lo) / 2 if half_step else lo,)
-    starts = np.linspace(lo, last, samples)
-    if half_step:
-        starts = starts[:-1] + np.diff(starts) / 2
+    tuned = np.linspace(lo, last, samples)
+    if not half_step:
+        return tuple(float(t) for t in tuned)
+    # Midpoints of a grid one finer: `samples` starts inside the same window,
+    # offset from the tuned ones. Taking midpoints of the tuned grid instead
+    # would return one probe fewer and compare unequal populations.
+    edges = np.linspace(lo, last, samples + 1)
+    starts = edges[:-1] + np.diff(edges) / 2
+    # Two evenly spaced grids over one window share their centre whenever
+    # `samples` is odd. Nudge those off, or the holdout would reuse a place
+    # the config was tuned on.
+    step = (last - lo) / samples
+    for i, start in enumerate(starts):
+        if np.isclose(start, tuned).any():
+            starts[i] = start + step / 4
     return tuple(float(t) for t in starts)
 
 
@@ -576,6 +595,8 @@ def summarize(probes: list[Probe]) -> tuple[float, float, float, float, float]:
     the wait is short. Five objectives make for a wide Pareto front - read
     it in the order the values come in.
     """
+    if not probes:
+        raise ValueError("summarize() needs at least one probe")
     latency = float(np.median([p.latency_s for p in probes]))
     answerable = sum(1 for p in probes if p.answerable)
     hits = [p for p in probes if p.outcome == "hit"]
@@ -646,7 +667,9 @@ def _register(
     window = base.window
     if window_from is not None or window_to is not None:
         lo = window_from if window_from is not None else (window[0] if window else 0.0)
-        hi = window_to if window_to is not None else (window[1] if window else 1e9)
+        # No upper bound given and none registered: `probe_starts` clamps to
+        # the recording, so ask for everything rather than inventing an end.
+        hi = window_to if window_to is not None else (window[1] if window else float("inf"))
         window = (lo, hi)
     DATASETS[dataset] = base._replace(
         recording=recording or base.recording,
@@ -667,7 +690,7 @@ ToOpt = typer.Option(None, "--to", help="Latest second probes may come from")
 
 @app.command()
 def run(
-    samples: int = typer.Option(10, "--samples", "-s", help="Probes over the window"),
+    samples: int = typer.Option(10, "--samples", "-s", min=1, help="Probes over the window"),
     voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
     preset: str = typer.Option(DEFAULT_PRESET, "--preset", help=f"One of {sorted(PRESETS)}"),
     cutoff: float | None = typer.Option(
@@ -787,7 +810,7 @@ def objective(
 @app.command()
 def tune(
     trials: int = typer.Option(50, "--trials", "-t", help="Optuna trials to run"),
-    samples: int = typer.Option(10, "--samples", "-s", help="Probes per trial"),
+    samples: int = typer.Option(10, "--samples", "-s", min=1, help="Probes per trial"),
     voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
     dataset: str = DatasetOpt,
     recording: str | None = RecordingOpt,
@@ -867,7 +890,7 @@ def verify(
     study_name: str = typer.Option(..., "--study", help="Study whose front to re-measure"),
     top: int = typer.Option(8, "--top", help="Candidates to verify, cheapest latency first"),
     repeats: int = typer.Option(10, "--repeats", "-r", help="Re-runs per candidate per probe set"),
-    samples: int = typer.Option(10, "--samples", "-s", help="Probes per run"),
+    samples: int = typer.Option(10, "--samples", "-s", min=1, help="Probes per run"),
     voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
     min_hit: float = typer.Option(1.0, "--min-hit", help="Hit rate a trial needed to qualify"),
     dataset: str = DatasetOpt,

@@ -17,24 +17,42 @@ from typing import get_type_hints
 
 import numpy as np
 import pytest
-from reactivex import Subject
 from scipy.spatial.transform import Rotation
 
 from dimos.core.stream import In
 from dimos.mapping.relocalization.lidar.module import LidarRelocalization
-from dimos.mapping.relocalization.module import Config, Fix, RelocalizationModule
+from dimos.mapping.relocalization.module import Fix, RelocalizationModule
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 
 
-def test_submit_publishes_and_checks_frames():
-    """submit no longer second-guesses fitness; the implementation already decided."""
-    m = RelocalizationModule.__new__(RelocalizationModule)  # no Module.__init__: no threads
-    m._world_to_map = Subject()
-    m.config = Config()
+@pytest.fixture
+def module():
+    """Build a real module (and dispose it); `cls, **config` picks the class."""
+    built = []
+
+    def build(cls=RelocalizationModule, **config):
+        m = cls(**config)
+        built.append(m)
+        return m
+
+    yield build
+    for m in built:
+        m.dispose()
+
+
+def fixes(m):
+    """Collect the transforms a module accepts."""
     got = []
     m._world_to_map.subscribe(got.append)
+    return got
+
+
+def test_submit_publishes_and_checks_frames(module):
+    """submit no longer second-guesses fitness; the implementation already decided."""
+    m = module()
+    got = fixes(m)
     tf = Transform.from_matrix(np.eye(4), frame_id="world", child_frame_id="map")
     m.submit(tf, 0.3, "x")
     m.submit(tf, 0.9, "x")
@@ -43,18 +61,19 @@ def test_submit_publishes_and_checks_frames():
         m.submit(Transform.from_matrix(np.eye(4), frame_id="map", child_frame_id="world"), 1.0)
 
 
-def test_accept_relocalization_inverts_the_fix():
+def test_accept_relocalization_inverts_the_fix(module):
     """A Fix maps world points into the map; the TF tree wants the frame transform."""
     T = np.eye(4)
     T[:3, 3] = [3.0, -1.0, 0.0]  # the map sits 3 m +x of where the robot thought it was
-    placement = Transform.from_matrix(T, frame_id="map", child_frame_id="world")
-    m = RelocalizationModule.__new__(RelocalizationModule)
-    m._world_to_map = Subject()
-    m.config = Config()
-    got = []
-    m._world_to_map.subscribe(got.append)
+    m = module()
+    got = fixes(m)
 
-    m.accept_relocalization(Fix(transform=placement, fitness=0.9), "test")
+    m.accept_relocalization(
+        Fix(
+            transform=Transform.from_matrix(T, frame_id="map", child_frame_id="world"), fitness=0.9
+        ),
+        "test",
+    )
     assert (got[0].frame_id, got[0].child_frame_id) == ("world", "map")
     np.testing.assert_allclose(got[0].to_matrix(), np.linalg.inv(T), atol=1e-9)
 
@@ -63,15 +82,9 @@ def test_accept_relocalization_inverts_the_fix():
         m.accept_relocalization(Fix(transform=Transform.from_matrix(T), fitness=0.9), "unstamped")
 
 
-def test_relocalize_once_stops_after_the_first_fix():
+def test_relocalize_once_stops_after_the_first_fix(module):
     """A premap fix does not go stale, so by default one is enough."""
     tf = Transform.from_matrix(np.eye(4), frame_id="world", child_frame_id="map")
-
-    def module(**cfg):
-        m = RelocalizationModule.__new__(RelocalizationModule)
-        m._world_to_map = Subject()
-        m.config = Config(**cfg)
-        return m
 
     once = module()
     assert once.keep_relocalizing() and not once.placed
@@ -83,16 +96,16 @@ def test_relocalize_once_stops_after_the_first_fix():
     assert forever.placed and forever.keep_relocalizing()
 
 
-def test_premap_defines_the_map_frame_and_waits_for_a_fix(tmp_path):
+def test_premap_defines_the_map_frame_and_waits_for_a_fix(module, tmp_path):
     """Loading is the base's: every strategy reads a premap and publishes it, once placed."""
     path = tmp_path / "somewhere.pc2.lcm"
     path.write_bytes(
         PointCloud2.from_numpy(np.zeros((5, 3), dtype=np.float32), timestamp=0.0).lcm_encode()
     )
-    m = RelocalizationModule.__new__(RelocalizationModule)
-    m._world_to_map = Subject()
-    m.config = Config(publish_loaded_map=True)
+    m = module(publish_loaded_map=True)
     published, disposables = [], []
+    # The one collaborator worth faking: a real Out port would publish onto a
+    # bus nothing in this test is listening to.
     m.loaded_map = SimpleNamespace(publish=published.append)
     m.register_disposable = disposables.append
 
