@@ -29,7 +29,11 @@ from reactivex import operators as ops
 
 from dimos.core.core import rpc
 from dimos.core.stream import In
-from dimos.mapping.relocalization.lidar.relocalize import LidarRelocalizer, RelocalizeConfig
+from dimos.mapping.relocalization.lidar.relocalize import (
+    MID360,
+    LidarRelocalizer,
+    RelocalizeConfig,
+)
 from dimos.mapping.relocalization.module import Config, RelocalizationModule
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import setup_logger
@@ -40,13 +44,14 @@ logger = setup_logger()
 
 class LidarConfig(Config):
     reloc_interval: float = 2.0
-    # Skip a cloud too sparse to be worth a match, in points of the *voxel
-    # map* the mapper emits - not raw sensor points. A mid360 sweep is only
-    # ~2.8k points and two of them voxel down to ~3.5k, which is already
-    # enough to relocalize; a rig whose mapper emits far more raises this in
-    # its own config subclass.
+    # Sanity check, skip a cloud too sparse to be worth a match,
+    # A mid360 sweep is only ~3k points and two of them voxel down to ~3.5k
+    # which is already enough to relocalize
     min_local_points: int = 2_000
-    relocalize: RelocalizeConfig = RelocalizeConfig()
+    # Which rig's measured scales to align with. mid360 because that is
+    # what has been measured; a different sensor wants its own preset
+    # (see relocalize.PRESETS and readme.md), not these numbers.
+    relocalize: RelocalizeConfig = MID360
 
 
 class LidarRelocalization(RelocalizationModule):

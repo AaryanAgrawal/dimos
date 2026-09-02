@@ -27,9 +27,10 @@ The map is preprocessed once when the relocalizer is built - downsampling
 it, estimating normals and computing FPFH features is the pipeline's
 dominant cost, and it does not change between queries.
 
-Every number in a :class:`RelocalizeConfig` was measured against one rig on
-one recording, so configs are named rather than universal. See readme.md for
-how to tune one for a rig that is not in ``PRESETS`` yet.
+Every scale in a :class:`RelocalizeConfig` was measured against one rig on
+one recording, so configs are named rather than universal - there is no
+default config, only :data:`PRESETS`. See readme.md for how to measure one
+for a rig that is not in there yet.
 """
 
 from __future__ import annotations
@@ -79,63 +80,68 @@ class _Prepared(NamedTuple):
 
 
 class RelocalizeConfig(BaseConfig):
-    """One rig's settings. Every field was a literal in the aligner's body.
+    """The aligner's knobs for **one rig**. There is no universal setting.
 
-    These are **not** universal numbers. They are scales - voxel sizes,
-    neighbourhood radii, correspondence distances - and a scale that suits a
-    mid360 walking an outdoor block is wrong for a room-sized map or a
-    denser sensor. Hence :data:`PRESETS`: a config is named after the rig it
-    was measured on, and a new rig gets its own entry rather than nudging
-    someone else's.
+    The fields with no default are scales - voxel sizes, neighbourhood radii,
+    correspondence distances - and a scale that suits a mid360 walking an
+    outdoor block is wrong for a room-sized map or a denser sensor. They are
+    required precisely so that no bare ``RelocalizeConfig()`` can quietly
+    mean somebody else's rig: to get one you either name a preset or state
+    your own numbers. What does carry a default is the handful of budgets and
+    caps below, which are about how hard to search rather than how big the
+    world is.
 
-    The defaults are the ``mid360`` preset, kept as the field defaults so a
-    bare ``RelocalizeConfig()`` is the best-known configuration rather than
-    an arbitrary one.
+    Measure a new rig's scales with a study (readme.md) and add it to
+    :data:`PRESETS`, rather than nudging an existing preset.
     """
 
-    voxel_coarse: float = 0.59  # FPFH + RANSAC scale
-    voxel_fine: float = 0.30  # ICP scale
+    voxel_coarse: float  # FPFH + RANSAC scale
+    voxel_fine: float  # ICP scale
     # Normal and feature neighbourhoods, in multiples of the working voxel.
-    normal_radius_factor: float = 1.72
-    fpfh_radius_factor: float = 4.13
-    normal_max_nn: int = 30
-    fpfh_max_nn: int = 100
+    normal_radius_factor: float
+    fpfh_radius_factor: float
     # RANSAC correspondence distance, in multiples of voxel_coarse.
-    coarse_dist_factor: float = 2.73
-    ransac_iters: int = 1_578_291
-    ransac_confidence: float = 0.999
-    ransac_n: int = 3
-    mutual_filter: bool = True
-    edge_length: float = 0.70
+    coarse_dist_factor: float
+    ransac_iters: int
+    mutual_filter: bool
+    edge_length: float
     # ICP correspondence distance, in multiples of voxel_fine - the distance
     # of the *last* stage. Earlier stages double it each step back, so a
     # hypothesis landing further out than the final threshold still has a
     # stage wide enough to see its correspondences. One stage is a single
     # pass at icp_dist_factor.
-    icp_dist_factor: float = 0.55
-    icp_stages: int = 2
-    icp_max_iter: int = 200
+    icp_dist_factor: float
+    icp_stages: int
     # Normal *sign* is arbitrary out of estimate_normals, and FPFH is built
     # from angles involving it, so two clouds scanned from different passes
     # describe the same corner differently. Pointing every normal into the
     # same half-space makes the descriptors comparable. Both maps must share
     # an up axis for that, which a lidar-inertial odometry gives on both
     # sides; a premap of unknown provenance should turn this off.
-    orient_normals: bool = True
+    orient_normals: bool
     # RANSAC is stochastic and its best hypothesis is sometimes simply
     # wrong; ICP then polishes a wrong answer. Restarts take the best of
     # several, and their spread is what `margin` reports. One suffices at
-    # these settings, where the iteration budget above already finds the
-    # place; restarts were what rescued the older, sparser search.
-    ransac_restarts: int = 1
-    # ICP fitness a fix must clear to be published. The two populations sit
-    # far apart - on the measured walk, fixes that found the right place
-    # score 0.84-0.94 and places absent from the premap score 0.04-0.24 - so
-    # this sits in the empty middle rather than snug against either. Being
-    # strict is not free: a relocalizer gets another cloud every couple of
-    # seconds, so a rejected fix is a retry, while an accepted wrong one is
-    # a TF the whole stack believes.
-    fitness_threshold: float = 0.5
+    # mid360's settings, where the iteration budget already finds the place;
+    # restarts were what rescued the older, sparser search.
+    ransac_restarts: int
+    # ICP fitness a fix must clear to be published. Where it sits depends on
+    # how far apart the two populations land for a given rig - on the
+    # measured mid360 walk, fixes that found the right place score 0.84-0.94
+    # and places absent from the premap score 0.04-0.24, so mid360 puts it in
+    # the empty middle rather than snug against either. Being strict is not
+    # free: a relocalizer gets another cloud every couple of seconds, so a
+    # rejected fix is a retry, while an accepted wrong one is a TF the whole
+    # stack believes.
+    fitness_threshold: float
+
+    # Search budgets and caps. Not scales, so not per-rig, so defaulted -
+    # tune them if a rig is slow, not because it is shaped differently.
+    normal_max_nn: int = 30
+    fpfh_max_nn: int = 100
+    ransac_confidence: float = 0.999
+    ransac_n: int = 3  # the minimum for a rigid transform
+    icp_max_iter: int = 200
 
 
 # Livox mid360 on a Go2, outdoors, against a premap of the same block.
@@ -143,7 +149,21 @@ class RelocalizeConfig(BaseConfig):
 # on probes it was never tuned against, where others dropped forty points.
 # Its two neighbours on the front agree to within a few percent on every
 # field, so this is a plateau rather than a spike.
-MID360 = RelocalizeConfig()
+MID360 = RelocalizeConfig(
+    voxel_coarse=0.59,
+    voxel_fine=0.30,
+    normal_radius_factor=1.72,
+    fpfh_radius_factor=4.13,
+    coarse_dist_factor=2.73,
+    ransac_iters=1_578_291,
+    mutual_filter=True,
+    edge_length=0.70,
+    icp_dist_factor=0.55,
+    icp_stages=2,
+    orient_normals=True,
+    ransac_restarts=1,
+    fitness_threshold=0.5,
+)
 
 # A rig's name to its measured settings. Add an entry by running a study for
 # that rig (readme.md); do not retune an existing one for a new sensor.
@@ -162,8 +182,8 @@ class LidarRelocalizer:
     argument would allow.
     """
 
-    def __init__(self, global_map: PointCloud, config: RelocalizeConfig | None = None) -> None:
-        self.config = config or PRESETS[DEFAULT_PRESET]
+    def __init__(self, global_map: PointCloud, config: RelocalizeConfig) -> None:
+        self.config = config
         self.map = global_map
         self._target = self._prepare(global_map)
 

@@ -2,7 +2,7 @@
 
 `relocalize()` places a small live cloud into a prior map. `eval.py` measures
 whether it finds the right place, how tightly, and how fast, and `tune`
-searches `RelocalizeConfig` for a better tradeoff between those.
+searches a rig's `RelocalizeConfig` for a better tradeoff between those.
 
     uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12
     uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12 --view
@@ -94,7 +94,7 @@ start=  63s  cover 100.0%  MISS  off 88.319 m  (65.416 m, 105.00 deg, tilt 55.22
 
 ## Tuning a new rig
 
-`RelocalizeConfig`'s numbers are scales - voxel sizes, neighbourhood radii,
+`RelocalizeConfig`'s required fields are scales - voxel sizes, neighbourhood radii,
 correspondence distances - so they belong to a sensor and an environment,
 not to relocalization in general. `PRESETS` names them after the rig they
 were measured on. A mid360 walking an outdoor block is the only entry so
@@ -162,9 +162,11 @@ trials with different values of those.
 
 ## Knobs
 
-Every field of `RelocalizeConfig` was a literal in `relocalize()`. The
-defaults are `align_fast` as measured, at the scale of an outdoor mid360
-walk — a different sensor or a room-sized map wants its own instance.
+Every field of `RelocalizeConfig` was a literal in the aligner's body. The
+scales are required, so there is no `RelocalizeConfig()` to fall into by
+accident; `MID360` is `align_fast` as measured on an outdoor mid360 walk, and
+a different sensor or a room-sized map gets its own instance next to it. The
+handful of defaulted fields are search budgets and caps, not scales.
 `objective()` declares which are searched and over what range; add one by
 calling `trial.suggest_*` there, and bump `SPACE`.
 

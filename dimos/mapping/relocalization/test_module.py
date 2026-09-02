@@ -93,18 +93,24 @@ def test_relocalizer_refuses_below_its_own_threshold(monkeypatch):
     monkeypatch.setattr(lidar.LidarRelocalizer, "align", lambda self, cloud: fix)
 
     def relocalizer(threshold):
-        return lidar.LidarRelocalizer(None, lidar.RelocalizeConfig(fitness_threshold=threshold))
+        return lidar.LidarRelocalizer(
+            None, lidar.MID360.model_copy(update={"fitness_threshold": threshold})
+        )
 
     assert relocalizer(0.5).relocalize(None) is None
     assert relocalizer(0.3).relocalize(None) is fix
 
 
-def test_presets_are_named_and_default_matches():
-    """A config is named after the rig it was measured on, not left universal."""
+def test_no_config_without_naming_a_rig():
+    """The scales are per-rig, so there is no bare RelocalizeConfig() to fall into."""
+    import pydantic
+
     from dimos.mapping.relocalization.lidar import relocalize as lidar
 
     assert lidar.DEFAULT_PRESET in lidar.PRESETS
-    assert lidar.PRESETS["mid360"] == lidar.RelocalizeConfig()
+    assert lidar.PRESETS["mid360"] is lidar.MID360
+    with pytest.raises(pydantic.ValidationError):
+        lidar.RelocalizeConfig()
 
 
 def test_from_matrix_inverse_matches_linalg_inv():
