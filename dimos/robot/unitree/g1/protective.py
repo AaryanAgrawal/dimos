@@ -21,9 +21,9 @@ import math
 
 # A standing G1 reads about 2 deg; a fall passes 45 deg on the way down.
 MAX_TILT_DEG = 45.0
-# SIMULATED GR00T: walking puts 1 joint past 4 rad/s, a lift 12 and a fall 17 - the widest split.
+# SIMULATED GR00T, steady state: walking puts at most 2 joints past 4 rad/s, a lift 12, a fall 17.
 FLAIL_JOINT_SPEED_RAD_S = 4.0
-# Two clear of walking, ten clear of a lift.
+# One clear of walking, nine clear of a lift; the split is flat from 3 to 6 rad/s.
 FLAIL_JOINT_COUNT = 3
 # SIMULATED: a lift or fall holds the reason for 0.5 s and more; the arming snap lasts 15 ms.
 STOP_HOLD_S = 0.05
