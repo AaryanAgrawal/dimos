@@ -52,10 +52,14 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import get_data
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from rich.table import Table
+
     from dimos.memory.store.sqlite import SqliteStore
 
 # Bump when the search space or the objective changes; it keys the study.
-SPACE = 12
+SPACE = 13
 
 # Every study lands here; browse with `uvx optuna-dashboard sqlite:///optuna.db`.
 STORAGE = "sqlite:///optuna.db"
@@ -82,13 +86,13 @@ PROBE_RESERVE_S = 5.0
 # next attempt's evidence. Retries therefore need no schedule: the frame
 # count for attempt N is simply everything the lidar has delivered by then,
 # which makes each failure cost the wall clock it actually costs and no
-# more. Start at MIN_FRAMES, give up past MAX_FRAMES.
+# more. Where the window starts and ends is `config.min_frames` /
+# `config.max_frames`, because how many sweeps it takes to recognise a place
+# is a fact about the sensor, not about this eval.
 #
 # The price is that every attempt is another chance to accept something
 # wrong, so this needs a stricter cutoff than a single shot would. That is
 # what the false-fix rate over the unmatchable probes is here to measure.
-MIN_FRAMES = 2
-MAX_FRAMES = 20
 
 # A local-map point this close to a premap point counts as covered.
 COVERAGE_TOL_M = 0.5
@@ -105,6 +109,64 @@ COVERAGE_FRAMES = 10
 # it anyway is the failure that matters most, because the module publishes
 # what it accepts and everything downstream believes the TF.
 MIN_COVERAGE = 0.8
+
+
+# Outcome to the colour it prints in. A false fix is the one that matters, so
+# it is the one that shouts.
+OUTCOME_STYLE = {
+    "hit": "green",
+    "missed": "yellow",
+    "refused": "dim",
+    "FALSE FIX": "bold white on red",
+}
+
+
+def _table(title: str, *columns: str) -> Table:
+    """A right-aligned table; a column name prefixed with ``<`` aligns left.
+
+    Headers are kept short on purpose: these tables run to ten columns and
+    get read in a half-width terminal, where rich would otherwise truncate
+    cells to `st…` and `NOT in …`.
+    """
+    from rich.table import Table
+
+    table = Table(title=title, title_justify="left", title_style="bold", header_style="bold cyan")
+    for col in columns:
+        table.add_column(
+            col.lstrip("<"), justify="left" if col.startswith("<") else "right", no_wrap=True
+        )
+    return table
+
+
+def probe_row(probe: Probe) -> list[str]:
+    """One probe as table cells, in PROBE_COLUMNS order."""
+    return [
+        f"{probe.start:.0f}s",
+        f"{probe.coverage:.0%}",
+        "in map" if probe.answerable else "outside",
+        f"[{OUTCOME_STYLE[probe.outcome]}]{probe.outcome}[/]"
+        + (" [yellow]TRUTH?[/]" if probe.truth_suspect else ""),
+        f"{probe.displacement_m:.3f}",
+        f"{probe.frames_used}/{probe.attempts}",
+        f"{probe.fitness:.3f}",
+        f"{probe.latency_s:.2f}",
+        f"{probe.wall_s:.2f}",
+        f"{probe.cpu_s:.0f}",
+    ]
+
+
+PROBE_COLUMNS = (
+    "start",
+    "cov",
+    "<where",
+    "<outcome",
+    "off m",
+    "f/t",
+    "fit",
+    "lat",
+    "wall",
+    "cpu",
+)
 
 
 class Dataset(NamedTuple):
@@ -171,6 +233,10 @@ class Probe(NamedTuple):
     # Seconds of scans gathered plus seconds spent matching them: the whole
     # wait for a fix, which is what the frame count actually trades against.
     latency_s: float
+    # Wall-clock seconds actually spent matching, with the waiting for scans
+    # taken out. The gap between this and `latency_s` is how much of the wait
+    # was gathering evidence rather than computing on it.
+    wall_s: float
     # CPU seconds across every thread, as `time` reports user+sys. Open3D
     # threads its FPFH and RANSAC, so this runs several times the wall clock
     # and by a ratio that is not constant - wall time alone cannot stand in
@@ -393,10 +459,8 @@ def run_probes(
     samples: int,
     voxel: float,
     config: RelocalizeConfig,
-    min_frames: int = MIN_FRAMES,
-    max_frames: int = MAX_FRAMES,
     half_step: bool = False,
-    echo: bool = False,
+    on_probe: Callable[[Probe], None] | None = None,
 ) -> list[Probe]:
     """Retry at each start until a fix clears the config's threshold, or evidence runs out.
 
@@ -417,14 +481,23 @@ def run_probes(
     rate = scan_rate(name)
     probes: list[Probe] = []
 
+    min_frames, max_frames = config.min_frames, config.max_frames
+
     for start in probe_starts(name, samples, half_step):
-        elapsed, cpu, attempts, accepted = min_frames / rate, 0.0, 0, False
+        # `elapsed` is the robot's clock: it starts owing the time it takes to
+        # gather min_frames, and each attempt adds the time that attempt took.
+        # `wall` and `cpu` are what the machine actually spent, which is not
+        # the same number - wall excludes the waiting, cpu counts every thread.
+        elapsed, wall, cpu = min_frames / rate, 0.0, 0.0
+        attempts, accepted = 0, False
         while True:
             frames = min(max(int(elapsed * rate), min_frames), max_frames)
             cloud = local_map(name, frames, start, voxel)
             t0, c0 = time.monotonic(), time.process_time()
             fix = relocalizer.align(cloud.pointcloud)
-            elapsed += time.monotonic() - t0
+            dt = time.monotonic() - t0
+            elapsed += dt
+            wall += dt
             cpu += time.process_time() - c0
             attempts += 1
             if fix.fitness >= config.fitness_threshold:
@@ -455,22 +528,14 @@ def run_probes(
                 attempts=attempts,
                 accepted=accepted,
                 latency_s=elapsed,
+                wall_s=wall,
                 cpu_s=cpu,
                 cloud=cloud,
                 transform=T,
             )
         )
-        if echo:
-            pr = probes[-1]
-            suspect = " TRUTH?" if pr.truth_suspect else ""
-            print(
-                f"  start={start:6.0f}s  cover {pr.coverage:5.1%}  "
-                f"{'in premap' if pr.answerable else 'NOT in map':10s} "
-                f"{pr.outcome:9s} off {pr.displacement_m:8.3f} m  "
-                f"{pr.frames_used:2d} frames / {pr.attempts} tries  "
-                f"fitness {pr.fitness:.3f}  {pr.latency_s:5.2f}s lat "
-                f"{pr.cpu_s:5.1f}s cpu{suspect}"
-            )
+        if on_probe is not None:
+            on_probe(probes[-1])
     return probes
 
 
@@ -608,9 +673,11 @@ def run(
     cutoff: float | None = typer.Option(
         None, "--cutoff", help="Override the preset's fitness_threshold"
     ),
-    min_frames: int = typer.Option(MIN_FRAMES, "--min-frames", help="Scans before the first try"),
-    max_frames: int = typer.Option(
-        MAX_FRAMES, "--max-frames", help="Scans after which it gives up"
+    min_frames: int | None = typer.Option(
+        None, "--min-frames", help="Override the preset's scans before the first try"
+    ),
+    max_frames: int | None = typer.Option(
+        None, "--max-frames", help="Override the preset's scans after which it gives up"
     ),
     dataset: str = DatasetOpt,
     recording: str | None = RecordingOpt,
@@ -627,17 +694,33 @@ def run(
     if preset not in PRESETS:
         raise typer.BadParameter(f"unknown preset {preset!r}; known: {', '.join(sorted(PRESETS))}")
     config = PRESETS[preset]
-    if cutoff is not None:
-        config = config.model_copy(update={"fitness_threshold": cutoff})
-    probes = run_probes(
-        name,
-        samples=samples,
-        voxel=voxel,
-        config=config,
-        min_frames=min_frames,
-        max_frames=max_frames,
-        echo=True,
+    overrides = {
+        "fitness_threshold": cutoff,
+        "min_frames": min_frames,
+        "max_frames": max_frames,
+    }
+    config = config.model_copy(update={k: v for k, v in overrides.items() if v is not None})
+    from rich.console import Console
+    from rich.live import Live
+
+    console = Console()
+    table = _table(
+        f"{name}  premap {len(pre):,} pts  preset={preset}  "
+        f"cutoff={config.fitness_threshold}  "
+        f"frames {config.min_frames}-{config.max_frames}",
+        *PROBE_COLUMNS,
     )
+    # Live so the rows appear as they are measured - a probe takes seconds,
+    # and a run of thirty should not look hung.
+    with Live(table, console=console, refresh_per_second=4):
+        probes = run_probes(
+            name,
+            samples=samples,
+            voxel=voxel,
+            config=config,
+            on_probe=lambda probe: table.add_row(*probe_row(probe)),
+        )
+
     hit_rate, false_rate, error, latency, cpu = summarize(probes)
     tally: dict[str, int] = {}
     for probe in probes:
@@ -645,10 +728,11 @@ def run(
     in_map = sum(1 for p in probes if p.answerable)
     suspect = sum(1 for p in probes if p.truth_suspect)
     accuracy = f"{error:.3f} m off when hit" if error < NO_FIX_M else "never found its place"
-    print(
-        f"{name} premap {len(pre)} pts, preset={preset} cutoff={config.fitness_threshold}: "
-        f"{hit_rate:.0%} of {in_map} in-map probes hit, "
-        f"{false_rate:.0%} false fixes of {len(probes)} total "
+    console.print()
+    console.print(
+        f"[bold]{hit_rate:.0%}[/] of {in_map} in-map probes hit, "
+        f"[{'red' if false_rate else 'green'}]{false_rate:.0%} false fixes[/] "
+        f"of {len(probes)} total "
         f"({', '.join(f'{n} {k}' for k, n in sorted(tally.items()))}), "
         f"{latency:.2f}s latency / {cpu:.1f}s cpu; {accuracy}"
         + (f"; {suspect} miss(es) fit the premap better than ground truth" if suspect else "")
@@ -665,6 +749,7 @@ def objective(
     The knobs are declared here by calling ``suggest_*`` - that is the search
     space, and why a conditional knob costs nothing to add.
     """
+    base = PRESETS[DEFAULT_PRESET]
     config = RelocalizeConfig(
         voxel_coarse=trial.suggest_float("voxel_coarse", 0.2, 2.0, log=True),
         voxel_fine=trial.suggest_float("voxel_fine", 0.1, 1.0, log=True),
@@ -681,16 +766,20 @@ def objective(
         # The publish gate is tuned alongside the aligner - it is what turns
         # a fitness number into a decision, and it is a field of the same config.
         fitness_threshold=trial.suggest_float("fitness_threshold", 0.0, 0.9),
+        # These belong in the search space - the window trades hit rate
+        # against latency exactly like the knobs above do. Taking them from
+        # the preset instead is a shortcut, and the preset's values are
+        # hand-picked. suggest_int them and bump SPACE when it is worth the
+        # trials.
+        min_frames=base.min_frames,
+        max_frames=base.max_frames,
     )
-    # How many scans the retry loop may reach before giving up. The counts
-    # in between are not searched - the clock sets them.
-    max_frames = trial.suggest_int("max_frames", 4, 30)
-    probes = run_probes(name, samples=samples, voxel=voxel, config=config, max_frames=max_frames)
+    probes = run_probes(name, samples=samples, voxel=voxel, config=config)
     hit_rate, false_rate, error, latency, cpu = summarize(probes)
     trial.set_user_attr("median_attempts", float(np.median([p.attempts for p in probes])))
     print(
         f"  trial {trial.number}: {hit_rate:.0%} hit, {false_rate:.0%} false, "
-        f"{error:.3f} m, {latency:.2f}s latency / {cpu:.1f}s cpu, max {max_frames} frames"
+        f"{error:.3f} m, {latency:.2f}s latency / {cpu:.1f}s cpu"
     )
     return hit_rate, false_rate, error, latency, cpu
 
@@ -730,19 +819,47 @@ def tune(
     s.set_metric_names(["hit_rate", "false_fix", "error_m", "latency_s", "cpu_s"])
     s.optimize(partial(objective, name=name, samples=samples, voxel=voxel), n_trials=trials)
     # The front is unordered; read it correctness-first, speed as the tiebreak.
-    print(f"\n{len(s.best_trials)} trials on the Pareto front:")
-    for t in sorted(s.best_trials, key=lambda t: (-t.values[0], *t.values[1:])):
-        print(
-            f"  {t.values[0]:4.0%} hit  {t.values[1]:4.0%} false  {t.values[2]:7.3f} m  "
-            f"{t.values[3]:5.2f}s wall  {t.values[4]:5.1f}s cpu  {t.params}"
+    from rich.console import Console
+
+    table = _table(
+        f"{len(s.best_trials)} trials on the Pareto front",
+        "trial",
+        "hit",
+        "false",
+        "err m",
+        "lat",
+        "cpu",
+    )
+    front = sorted(s.best_trials, key=lambda t: (-t.values[0], *t.values[1:]))
+    for t in front:
+        table.add_row(
+            f"t{t.number}",
+            f"[{'green' if t.values[0] == 1.0 else 'yellow'}]{t.values[0]:.0%}[/]",
+            f"[{'red' if t.values[1] else 'green'}]{t.values[1]:.0%}[/]",
+            f"{t.values[2]:.3f}",
+            f"{t.values[3]:.2f}",
+            f"{t.values[4]:.1f}",
         )
+    console = Console()
+    console.print(table)
+    # Params below rather than in a column: they are twelve fields wide and
+    # would squeeze every number in the table down to nothing.
+    for t in front:
+        params = ", ".join(
+            f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in t.params.items()
+        )
+        console.print(f"  [bold]t{t.number}[/]  {params}", highlight=False)
 
 
-def config_from_params(params: dict[str, Any]) -> tuple[RelocalizeConfig, int]:
-    """Rebuild a trial's ``(config, max_frames)`` from the params optuna recorded."""
+def config_from_params(params: dict[str, Any]) -> RelocalizeConfig:
+    """Rebuild a trial's config from the params optuna recorded.
+
+    Anything the study did not search (the retry window) comes from the
+    default preset, which is where it was set by hand.
+    """
     fields = set(RelocalizeConfig.model_fields)
-    config = RelocalizeConfig(**{k: v for k, v in params.items() if k in fields})
-    return config, int(params.get("max_frames", MAX_FRAMES))
+    searched = {k: v for k, v in params.items() if k in fields}
+    return PRESETS[DEFAULT_PRESET].model_copy(update=searched)
 
 
 @app.command()
@@ -778,40 +895,59 @@ def verify(
             f"{study_name}: no trial reached {min_hit:.0%} hit with no false fixes"
         )
     clean.sort(key=lambda t: t.values[3])
-    print(
-        f"{study_name}: verifying {min(top, len(clean))} of {len(clean)} clean trials, {repeats}x each"
-    )
-    print()
-    print("  trial   probes hit      false     err_m   lat_s  frames ornt stg rst")
+    from rich.console import Console
+    from rich.live import Live
 
-    for trial in clean[:top]:
-        config, max_frames = config_from_params(trial.params)
-        for label, half in (("tuned ", False), ("holdout", True)):
-            runs = [
-                summarize(
-                    run_probes(
-                        name,
-                        samples=samples,
-                        voxel=voxel,
-                        config=config,
-                        max_frames=max_frames,
-                        half_step=half,
+    console = Console()
+    table = _table(
+        f"{study_name}: {min(top, len(clean))} of {len(clean)} clean trials, {repeats}x each",
+        "trial",
+        "<probes",
+        "hit",
+        "false",
+        "err m",
+        "lat",
+        "frames",
+        "ornt",
+        "stg",
+        "rst",
+    )
+    # A candidate is two rows and many seconds; show them as they land.
+    with Live(table, console=console, refresh_per_second=4):
+        for trial in clean[:top]:
+            config = config_from_params(trial.params)
+            for label, half in (("tuned", False), ("holdout", True)):
+                runs = [
+                    summarize(
+                        run_probes(
+                            name,
+                            samples=samples,
+                            voxel=voxel,
+                            config=config,
+                            half_step=half,
+                        )
                     )
+                    for _ in range(repeats)
+                ]
+                hit = [r[0] for r in runs]
+                false = [r[1] for r in runs]
+                err = [r[2] for r in runs if r[2] < NO_FIX_M]
+                params = trial.params
+                table.add_row(
+                    f"t{trial.number}",
+                    label,
+                    f"[{'green' if np.mean(hit) == 1.0 else 'yellow'}]"
+                    f"{np.mean(hit):.0%}±{np.std(hit):.0%}[/]",
+                    f"[{'red' if np.mean(false) else 'green'}]"
+                    f"{np.mean(false):.0%}±{np.std(false):.0%}[/]",
+                    f"{(np.mean(err) if err else float('nan')):.3f}",
+                    f"{np.mean([r[3] for r in runs]):.2f}",
+                    str(config.max_frames),
+                    str(params["orient_normals"])[0],
+                    str(params["icp_stages"]),
+                    str(params["ransac_restarts"]),
+                    end_section=half,
                 )
-                for _ in range(repeats)
-            ]
-            hit = [r[0] for r in runs]
-            false = [r[1] for r in runs]
-            err = [r[2] for r in runs if r[2] < NO_FIX_M]
-            p = trial.params
-            print(
-                f"  t{trial.number:<5d} {label:8s} {np.mean(hit):4.0%}+-{np.std(hit):<4.0%} "
-                f"{np.mean(false):4.0%}+-{np.std(false):<4.0%} "
-                f"{(np.mean(err) if err else float('nan')):6.3f} "
-                f"{np.mean([r[3] for r in runs]):6.2f}  {max_frames:5d} "
-                f"  {str(p['orient_normals'])[0]}"
-                f"  {p['icp_stages']:2d}  {p['ransac_restarts']:2d}"
-            )
 
 
 if __name__ == "__main__":

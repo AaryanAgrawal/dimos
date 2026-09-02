@@ -134,6 +134,15 @@ class RelocalizeConfig(BaseConfig):
     # rejected fix is a retry, while an accepted wrong one is a TF the whole
     # stack believes.
     fitness_threshold: float
+    # The retry loop's evidence window, in accumulated scans. A relocalizer
+    # gets a first try once `min_frames` have arrived and keeps retrying on
+    # everything that has landed since, giving up past `max_frames`. Both are
+    # rig scales: how much of a place one sweep covers, and therefore how
+    # many it takes to be recognisable, is a fact about the sensor. These
+    # two are hand-picked rather than measured like the rest - a study
+    # should search them (tune.md).
+    min_frames: int
+    max_frames: int
 
     # Search budgets and caps. Not scales, so not per-rig, so defaulted -
     # tune them if a rig is slow, not because it is shaped differently.
@@ -162,7 +171,9 @@ MID360 = RelocalizeConfig(
     icp_stages=2,
     orient_normals=True,
     ransac_restarts=1,
-    fitness_threshold=0.5,
+    fitness_threshold=0.6,
+    min_frames=3,
+    max_frames=7,
 )
 
 # A rig's name to its measured settings. Add an entry by running a study for
