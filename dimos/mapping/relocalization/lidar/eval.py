@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from dimos.memory.store.sqlite import SqliteStore
 
 # Bump when the search space or the objective changes; it keys the study.
-SPACE = 9
+SPACE = 10
 
 # Ground truth, and the only thing that decides whether a fix is right: a
 # probe within this of identity found its place in the map. Real failures
@@ -68,6 +68,19 @@ NO_FIX_M = 1e3
 # frame count, so probes sit at the same places whatever `frames` a trial
 # picks - otherwise trials would be scored on subtly different questions.
 PROBE_RESERVE_S = 5.0
+
+# A robot does not get one guess. It keeps listening while it thinks, so a
+# failed match is not wasted time - the scans that arrived during it are the
+# next attempt's evidence. Retries therefore need no schedule: the frame
+# count for attempt N is simply everything the lidar has delivered by then,
+# which makes each failure cost the wall clock it actually costs and no
+# more. Start at MIN_FRAMES, give up past MAX_FRAMES.
+#
+# The price is that every attempt is another chance to accept something
+# wrong, so this needs a stricter cutoff than a single shot would. That is
+# what the false-fix rate over the unmatchable probes is here to measure.
+MIN_FRAMES = 2
+MAX_FRAMES = 20
 
 # A local-map point this close to a premap point counts as covered.
 COVERAGE_TOL_M = 0.5
@@ -107,12 +120,12 @@ DATASETS = {
     "go2-sf-area1": Dataset(
         recording="recording_go2_mid360_2026-05-29_4-45pm-PST_corrected.db",
         premap="recording_go2_mid360_2026-05-29_4-45pm-PST_corrected.pc2.lcm",
-        # Runs to 325 s, not 250 s, on purpose: 0-250 s is ground the loop
-        # revisits after 400 s and the premap therefore holds, while
-        # 250-325 s is part of a one-time excursion it never saw. Probes
-        # land in both, so every run carries places that must be found and
-        # places that must be refused.
-        window=(0.0, 325.0),
+        # Runs the full stretch before the premap's own scans: 0-250 s is
+        # ground the loop revisits after 400 s and the premap therefore
+        # holds, while 250-400 s is a one-time excursion it never saw.
+        # Probes land in both, so every run carries places that must be
+        # found and - about a third of them - places that must be refused.
+        window=(0.0, 400.0),
     ),
 }
 DEFAULT_DATASET = "go2-sf-area1"
@@ -139,6 +152,14 @@ class Probe(NamedTuple):
     fit_aligned_m: float
     fitness: float
     rmse: float
+    # Best minus runner-up fitness across RANSAC restarts; 0 with one restart.
+    margin: float
+    # Frames the ladder had reached when it stopped, and how many attempts
+    # that took. `accepted` is False when it climbed the whole ladder without
+    # a fix clearing the cutoff - a refusal, not a failure to run.
+    frames_used: int
+    attempts: int
+    accepted: bool
     # Seconds of scans gathered plus seconds spent matching them: the whole
     # wait for a fix, which is what the frame count actually trades against.
     latency_s: float
@@ -149,8 +170,6 @@ class Probe(NamedTuple):
     # everything else.
     cpu_s: float
     # Best minus runner-up fitness across RANSAC restarts; 0 with one restart.
-    margin: float
-    seconds: float
     cloud: PointCloud2
     transform: np.ndarray
 
@@ -164,15 +183,16 @@ class Probe(NamedTuple):
         """Did it land where ground truth says? Meaningless unless answerable."""
         return self.translation_m <= TOLERANCE_M and self.rotation_deg <= TOLERANCE_DEG
 
-    def outcome(self, fitness_threshold: float) -> str:
-        """What this probe proves, once the publish gate has had its say.
+    @property
+    def outcome(self) -> str:
+        """What this probe proves, once the ladder has stopped.
 
         ``hit`` and ``refused`` are the two right answers - one for a place
         the premap holds, one for a place it does not. ``FALSE FIX`` is the
         dangerous outcome: a transform the module would publish that puts
-        the robot somewhere it is not. ``missed`` merely wastes the fix.
+        the robot somewhere it is not. ``missed`` merely wastes the attempt.
         """
-        if self.fitness < fitness_threshold:
+        if not self.accepted:
             return "refused" if not self.answerable else "missed"
         if self.answerable and self.placed:
             return "hit"
@@ -361,26 +381,47 @@ def applied(T: np.ndarray, cloud: PointCloud2) -> np.ndarray:
 def run_probes(
     name: str,
     *,
-    frames: int,
+    cutoff: float,
     samples: int,
     voxel: float,
     config: RelocalizeConfig,
+    min_frames: int = MIN_FRAMES,
+    max_frames: int = MAX_FRAMES,
     half_step: bool = False,
     echo: bool = False,
 ) -> list[Probe]:
-    """Relocalize ``frames`` accumulated scans from each start."""
+    """Retry at each start until a fix clears ``cutoff``, or the evidence runs out.
+
+    Scans keep arriving while a match runs, so each attempt sees everything
+    the lidar has delivered by the time it starts - the clock, not a
+    schedule, decides how much evidence the next try gets. Latency is the
+    whole wait: the scans gathered before the attempt that answered, plus
+    every attempt made along the way, including the failed ones.
+    """
     premap, _ = fixtures(name)
     # The premap's preprocessing depends on the config but not the probe, so
-    # it is paid once per trial rather than once per probe.
+    # it is paid once per trial rather than once per attempt.
     target = prepare(premap.pointcloud, config)
+    rate = scan_rate(name)
     probes: list[Probe] = []
-    for start in probe_starts(name, samples, half_step):
-        cloud = local_map(name, frames, start, voxel)
-        t0, c0 = time.monotonic(), time.process_time()
-        fix = relocalize(premap.pointcloud, cloud.pointcloud, config, prepared=target)
-        seconds, cpu = time.monotonic() - t0, time.process_time() - c0
-        T = fix.transform
 
+    for start in probe_starts(name, samples, half_step):
+        elapsed, cpu, attempts, accepted = min_frames / rate, 0.0, 0, False
+        while True:
+            frames = min(max(int(elapsed * rate), min_frames), max_frames)
+            cloud = local_map(name, frames, start, voxel)
+            t0, c0 = time.monotonic(), time.process_time()
+            fix = relocalize(premap.pointcloud, cloud.pointcloud, config, prepared=target)
+            elapsed += time.monotonic() - t0
+            cpu += time.process_time() - c0
+            attempts += 1
+            if fix.fitness >= cutoff:
+                accepted = True
+                break
+            if frames >= max_frames:
+                break
+
+        T = fix.transform
         truth_points = np.asarray(cloud.pointcloud.points)
         moved = applied(T, cloud)
         translation, rotation, tilt = identity_error(T)
@@ -397,31 +438,31 @@ def run_probes(
                 fit_aligned_m=float(np.median(premap_distance(name, moved))),
                 fitness=fix.fitness,
                 rmse=fix.rmse,
-                latency_s=frames / scan_rate(name) + seconds,
-                cpu_s=cpu,
                 margin=fix.margin,
-                seconds=seconds,
+                frames_used=frames,
+                attempts=attempts,
+                accepted=accepted,
+                latency_s=elapsed,
+                cpu_s=cpu,
                 cloud=cloud,
                 transform=T,
             )
         )
         if echo:
-            p = probes[-1]
-            suspect = " TRUTH?" if p.truth_suspect else ""
+            pr = probes[-1]
+            suspect = " TRUTH?" if pr.truth_suspect else ""
             print(
-                f"  start={start:6.0f}s  cover {p.coverage:5.1%}  "
-                f"{'in premap' if p.answerable else 'NOT in map':10s} "
-                f"off {p.displacement_m:8.3f} m  (tilt {tilt:5.2f})  "
-                f"fit {p.fit_aligned_m:6.3f} vs truth {p.fit_truth_m:.3f}  "
-                f"fitness {p.fitness:.3f} rmse {p.rmse:.3f} margin {p.margin:.3f}  "
-                f"{seconds:4.1f}s wall {p.cpu_s:5.1f}s cpu{suspect}"
+                f"  start={start:6.0f}s  cover {pr.coverage:5.1%}  "
+                f"{'in premap' if pr.answerable else 'NOT in map':10s} "
+                f"{pr.outcome:9s} off {pr.displacement_m:8.3f} m  "
+                f"{pr.frames_used:2d} frames / {pr.attempts} tries  "
+                f"fitness {pr.fitness:.3f}  {pr.latency_s:5.2f}s lat "
+                f"{pr.cpu_s:5.1f}s cpu{suspect}"
             )
     return probes
 
 
-def summarize(
-    probes: list[Probe], fitness_threshold: float
-) -> tuple[float, float, float, float, float]:
+def summarize(probes: list[Probe]) -> tuple[float, float, float, float, float]:
     """``(hit rate, false fix rate, error, median latency)`` - the objective.
 
     Ground truth decides where a fix belongs; ``fitness_threshold`` decides
@@ -444,13 +485,12 @@ def summarize(
     ``error`` is the median displacement of the hits, since the rates alone
     cannot tell a 2 cm fix from a 45 cm one under a 50 cm tolerance.
 
-    ``latency`` is the wait for a fix end to end - the seconds spent
-    gathering the scans plus the seconds spent matching them. Those are one
-    currency to a robot standing still waiting to be told where it is, and
-    charging for both is what lets the frame count be searched rather than
-    fixed: more frames buys evidence and costs waiting, more RANSAC
-    iterations buys reliability and costs compute, and the front prices
-    them against each other.
+    ``latency`` is the whole wait, over every probe: from the first scan to
+    the moment there is either a fix or a refusal. It is measured across
+    retries, so it prices the real tradeoff - a slower matcher gets fewer
+    attempts in the same time but each sees more scans, and a stricter
+    cutoff buys safety by spending attempts. Nothing has to schedule the
+    frame count against the compute; the clock does it.
 
     ``cpu`` is last, and is not what ``latency`` already says: Open3D threads
     its FPFH and RANSAC, so a config can be quick on the clock while eating
@@ -460,10 +500,9 @@ def summarize(
     it in the order the values come in.
     """
     latency = float(np.median([p.latency_s for p in probes]))
-    outcomes = [p.outcome(fitness_threshold) for p in probes]
     answerable = sum(1 for p in probes if p.answerable)
-    hits = [p for p, o in zip(probes, outcomes, strict=True) if o == "hit"]
-    false_fixes = sum(1 for o in outcomes if o == "FALSE FIX")
+    hits = [p for p in probes if p.outcome == "hit"]
+    false_fixes = sum(1 for p in probes if p.outcome == "FALSE FIX")
     error = float(np.median([p.displacement_m for p in hits])) if hits else NO_FIX_M
     return (
         len(hits) / answerable if answerable else 0.0,
@@ -551,10 +590,13 @@ ToOpt = typer.Option(None, "--to", help="Latest second probes may come from")
 
 @app.command()
 def run(
-    frames: int = typer.Option(20, "--frames", "-n", help="Lidar scans per local map"),
-    samples: int = typer.Option(5, "--samples", "-s", help="Probes over the covered stretch"),
+    samples: int = typer.Option(10, "--samples", "-s", help="Probes over the window"),
     voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
     cutoff: float = typer.Option(0.45, "--cutoff", help="ICP fitness a fix must clear"),
+    min_frames: int = typer.Option(MIN_FRAMES, "--min-frames", help="Scans before the first try"),
+    max_frames: int = typer.Option(
+        MAX_FRAMES, "--max-frames", help="Scans after which it gives up"
+    ),
     gravity: bool = typer.Option(
         True,
         "--gravity/--no-gravity",
@@ -574,21 +616,23 @@ def run(
     pre, _ = fixtures(name)
     probes = run_probes(
         name,
-        frames=frames,
+        cutoff=cutoff,
         samples=samples,
         voxel=voxel,
         config=RelocalizeConfig(gravity_aligned=gravity),
+        min_frames=min_frames,
+        max_frames=max_frames,
         echo=True,
     )
-    hit_rate, false_rate, error, latency, cpu = summarize(probes, cutoff)
+    hit_rate, false_rate, error, latency, cpu = summarize(probes)
     tally: dict[str, int] = {}
     for probe in probes:
-        tally[probe.outcome(cutoff)] = tally.get(probe.outcome(cutoff), 0) + 1
+        tally[probe.outcome] = tally.get(probe.outcome, 0) + 1
     in_map = sum(1 for p in probes if p.answerable)
     suspect = sum(1 for p in probes if p.truth_suspect)
     accuracy = f"{error:.3f} m off when hit" if error < NO_FIX_M else "never found its place"
     print(
-        f"{name} premap {len(pre)} pts, frames={frames} cutoff={cutoff}: "
+        f"{name} premap {len(pre)} pts, cutoff={cutoff}: "
         f"{hit_rate:.0%} of {in_map} in-map probes hit, "
         f"{false_rate:.0%} false fixes of {len(probes)} total "
         f"({', '.join(f'{n} {k}' for k, n in sorted(tally.items()))}), "
@@ -626,16 +670,17 @@ def objective(
     # fitness number into a decision, and it lives on the module's own
     # `Config.fitness_threshold`.
     cutoff = trial.suggest_float("fitness_threshold", 0.0, 0.9)
-    # How long the robot gathers before asking. Not a RelocalizeConfig field
-    # - it belongs to the caller - but it trades directly against everything
-    # in one, so it is searched here and charged to latency.
-    frames = trial.suggest_int("frames", 2, 25)
-    probes = run_probes(name, frames=frames, samples=samples, voxel=voxel, config=config)
-    hit_rate, false_rate, error, latency, cpu = summarize(probes, cutoff)
-    trial.set_user_attr("frames", frames)
+    # How many scans the retry loop may reach before giving up. The counts
+    # in between are not searched - the clock sets them.
+    max_frames = trial.suggest_int("max_frames", 4, 30)
+    probes = run_probes(
+        name, cutoff=cutoff, samples=samples, voxel=voxel, config=config, max_frames=max_frames
+    )
+    hit_rate, false_rate, error, latency, cpu = summarize(probes)
+    trial.set_user_attr("median_attempts", float(np.median([p.attempts for p in probes])))
     print(
         f"  trial {trial.number}: {hit_rate:.0%} hit, {false_rate:.0%} false, "
-        f"{error:.3f} m, {latency:.2f}s latency / {cpu:.1f}s cpu at {frames} frames"
+        f"{error:.3f} m, {latency:.2f}s latency / {cpu:.1f}s cpu, max {max_frames} frames"
     )
     return hit_rate, false_rate, error, latency, cpu
 
@@ -678,10 +723,10 @@ def tune(
 
 
 def config_from_params(params: dict[str, Any]) -> tuple[RelocalizeConfig, float, int]:
-    """Rebuild a trial's ``(config, cutoff, frames)`` from the params optuna recorded."""
+    """Rebuild a trial's ``(config, cutoff, max_frames)`` from the params optuna recorded."""
     fields = set(RelocalizeConfig.model_fields)
     config = RelocalizeConfig(**{k: v for k, v in params.items() if k in fields})
-    return config, float(params["fitness_threshold"]), int(params["frames"])
+    return config, float(params["fitness_threshold"]), int(params.get("max_frames", MAX_FRAMES))
 
 
 @app.command()
@@ -726,19 +771,19 @@ def verify(
     print("  trial   probes hit      false     err_m   lat_s  frames grav ornt stg rst")
 
     for trial in clean[:top]:
-        config, cutoff, frames = config_from_params(trial.params)
+        config, cutoff, max_frames = config_from_params(trial.params)
         for label, half in (("tuned ", False), ("holdout", True)):
             runs = [
                 summarize(
                     run_probes(
                         name,
-                        frames=frames,
+                        cutoff=cutoff,
                         samples=samples,
                         voxel=voxel,
                         config=config,
+                        max_frames=max_frames,
                         half_step=half,
-                    ),
-                    cutoff,
+                    )
                 )
                 for _ in range(repeats)
             ]
@@ -750,7 +795,7 @@ def verify(
                 f"  t{trial.number:<5d} {label:8s} {np.mean(hit):4.0%}+-{np.std(hit):<4.0%} "
                 f"{np.mean(false):4.0%}+-{np.std(false):<4.0%} "
                 f"{(np.mean(err) if err else float('nan')):6.3f} "
-                f"{np.mean([r[3] for r in runs]):6.2f}  {frames:5d} "
+                f"{np.mean([r[3] for r in runs]):6.2f}  {max_frames:5d} "
                 f"  {str(p['gravity_aligned'])[0]}    {str(p['orient_normals'])[0]}"
                 f"  {p['icp_stages']:2d}  {p['ransac_restarts']:2d}"
             )
