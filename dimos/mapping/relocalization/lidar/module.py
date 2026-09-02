@@ -78,6 +78,7 @@ class LidarRelocalization(RelocalizationModule):
                 self.global_map.observable().pipe(  # type: ignore[no-untyped-call]
                     ops.throttle_first(self.config.reloc_interval),
                     ops.do_action(self._maybe_log_skip),
+                    ops.filter(lambda msg: self.keep_relocalizing()),
                     ops.filter(self._has_enough_points),
                 )
             ).subscribe(self._relocalize)

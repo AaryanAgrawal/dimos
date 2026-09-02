@@ -175,6 +175,7 @@ for example `--go2relocalization.map-file=…`.
 | `map_file` | `None` (module disabled) | Premap stem or path. dimOS appends `.pc2.lcm` automatically |
 | `relocalize.fitness_threshold` | `0.5` | Minimum ICP fitness to accept a relocalization (0 to 1). One of many `relocalize.*` aligner knobs - see [`lidar/readme.md`](/dimos/mapping/relocalization/lidar/readme.md) |
 | `publish_loaded_map` | `false` | Republish raw premap on `loaded_map` every 2 s, once a fix places it |
+| `relocalize_once` | `true` | Stop attempting once a fix is accepted. The accepted TF keeps being republished either way |
 | `use_carving` | `true` | Go2 only: column-carve when merging premap and live scan into `merged_map` |
 | `min_local_points` | `2000` | Minimum live map points before attempting relocalization |
 | `reloc_interval` | `2.0` | Seconds between relocalization attempts |

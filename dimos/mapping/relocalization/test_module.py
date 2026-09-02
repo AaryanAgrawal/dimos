@@ -63,6 +63,26 @@ def test_accept_relocalization_inverts_the_fix():
         m.accept_relocalization(Fix(transform=Transform.from_matrix(T), fitness=0.9), "unstamped")
 
 
+def test_relocalize_once_stops_after_the_first_fix():
+    """A premap fix does not go stale, so by default one is enough."""
+    tf = Transform.from_matrix(np.eye(4), frame_id="world", child_frame_id="map")
+
+    def module(**cfg):
+        m = RelocalizationModule.__new__(RelocalizationModule)
+        m._world_to_map = Subject()
+        m.config = Config(**cfg)
+        return m
+
+    once = module()
+    assert once.keep_relocalizing() and not once.placed
+    once.submit(tf, 0.9)
+    assert once.placed and not once.keep_relocalizing()
+
+    forever = module(relocalize_once=False)
+    forever.submit(tf, 0.9)
+    assert forever.placed and forever.keep_relocalizing()
+
+
 def test_premap_defines_the_map_frame_and_waits_for_a_fix(tmp_path):
     """Loading is the base's: every strategy reads a premap and publishes it, once placed."""
     path = tmp_path / "somewhere.pc2.lcm"

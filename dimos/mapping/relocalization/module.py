@@ -86,12 +86,20 @@ class Config(ModuleConfig):
     # attempts a fix.
     map_file: str | None = None
     publish_loaded_map: bool = False
+    # Stop attempting once a fix is accepted. A premap fix does not go stale
+    # the way odometry does - the accepted transform keeps being republished
+    # either way - so carrying on only spends CPU and gives a later, worse
+    # attempt a chance to overwrite a good answer. Set False where the robot
+    # is expected to drift far enough that the fix must be re-earned.
+    relocalize_once: bool = True
 
 
 class RelocalizationModule(Module):
     config: Config
     tf: Out[TFMessage]
     loaded_map: Out[PointCloud2]
+
+    _placed: bool = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -127,6 +135,15 @@ class RelocalizationModule(Module):
                 .subscribe(lambda _: self.loaded_map.publish(premap))
             )
 
+    @property
+    def placed(self) -> bool:
+        """Whether any fix has been accepted yet."""
+        return self._placed
+
+    def keep_relocalizing(self) -> bool:
+        """Whether to keep attempting. Implementations gate their input on this."""
+        return not (self._placed and self.config.relocalize_once)
+
     def accept_relocalization(self, fix: Fix, source: str = "") -> None:
         """Publish a fix an implementation already decided to believe."""
         self.submit(fix.transform.inverse(), fix.fitness, source)
@@ -142,3 +159,6 @@ class RelocalizationModule(Module):
             f"TF {FRAME_WORLD!r} -> {FRAME_MAP!r} t={tf.translation}"
         )
         self._world_to_map.on_next(tf)
+        if not self._placed and self.config.relocalize_once:
+            logger.info(f"relocalize {source}: placed, no further attempts (relocalize_once)")
+        self._placed = True
