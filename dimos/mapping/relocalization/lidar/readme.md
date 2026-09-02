@@ -8,6 +8,16 @@ searches `RelocalizeConfig` for a better tradeoff between those.
     uv run python -m dimos.mapping.relocalization.lidar.eval run --frames 10 --view
     uv run python -m dimos.mapping.relocalization.lidar.eval tune --trials 100
 
+`run` needs nothing extra. `tune` needs optuna, which lives in the `dev`
+group - and `default-groups = ["tests"]`, so a plain `uv sync` does not
+install it:
+
+    uv sync --group dev
+
+On a machine where the maturin extensions are already built, prefer
+`VIRTUAL_ENV=$PWD/.venv uv pip install "optuna>=4.9.0"`, since `uv sync`
+prunes `dimos_voxel_ray_tracing` and `accumulate` needs it.
+
 ## What the eval needs
 
 A recording and a premap **in one coordinate frame**. The usual way to get
