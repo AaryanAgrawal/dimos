@@ -21,7 +21,6 @@ from scipy.spatial.transform import Rotation
 
 from dimos.core.stream import In
 from dimos.mapping.relocalization.lidar.module import LidarRelocalization
-from dimos.mapping.relocalization.lidar.relocalize import _yaw_only
 from dimos.mapping.relocalization.module import Config, RelocalizationModule
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
@@ -81,48 +80,3 @@ def test_dual_strategy_merges_ports():
     hints = get_type_hints(Dual)
     assert {"tf", "global_map", "loaded_map", "detections"} <= hints.keys()
     assert Dual.blueprint() is not None
-
-
-def test_yaw_only_keeps_yaw_and_translation_drops_tilt():
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_euler("xyz", [0.12, -0.09, 0.7]).as_matrix()
-    T[:3, 3] = [3.0, -4.0, 0.5]
-    flat = _yaw_only(T)
-
-    np.testing.assert_allclose(flat[:3, 3], T[:3, 3])
-    # Gravity is untouched: the flattened z-axis is exactly vertical.
-    np.testing.assert_allclose(flat[:3, 2], [0, 0, 1], atol=1e-12)
-    assert Rotation.from_matrix(flat[:3, :3]).as_euler("xyz")[2] == pytest.approx(0.7, abs=0.02)
-
-
-def test_yaw_only_is_identity_on_a_pure_yaw():
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_euler("z", 1.1).as_matrix()
-    T[:3, 3] = [1.0, 2.0, 3.0]
-    np.testing.assert_allclose(_yaw_only(T), T, atol=1e-12)
-
-
-def test_yaw_only_pivot_keeps_the_cloud_where_the_hypothesis_put_it():
-    """Flattening about the origin moves a distant cloud metres; about its centre, not at all."""
-    pts = np.array([[-52.0, -41.0, 4.0], [-55.0, -38.0, 2.0], [-50.0, -44.0, 3.0]])
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_euler("xyz", [np.radians(2.0), 0.0, 0.3]).as_matrix()
-    T[:3, 3] = [1.0, -2.0, 0.1]
-    moved = pts @ T[:3, :3].T + T[:3, 3]
-
-    centre = pts.mean(axis=0)
-    pivoted = _yaw_only(T, pivot=centre)
-    # The cloud's centre lands exactly where the unflattened transform put it.
-    np.testing.assert_allclose(
-        pivoted[:3, :3] @ centre + pivoted[:3, 3], T[:3, :3] @ centre + T[:3, 3], atol=1e-9
-    )
-    # Gravity is still removed.
-    np.testing.assert_allclose(pivoted[:3, 2], [0, 0, 1], atol=1e-12)
-
-    at_origin = _yaw_only(T)
-    origin_shift = np.linalg.norm(
-        (pts @ at_origin[:3, :3].T + at_origin[:3, 3]) - moved, axis=1
-    ).mean()
-    pivot_shift = np.linalg.norm((pts @ pivoted[:3, :3].T + pivoted[:3, 3]) - moved, axis=1).mean()
-    assert origin_shift > 1.0, origin_shift
-    assert pivot_shift < 0.2, pivot_shift

@@ -79,12 +79,11 @@ start=  63s  cover 100.0%  MISS  off 88.319 m  (65.416 m, 105.00 deg, tilt 55.22
   the robot actually feels. The parenthesised translation/rotation/tilt are
   the decomposition, useful for diagnosis, not for ranking.
 - **tilt** — the part of the rotation that takes gravity off vertical. Both
-  clouds come from a gravity-aligned odometry, so a correct fix has none.
-  Tilt in a result is *provably* error, which is what `gravity_aligned` in
-  `RelocalizeConfig` exploits by flattening the RANSAC hypothesis to yaw
-  before ICP refines it. On by default, since both maps normally come from
-  lidar-inertial odometry; `--no-gravity` turns it off for a premap whose
-  frame you do not know to be level.
+  clouds come from a lidar-inertial odometry, so a correct fix has none, and
+  tilt in a result is *provably* error rather than a near miss. It is
+  reported as a diagnostic, not enforced: constraining the hypothesis to
+  yaw was tried and measured as a wash once its pivot bug was fixed, so the
+  code went rather than sit unmeasured and on by default.
 - **fit … vs truth** — median point-to-premap distance where the aligner put
   the cloud, against where ground truth says it belongs. A miss that fits
   *better* than truth (`TRUTH?`) means the recording's own poses drifted and

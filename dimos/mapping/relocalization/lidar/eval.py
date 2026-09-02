@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from dimos.memory.store.sqlite import SqliteStore
 
 # Bump when the search space or the objective changes; it keys the study.
-SPACE = 11
+SPACE = 12
 
 # Ground truth, and the only thing that decides whether a fix is right: a
 # probe within this of identity found its place in the map. Real failures
@@ -360,10 +360,11 @@ def identity_error(T: np.ndarray) -> tuple[float, float, float]:
     """``(meters, degrees, tilt degrees)`` that ``T`` sits from identity.
 
     Tilt is the part of the rotation that takes gravity off vertical. Both
-    clouds are gravity-aligned, so a correct fix has none of it, and telling
-    it apart from yaw says which failures a gravity prior could have caught:
-    a tilted hypothesis is physically impossible, a purely yawed one is the
-    right pose at the wrong place in the map and looks perfectly legal.
+    clouds come from a lidar-inertial odometry, so a correct fix has none of
+    it and a tilted answer is physically impossible - which makes tilt a
+    free sanity check on a result, separate from how far it landed. A purely
+    yawed miss is the more dangerous kind: the right pose at the wrong place
+    in the map, and it looks perfectly legal.
     """
     translation = float(np.linalg.norm(T[:3, 3]))
     cos = (float(np.trace(T[:3, :3])) - 1.0) / 2.0
@@ -602,11 +603,6 @@ def run(
     max_frames: int = typer.Option(
         MAX_FRAMES, "--max-frames", help="Scans after which it gives up"
     ),
-    gravity: bool = typer.Option(
-        True,
-        "--gravity/--no-gravity",
-        help="Flatten the RANSAC hypothesis to yaw (both clouds gravity-aligned)",
-    ),
     dataset: str = DatasetOpt,
     recording: str | None = RecordingOpt,
     premap: str | None = PremapOpt,
@@ -619,7 +615,7 @@ def run(
     """Relocalize N accumulated scans against the premap, from starts across the window."""
     name = _register(dataset, recording, premap, lidar, start_s, stop_s)
     pre, _ = fixtures(name)
-    config = RelocalizeConfig(gravity_aligned=gravity)
+    config = RelocalizeConfig()
     if cutoff is not None:
         config = config.model_copy(update={"fitness_threshold": cutoff})
     probes = run_probes(
@@ -669,7 +665,6 @@ def objective(
         edge_length=trial.suggest_float("edge_length", 0.7, 0.99),
         icp_dist_factor=trial.suggest_float("icp_dist_factor", 0.2, 1.5),
         icp_stages=trial.suggest_int("icp_stages", 1, 4),
-        gravity_aligned=trial.suggest_categorical("gravity_aligned", [True, False]),
         orient_normals=trial.suggest_categorical("orient_normals", [True, False]),
         ransac_restarts=trial.suggest_int("ransac_restarts", 1, 3),
         # The publish gate is tuned alongside the aligner - it is what turns
@@ -772,7 +767,7 @@ def verify(
         f"{study_name}: verifying {min(top, len(clean))} of {len(clean)} clean trials, {repeats}x each"
     )
     print()
-    print("  trial   probes hit      false     err_m   lat_s  frames grav ornt stg rst")
+    print("  trial   probes hit      false     err_m   lat_s  frames ornt stg rst")
 
     for trial in clean[:top]:
         config, max_frames = config_from_params(trial.params)
@@ -799,7 +794,7 @@ def verify(
                 f"{np.mean(false):4.0%}+-{np.std(false):<4.0%} "
                 f"{(np.mean(err) if err else float('nan')):6.3f} "
                 f"{np.mean([r[3] for r in runs]):6.2f}  {max_frames:5d} "
-                f"  {str(p['gravity_aligned'])[0]}    {str(p['orient_normals'])[0]}"
+                f"  {str(p['orient_normals'])[0]}"
                 f"  {p['icp_stages']:2d}  {p['ransac_restarts']:2d}"
             )
 

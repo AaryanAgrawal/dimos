@@ -32,10 +32,6 @@ import numpy as np
 from dimos.protocol.service.spec import BaseConfig
 
 if TYPE_CHECKING:
-    # open3d is imported lazily inside the functions that need it - it is a
-    # heavy import and a module-scope one would cost every process that
-    # merely touches this file. These names are for reading the signatures;
-    # open3d ships no stubs, so mypy still widens them to Any.
     from open3d.geometry import PointCloud
     from open3d.pipelines.registration import Feature, RegistrationResult
 
@@ -75,34 +71,6 @@ class Fix(NamedTuple):
     # many parts of the map equally well scores near zero here however
     # confident any single hypothesis looks; with one restart it is 0.
     margin: float
-
-
-def _yaw_only(T: np.ndarray, pivot: np.ndarray | None = None) -> np.ndarray:
-    """``T`` with roll and pitch dropped, rotating about ``pivot``.
-
-    The yaw is read off the transformed x-axis rather than by decomposing
-    Euler angles, so a hypothesis tilted right past vertical degrades
-    instead of hitting a gimbal singularity.
-
-    ``pivot`` matters more than the flattening itself. Swapping the rotation
-    while keeping the translation pivots the cloud about the world origin,
-    and these clouds sit a hundred metres from it - half a degree of tilt
-    then throws them 0.36 m, past the distance ICP will look, so the
-    correction destroys the hypothesis it was meant to clean up. Pivoting
-    about the cloud's own centre removes the tilt and leaves the cloud where
-    the hypothesis put it. ``None`` keeps the origin, which is only right
-    when the cloud is already centred there.
-    """
-    yaw = np.arctan2(T[1, 0], T[0, 0])
-    c, s = np.cos(yaw), np.sin(yaw)
-    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-    pivot = np.zeros(3) if pivot is None else np.asarray(pivot, dtype=float)
-
-    flat = np.eye(4)
-    flat[:3, :3] = rotation
-    # The pivot lands where the original transform put it; only the tilt goes.
-    flat[:3, 3] = (T[:3, :3] @ pivot + T[:3, 3]) - rotation @ pivot
-    return flat
 
 
 class RelocalizeConfig(BaseConfig):
@@ -145,20 +113,10 @@ class RelocalizeConfig(BaseConfig):
     # Normal *sign* is arbitrary out of estimate_normals, and FPFH is built
     # from angles involving it, so two clouds scanned from different passes
     # describe the same corner differently. Pointing every normal into the
-    # same half-space makes the descriptors comparable. Needs a shared up
-    # axis, which gravity_aligned already asserts.
+    # same half-space makes the descriptors comparable. Both maps must share
+    # an up axis for that, which a lidar-inertial odometry gives on both
+    # sides; a premap of unknown provenance should turn this off.
     orient_normals: bool = True
-    # Both clouds gravity-aligned, so the transform between them is a pure
-    # yaw and any roll or pitch RANSAC proposes is error by construction.
-    # On: the constraint is simply true when both maps come from a
-    # lidar-inertial odometry, and it removes a degree of freedom the answer
-    # cannot use. The tuning measured it as a wash once _yaw_only pivots
-    # about the cloud rather than the origin (before that fix it was
-    # actively harmful, which is why the search buried it) - a wash on a
-    # walk whose hypotheses rarely come out tilted is not evidence against
-    # the cases where they do. Turn it off for a premap whose frame is not
-    # known to be level.
-    gravity_aligned: bool = True
     # RANSAC is stochastic and its best hypothesis is sometimes simply
     # wrong; ICP then polishes a wrong answer. Restarts take the best of
     # several, and their spread is what `margin` reports. One suffices at
@@ -266,10 +224,7 @@ def align(premap: PreparedMap, local_map: PointCloud) -> Fix:
 
     scored: list[RegistrationResult] = []
     for _ in range(max(cfg.ransac_restarts, 1)):
-        coarse_T = np.asarray(hypothesis().transformation)
-        if cfg.gravity_aligned:
-            coarse_T = _yaw_only(coarse_T, pivot=np.asarray(source.coarse.points).mean(axis=0))
-        scored.append(refine(coarse_T))
+        scored.append(refine(np.asarray(hypothesis().transformation)))
 
     scored.sort(key=lambda r: r.fitness, reverse=True)
     best = scored[0]
