@@ -22,7 +22,6 @@ make_humanoid_joints("g1") (left leg -> right leg -> waist -> left arm -> right 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 import threading
 from threading import Thread
 import time
@@ -47,6 +46,12 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
+from dimos.robot.unitree.g1.protective import (
+    FLAIL_JOINT_COUNT,
+    FLAIL_JOINT_SPEED_RAD_S,
+    MAX_TILT_DEG,
+    stop_reason,
+)
 from dimos.spec.control import EStop
 from dimos.utils.logging_config import setup_logger
 
@@ -64,12 +69,6 @@ _MODE_MACHINE_G1: int = 5
 # from make_humanoid_joints("g1") agrees on the wire-level name -> motor-index mapping.
 G1_JOINT_NAMES: list[str] = make_humanoid_joints("g1")
 assert len(G1_JOINT_NAMES) == _NUM_MOTORS
-
-
-def _tilt_deg(quaternion: tuple[float, float, float, float]) -> float:
-    """Angle between the pelvis z axis and gravity, from the (w,x,y,z) IMU quaternion."""
-    _w, x, y, _z = quaternion
-    return math.degrees(math.acos(min(1.0, max(-1.0, 1.0 - 2.0 * (x * x + y * y)))))
 
 
 def _imu_from_unitree_wxyz(
@@ -92,8 +91,9 @@ def _imu_from_unitree_wxyz(
 
 class G1WholeBodyConnectionConfig(ModuleConfig):
     network_interface: str = Field(default="")
-    # A standing G1 reads about 2 deg; a fall passes 45 deg on the way down.
-    max_tilt_deg: float = Field(default=45.0, gt=0.0, le=90.0)
+    max_tilt_deg: float = Field(default=MAX_TILT_DEG, gt=0.0, le=90.0)
+    flail_joint_speed_rad_s: float = Field(default=FLAIL_JOINT_SPEED_RAD_S, gt=0.0)
+    flail_joint_count: int = Field(default=FLAIL_JOINT_COUNT, ge=1, le=_NUM_MOTORS)
     release_sport_mode: bool = True
     publish_rate_hz: float = 500.0
     frame_id: str = "g1_pelvis"
@@ -142,7 +142,7 @@ class G1WholeBodyConnection(Module):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-        self._fallen = False
+        self._stopped = False
         self._publisher: ChannelPublisher | None = None
         self._subscriber: ChannelSubscriber | None = None
         self._low_cmd: LowCmd_ | None = None
@@ -223,6 +223,7 @@ class G1WholeBodyConnection(Module):
         # Fresh soft-start every time control is (re)acquired.
         self._soft_start_t0 = None
         self._soft_start_done = False
+        self._stopped = False
 
         self.register_disposable(Disposable(self.motor_command.subscribe(self._on_motor_command)))
 
@@ -383,7 +384,7 @@ class G1WholeBodyConnection(Module):
             self._drain_low_state()
             sample = self._snapshot_motor_imu()
             if sample is not None:
-                self._check_upright(sample)
+                self._check_protective(sample)
                 self._publish_motor_state_and_imu(now=time.time(), frame_id=frame_id, sample=sample)
 
             next_tick += period
@@ -393,15 +394,35 @@ class G1WholeBodyConnection(Module):
             else:
                 next_tick = time.perf_counter()
 
-    def _check_upright(self, sample: G1LowStateSnapshot) -> None:
-        """Stop the robot the first time it tilts past the limit; never un-stop it."""
-        if self._fallen:
+    def _check_protective(self, sample: G1LowStateSnapshot) -> None:
+        """Damp the robot the first time it falls or flails; only stop() clears it."""
+        if self._stopped:
             return
-        tilt_deg = _tilt_deg(sample.quaternion)
-        if tilt_deg > self.config.max_tilt_deg:
-            self._fallen = True
-            logger.error(f"E-STOP: fallen, tilt {tilt_deg:.0f} deg")
-            self._estop.set_estop(True)
+        reason = stop_reason(
+            sample.quaternion,
+            sample.velocities,
+            max_tilt_deg=self.config.max_tilt_deg,
+            flail_joint_speed_rad_s=self.config.flail_joint_speed_rad_s,
+            flail_joint_count=self.config.flail_joint_count,
+        )
+        if reason:
+            self._damp(sample.positions)
+            logger.error("E-STOP", reason=reason)
+            self._estop.estop()
+
+    def _damp(self, positions: list[float]) -> None:
+        """Keep the last commanded kd with no stiffness, and refuse every later motor command."""
+        with self._lock:
+            self._stopped = True
+            if self._low_cmd is None or self._crc is None or self._publisher is None:
+                return
+            for i in range(_NUM_MOTORS):
+                self._low_cmd.motor_cmd[i].q = positions[i]
+                self._low_cmd.motor_cmd[i].dq = 0.0
+                self._low_cmd.motor_cmd[i].kp = 0
+                self._low_cmd.motor_cmd[i].tau = 0
+            self._low_cmd.crc = self._crc.Crc(self._low_cmd)
+            self._publisher.Write(self._low_cmd)
 
     def _soft_start_scale(self, now: float) -> float:
         """Stiffness scale in [0, 1] for this command frame. Caller holds the lock."""
@@ -426,6 +447,8 @@ class G1WholeBodyConnection(Module):
             return
 
         with self._lock:
+            if self._stopped:
+                return
             if (
                 self._low_cmd is None
                 or self._crc is None

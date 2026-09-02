@@ -29,12 +29,14 @@ from pathlib import Path
 import time
 from typing import Any
 
+from dimos.hardware.spec import JointLimits
 from dimos.hardware.whole_body.spec import (
     POS_STOP,
     IMUState,
     MotorCommand,
     MotorState,
 )
+from dimos.robot.unitree.g1.protective import stop_reason
 from dimos.simulation.engines.mujoco_shm import (
     ManipShmReader,
     shm_key_from_path,
@@ -78,6 +80,8 @@ class SimMujocoG1WholeBodyAdapter:
         self._shm_key = shm_key_from_path(address)
         self._shm: ManipShmReader | None = None
         self._connected = False
+        self._stopped = False
+        self._kd = [0.0] * _NUM_MOTORS
 
     # Lifecycle
 
@@ -133,6 +137,9 @@ class SimMujocoG1WholeBodyAdapter:
     def is_connected(self) -> bool:
         return self._connected and self._shm is not None
 
+    def get_limits(self) -> JointLimits | None:
+        return None
+
     # IO (WholeBodyAdapter protocol)
 
     def read_motor_states(self) -> list[MotorState]:
@@ -157,6 +164,10 @@ class SimMujocoG1WholeBodyAdapter:
             return IMUState()
         assert self._shm is not None
         quat, gyro, accel = self._shm.read_imu()
+        if not self._stopped:
+            reason = stop_reason(quat, self._shm.read_velocities(_NUM_MOTORS))
+            if reason:
+                self._damp(reason)
         # rpy is left at its zero default to match the real G1 adapter
         # (TransportWholeBodyAdapter._on_imu). The WBC task's observation
         # uses only quaternion + gyroscope, so euler is never read downstream.
@@ -178,9 +189,21 @@ class SimMujocoG1WholeBodyAdapter:
         # Flatten the per-motor command into per-joint arrays.  POS_STOP
         # ("no command") is replaced with 0.0 - the engine's PD only
         # acts when kp > 0 anyway, so a zeroed q is harmless.
+        if self._stopped:
+            return True
         q = [cmd.q if cmd.q != POS_STOP else 0.0 for cmd in commands]
         kp = [cmd.kp for cmd in commands]
-        kd = [cmd.kd for cmd in commands]
+        self._kd = [cmd.kd for cmd in commands]
         tau = [cmd.tau for cmd in commands]
-        self._shm.write_pd_tau_command(q, kp, kd, tau)
+        self._shm.write_pd_tau_command(q, kp, self._kd, tau)
         return True
+
+    def _damp(self, reason: str) -> None:
+        """Keep the last commanded kd with no stiffness, and drop every later command."""
+        assert self._shm is not None
+        self._stopped = True
+        zeros = [0.0] * _NUM_MOTORS
+        self._shm.write_pd_tau_command(
+            self._shm.read_positions(_NUM_MOTORS), zeros, self._kd, zeros
+        )
+        logger.error("E-STOP", reason=reason)

@@ -22,7 +22,8 @@ from dimos.spec.utils import Spec
 class EStop(Spec, Protocol):
     """Stops the robot. Declare it bare and a blueprint without a provider fails to build."""
 
-    def set_estop(self, estopped: bool) -> bool: ...
+    def estop(self) -> bool: ...
+    def clear_estop(self) -> bool: ...
 
 
 class LocalPlanner(Protocol):

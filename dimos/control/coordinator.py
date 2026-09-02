@@ -47,7 +47,7 @@ from dimos.control.hardware_interface import (
     ConnectedWholeBody,
 )
 from dimos.control.routing import Routing
-from dimos.control.task import ControlTask, CoordinatorState
+from dimos.control.task import ControlTask
 from dimos.control.tasks.trajectory_task.trajectory_task import (
     JointTrajectoryTask,
     TrajectoryCancellationResult,
@@ -93,8 +93,6 @@ class ControlCoordinatorConfig(ModuleConfig):
     """Configuration for the ControlCoordinator."""
 
     tick_rate: float = 100.0
-    # Off unless a blueprint sets it: a robot-agnostic coordinator has no safe default.
-    max_joint_speed_rad_s: float | None = None
     publish_joint_state: bool = True
     # Transitional: goes away once every consumer reads per-robot streams.
     publish_robot_joint_states: bool = False
@@ -705,25 +703,6 @@ class ControlCoordinator(Module):
             joint_state = JointState(name=names, velocity=velocities)
             self._dispatch("joint_command", joint_state)
 
-    def _unsafe(self, state: CoordinatorState) -> str:
-        """The first joint moving faster than the robot should, or empty when all are fine."""
-        max_speed = self.config.max_joint_speed_rad_s
-        if max_speed is None:
-            return ""
-        for joint, speed in state.joints.joint_velocities.items():
-            if abs(speed) > max_speed:
-                return f"{joint} at {speed:.1f} rad/s"
-        return ""
-
-    def _check_safe(self, state: CoordinatorState) -> None:
-        """Latch E-STOP the first tick a joint is flailing."""
-        if self._estopped:
-            return
-        reason = self._unsafe(state)
-        if reason:
-            logger.error(f"E-STOP: {reason}")
-            self.set_estop(True)
-
     def _apply_estop(self, name: TaskName, task: ControlTask) -> None:
         """Push the latch into one task; a task that fails must not silence the others."""
         handler = getattr(task, "set_estop", None)
@@ -747,6 +726,16 @@ class ControlCoordinator(Module):
             for name, task in self._tasks.items():
                 self._apply_estop(name, task)
         return True
+
+    @rpc
+    def estop(self) -> bool:
+        """Latch E-STOP on every task."""
+        return self.set_estop(True)
+
+    @rpc
+    def clear_estop(self) -> bool:
+        """Release the latch; nothing dropped at the stop replays."""
+        return self.set_estop(False)
 
     @rpc
     def set_activated(self, engaged: bool) -> None:
@@ -940,7 +929,6 @@ class ControlCoordinator(Module):
             publish_robot_callback=publish_robot_cb,
             frame_id=self.config.joint_state_frame_id,
             log_ticks=self.config.log_ticks,
-            safety_callback=self._check_safe,
         )
         self._tick_loop.start()
 

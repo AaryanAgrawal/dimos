@@ -21,7 +21,6 @@ from collections.abc import Generator
 import pytest
 
 from dimos.control.coordinator import ControlCoordinator
-from dimos.control.task import CoordinatorState, JointStateSnapshot
 
 
 class _Task:
@@ -49,56 +48,34 @@ class _Angry:
         raise RuntimeError("boom")
 
 
-def _state(speed: float) -> CoordinatorState:
-    """One tick with a single joint moving at speed rad/s."""
-    return CoordinatorState(
-        joints=JointStateSnapshot(
-            joint_positions={"j": 0.0},
-            joint_velocities={"j": speed},
-            joint_efforts={"j": 0.0},
-            timestamp=0.0,
-        ),
-        imu={},
-        t_now=0.0,
-        dt=0.01,
-    )
-
-
 @pytest.fixture()
-def armed() -> Generator[ControlCoordinator, None, None]:
-    module = ControlCoordinator(max_joint_speed_rad_s=20.0)
+def coordinator() -> Generator[ControlCoordinator, None, None]:
+    module = ControlCoordinator()
     try:
         yield module
     finally:
         module._close_module()
 
 
-def test_unconfigured_never_trips() -> None:
-    """The limit defaults to None, so existing stacks keep their behaviour exactly."""
-    module = ControlCoordinator()
-    try:
-        assert module._unsafe(_state(speed=999)) == ""
-    finally:
-        module._close_module()
+def test_estop_reaches_every_task_and_clear_releases_them(coordinator: ControlCoordinator) -> None:
+    """estop() latches a task; clear_estop() releases the latch without starting anything."""
+    task = _Task()
+    coordinator._tasks["t"] = task  # type: ignore[assignment]
+    assert coordinator.estop() and task.estopped
+    assert coordinator.clear_estop() and not task.estopped
 
 
-@pytest.mark.parametrize(("speed", "expected"), [(19.0, ""), (25.0, "rad/s")])
-def test_flailing_joint(armed: ControlCoordinator, speed: float, expected: str) -> None:
-    """A joint past the limit names itself; one under it is fine."""
-    assert expected in armed._unsafe(_state(speed=speed))
-
-
-def test_one_bad_task_cannot_swallow_the_stop(armed: ControlCoordinator) -> None:
+def test_one_bad_task_cannot_swallow_the_stop(coordinator: ControlCoordinator) -> None:
     """A task that raises or has no handler must not stop the latch reaching the rest."""
     good = _Task()
-    armed._tasks.update({"angry": _Angry(), "deaf": _Deaf(), "good": good})  # type: ignore[dict-item]
-    armed.set_estop(True)
+    coordinator._tasks.update({"angry": _Angry(), "deaf": _Deaf(), "good": good})  # type: ignore[dict-item]
+    coordinator.estop()
     assert good.estopped
 
 
-def test_a_task_registered_after_the_trip_comes_up_stopped(armed: ControlCoordinator) -> None:
+def test_a_task_registered_after_the_trip_comes_up_stopped(coordinator: ControlCoordinator) -> None:
     """The latch lives on the coordinator, so a late task cannot come up live."""
-    armed.set_estop(True)
+    coordinator.estop()
     late = _Task("late")
-    armed._apply_estop("late", late)  # type: ignore[arg-type]
+    coordinator._apply_estop("late", late)  # type: ignore[arg-type]
     assert late.estopped
