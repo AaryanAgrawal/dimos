@@ -33,10 +33,13 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
+from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.mapping.relocalization.lidar.module import LidarRelocalization
-from dimos.mapping.voxels.module import VoxelGridMapper
+from dimos.mapping.relocalization.module import FRAME_WORLD
 from dimos.memory.store.sqlite import SqliteStore
+from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.vis_module import vis_module
@@ -51,7 +54,10 @@ DATASET = "recording_go2_mid360_2026-05-29_4-45pm-PST_corrected"
 
 class RecordingPlayerConfig(ModuleConfig):
     dataset: str = DATASET  # recording stem or path; `.db`, LFS-fetched on miss
-    stream: str = "fastlio_lidar"  # already registered into the world frame
+    stream: str = "fastlio_lidar"
+    # Frame to stamp the sensor cloud and the tf that places it. Only a label:
+    # the raycaster looks up `world -> <this>` and never reads the name.
+    sensor_frame: str = "lidar_link"
     speed: float = 1.0
     seek: float | None = None
     duration: float | None = None
@@ -59,15 +65,38 @@ class RecordingPlayerConfig(ModuleConfig):
 
 
 class RecordingPlayer(Module):
-    """Publish one stream of a recording on ``lidar``, paced by its own timestamps."""
+    """Replay a recording's lidar as a live sensor would: cloud plus the tf that places it.
+
+    A recorded scan comes in one of two shapes, and the mapper downstream
+    wants neither of them directly. Point-LIO stores the sensor-frame cloud
+    with its pose alongside; FAST-LIO stores the cloud already registered
+    into the world. Both are published here as the sensor frame plus a
+    ``world -> sensor`` transform, so the raycaster registers them itself and
+    knows where the rays started from - which is the whole point of using it
+    over a mapper that just stacks clouds.
+    """
 
     config: RecordingPlayerConfig
     lidar: Out[PointCloud2]
+    tf: Out[TFMessage]
 
     @rpc
     def start(self) -> None:
         super().start()
         path = resolve_named_path(self.config.dataset, ".db")
+        # A separate store for the pose scan: reading a stream to exhaustion
+        # leaves the replay's own iteration on a closed database.
+        scan = SqliteStore(path=str(path), must_exist=True)
+        scan.start()
+        try:
+            poses = {
+                obs.ts: obs.pose
+                for obs in scan.stream(self.config.stream, PointCloud2)
+                if obs.pose is not None
+            }
+        finally:
+            scan.dispose()
+
         store = self.register_disposable(SqliteStore(path=str(path), must_exist=True))
         store.start()
         replay = store.replay(
@@ -78,17 +107,42 @@ class RecordingPlayer(Module):
         )
         stream: Any = replay.stream(self.config.stream)
         logger.info(
-            f"Replaying {path.name}:{self.config.stream} "
-            f"({stream.count()} frames at {self.config.speed}x)"
+            f"Replaying {path.name}:{self.config.stream} ({stream.count()} frames "
+            f"at {self.config.speed}x, {len(poses)} posed)"
         )
-        self.register_disposable(stream.observable().subscribe(self.lidar.publish))
+        self.register_disposable(stream.observable().subscribe(self._publish(poses)))
+
+    def _publish(self, poses: dict[float, Any]) -> Any:
+        frame = self.config.sensor_frame
+
+        def publish(cloud: PointCloud2) -> None:
+            pose = poses.get(cloud.ts)
+            if pose is None:  # unposed scan: nothing can place it
+                return
+            tf = Transform.from_pose(FRAME_WORLD, pose)
+            tf.child_frame_id = frame
+            # The recording's stamp, not the wall clock: the raycaster matches
+            # a cloud to a transform by stamp, within a scan period.
+            tf.ts = cloud.ts
+            if cloud.frame_id == FRAME_WORLD:
+                # Already registered by the recording's LIO. Undo it, so the
+                # raycaster does the placing and both recording shapes take
+                # one path.
+                cloud = cloud.transform(tf.inverse())
+            cloud.frame_id = frame
+            self.tf.publish(TFMessage(tf))
+            self.lidar.publish(cloud)
+
+        return publish
 
 
 relocalize_mid360 = autoconnect(
     RecordingPlayer.blueprint(),
-    # The Go2 stack's mapper, at its settings, so `global_map` is the message
-    # the relocalizer meets in production.
-    VoxelGridMapper.blueprint(emit_every=5),
+    # The raycaster, not VoxelGridMapper: it registers each cloud through tf
+    # and clears the space the rays passed through, which is also what the
+    # eval accumulates its local maps with. Same mapper on both sides means a
+    # demo that looks wrong and an eval that scores badly are one bug.
+    RayTracingVoxelMap.blueprint(voxel_size=0.1, world_frame=FRAME_WORLD, global_emit_every=5),
     LidarRelocalization.blueprint(map_file=DATASET, publish_loaded_map=True),
     vis_module("rerun"),
 ).global_config(n_workers=5, robot_model="relocalize_mid360")
