@@ -17,7 +17,7 @@
 
 Give it a recording and a premap built from the same world, and it probes:
 accumulate a few lidar scans from one moment of the walk, relocalize that
-little cloud against the premap, and check where it landed. See eval.md
+little cloud against the premap, and check where it landed. See tune.md
 for the tuning workflow.
 
 The recording and the premap must share a coordinate frame - the usual way

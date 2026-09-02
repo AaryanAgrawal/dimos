@@ -1,13 +1,13 @@
 # Tuning lidar relocalization
 
-`relocalize()` places a small live cloud into a prior map. `eval.py` measures
+`relocalize()` places a small live cloud into a prior map. `tune.py` measures
 whether it finds the right place, how tightly, and how fast, and `tune`
 searches a rig's `RelocalizeConfig` for a better tradeoff between those.
 
-    uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12
-    uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12 --view
-    uv run python -m dimos.mapping.relocalization.lidar.eval tune --trials 200
-    uv run python -m dimos.mapping.relocalization.lidar.eval verify --study <name>
+    uv run python -m dimos.mapping.relocalization.lidar.tune run --samples 12
+    uv run python -m dimos.mapping.relocalization.lidar.tune run --samples 12 --view
+    uv run python -m dimos.mapping.relocalization.lidar.tune tune --trials 200
+    uv run python -m dimos.mapping.relocalization.lidar.tune verify --study <name>
 
 ### Setup, once
 
@@ -118,7 +118,7 @@ The procedure, end to end:
    `... run --samples 12`. The `cover` column should be near 1.0 for probes
    inside the map and near 0.0 outside, with nothing in between. A premap
    whose coverage is smeared means the window is wrong.
-4. **Search**: `uv run python -m ... eval tune --trials 200
+4. **Search**: `uv run python -m ... tune tune --trials 200
    --samples 30`. Wider is better than longer - the probe count sets the
    resolution of the hit rate, and 200 trials against 8 probes mostly finds
    lucky draws.

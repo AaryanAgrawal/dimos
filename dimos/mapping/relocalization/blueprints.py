@@ -22,8 +22,8 @@ mapper the Go2 stack runs, so :class:`LidarRelocalization` sees exactly the
 built from it. Watch it in Rerun: `world/loaded_map` appears only once a fix
 lands, and lands on top of `world/global_map` when the fix is right.
 
-The recording and the premap are the eval's dataset (``lidar/eval.py``,
-``lidar/eval.md``), so a demo that looks wrong and an eval that scores
+The recording and the premap are the eval's dataset (``lidar/tune.py``,
+``lidar/tune.md``), so a demo that looks wrong and an eval that scores
 badly are the same bug.
 """
 
