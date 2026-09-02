@@ -15,12 +15,11 @@
 """Relocalization: place the live ``world`` frame inside a prior map's ``map`` frame.
 
 This file is the contract: every relocalizer, whatever it matches, loads a
-prior map and answers with a :class:`Fix`, so it publishes the same two
-things - ``tf`` and the placed prior map on ``loaded_map``. All of that
-lives here: ``map_file`` is read into ``self.premap``, republished on
-``loaded_map`` once a fix can resolve its frame, and
-:meth:`RelocalizationModule.accept_relocalization` turns a fix into the
-transform.
+prior map and answers with a ``world -> map`` transform, so it publishes the
+same two things - that transform on ``tf`` and the placed prior map on
+``loaded_map``. All of that lives here: ``map_file`` is read into
+``self.premap``, republished on ``loaded_map`` once a fix can resolve its
+frame, and :meth:`RelocalizationModule.submit` takes the transform.
 
 An implementation reads ``self.premap`` in its own ``start()`` (after
 ``super().start()``, and ``None`` means no map was configured), builds
@@ -40,7 +39,6 @@ MRO and ``start()`` chains through ``super()``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import reactivex as rx
@@ -62,22 +60,6 @@ FRAME_WORLD = "world"
 
 PUBLISH_INTERVAL = 2.0  # TF and loaded_map republish period
 MAP_SUFFIX = ".pc2.lcm"
-
-
-@dataclass(frozen=True)
-class Fix:
-    """What one relocalization attempt concluded.
-
-    Two fields, because two is all a GPS fix, an apriltag fix and a lidar fix
-    have in common. A strategy with more to report subclasses this - see
-    :class:`~dimos.mapping.relocalization.lidar.relocalize.LidarFix`.
-    """
-
-    # Where the live frame sits in the prior map: `map` -> `world`, the pose
-    # of the robot's world origin expressed in the map. The TF tree wants the
-    # other direction, which `accept_relocalization` takes care of.
-    transform: Transform
-    fitness: float  # in [0, 1], strategy-defined
 
 
 class Config(ModuleConfig):
@@ -144,20 +126,13 @@ class RelocalizationModule(Module):
         """Whether to keep attempting. Implementations gate their input on this."""
         return not (self._placed and self.config.relocalize_once)
 
-    def accept_relocalization(self, fix: Fix, source: str = "") -> None:
-        """Publish a fix an implementation already decided to believe."""
-        self.submit(fix.transform.inverse(), fix.fitness, source)
-
-    def submit(self, tf: Transform, fitness: float, source: str = "") -> None:
-        """Publish a ``world -> map`` fix; fitness in [0, 1] is impl-defined."""
+    def submit(self, tf: Transform, source: str = "") -> None:
+        """Publish a ``world -> map`` fix the implementation already decided to believe."""
         assert (tf.frame_id, tf.child_frame_id) == (FRAME_WORLD, FRAME_MAP), (
             f"relocalize {source}: expected {FRAME_WORLD!r} -> {FRAME_MAP!r}, "
             f"got {tf.frame_id!r} -> {tf.child_frame_id!r}"
         )
-        logger.info(
-            f"relocalize {source}: fitness={fitness:.3f} "
-            f"TF {FRAME_WORLD!r} -> {FRAME_MAP!r} t={tf.translation}"
-        )
+        logger.info(f"relocalize {source}: TF {FRAME_WORLD!r} -> {FRAME_MAP!r} t={tf.translation}")
         self._world_to_map.on_next(tf)
         if not self._placed and self.config.relocalize_once:
             logger.info(f"relocalize {source}: placed, no further attempts (relocalize_once)")

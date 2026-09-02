@@ -102,19 +102,16 @@ class LidarRelocalization(RelocalizationModule):
         assert self._relocalizer is not None
         t0 = time.monotonic()
         try:
-            fix = self._relocalizer.relocalize(msg.pointcloud)
+            tf = self._relocalizer.relocalize(msg.pointcloud)
         except Exception:
             logger.exception("relocalize() failed")
             return
         dt = time.monotonic() - t0
-        if fix is None:
+        if tf is None:
             logger.info(
                 f"relocalize lidar: refused after {dt:.1f}s n_pts={len(msg)} "
                 f"(below fitness_threshold={self.config.relocalize.fitness_threshold})"
             )
             return
-        logger.info(
-            f"relocalize lidar: time_cost={dt:.1f}s n_pts={len(msg)} "
-            f"fitness={fix.fitness:.3f} rmse={fix.rmse:.3f} margin={fix.margin:.3f}"
-        )
-        self.accept_relocalization(fix, "lidar")
+        logger.info(f"relocalize lidar: time_cost={dt:.1f}s n_pts={len(msg)}")
+        self.submit(tf, "lidar")

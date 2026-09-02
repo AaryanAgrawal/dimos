@@ -21,7 +21,7 @@ this, and ``tune.py`` measures it. Strategies + evals began at
 https://github.com/leshy/relocalization-test (this was ``align_fast``).
 
     relocalizer = LidarRelocalizer(premap_cloud, PRESETS["mid360"])
-    fix = relocalizer.relocalize(live_cloud)   # a Fix, or None if it refused
+    tf = relocalizer.relocalize(live_cloud)   # world -> map, or None if it refused
 
 The map is preprocessed once when the relocalizer is built - downsampling
 it, estimating normals and computing FPFH features is the pipeline's
@@ -35,12 +35,11 @@ for a rig that is not in there yet.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
-from dimos.mapping.relocalization.module import FRAME_MAP, FRAME_WORLD, Fix
+from dimos.mapping.relocalization.module import FRAME_MAP, FRAME_WORLD
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.protocol.service.spec import BaseConfig
 
@@ -51,24 +50,6 @@ if TYPE_CHECKING:
     # open3d ships no stubs, so mypy still widens them to Any.
     from open3d.geometry import PointCloud
     from open3d.pipelines.registration import Feature, RegistrationResult
-
-
-@dataclass(frozen=True)
-class LidarFix(Fix):
-    """A :class:`Fix` plus what the ICP/RANSAC pipeline saw producing it.
-
-    Logged and evaluated, never acted on - the accept decision is
-    ``fitness`` against ``fitness_threshold``, as it is for any strategy.
-    """
-
-    # Inlier RMSE: how tightly the matched points sit, where fitness only
-    # counts how many matched. Unlike fitness it does not inflate when the
-    # correspondence distance is widened.
-    rmse: float
-    # Best minus runner-up fitness across restarts. A place that matches many
-    # parts of the map equally well scores near zero here however confident
-    # any single hypothesis looks; with one restart it is 0.
-    margin: float
 
 
 class _Prepared(NamedTuple):
@@ -82,17 +63,10 @@ class _Prepared(NamedTuple):
 class RelocalizeConfig(BaseConfig):
     """The aligner's knobs for **one rig**. There is no universal setting.
 
-    The fields with no default are scales - voxel sizes, neighbourhood radii,
-    correspondence distances - and a scale that suits a mid360 walking an
-    outdoor block is wrong for a room-sized map or a denser sensor. They are
-    required precisely so that no bare ``RelocalizeConfig()`` can quietly
-    mean somebody else's rig: to get one you either name a preset or state
-    your own numbers. What does carry a default is the handful of budgets and
-    caps below, which are about how hard to search rather than how big the
-    world is.
-
-    Measure a new rig's scales with a study (tune.md) and add it to
-    :data:`PRESETS`, rather than nudging an existing preset.
+    The required fields are scales, wrong for a different sensor or a
+    room-sized map. Required so no bare ``RelocalizeConfig()`` can quietly
+    mean somebody else's rig. Measure a new one with a study (tune.md) and
+    add a preset; do not nudge an existing one.
     """
 
     voxel_coarse: float  # FPFH + RANSAC scale
@@ -100,47 +74,34 @@ class RelocalizeConfig(BaseConfig):
     # Normal and feature neighbourhoods, in multiples of the working voxel.
     normal_radius_factor: float
     fpfh_radius_factor: float
-    # RANSAC correspondence distance, in multiples of voxel_coarse.
-    coarse_dist_factor: float
+    coarse_dist_factor: float  # RANSAC correspondence distance / voxel_coarse
     ransac_iters: int
     mutual_filter: bool
     edge_length: float
-    # ICP correspondence distance, in multiples of voxel_fine - the distance
-    # of the *last* stage. Earlier stages double it each step back, so a
-    # hypothesis landing further out than the final threshold still has a
-    # stage wide enough to see its correspondences. One stage is a single
-    # pass at icp_dist_factor.
+    # ICP correspondence distance / voxel_fine, for the *last* stage. Earlier
+    # stages double it each step back, so a hypothesis landing further out
+    # than the final threshold still has a stage wide enough to reach it.
     icp_dist_factor: float
     icp_stages: int
-    # Normal *sign* is arbitrary out of estimate_normals, and FPFH is built
-    # from angles involving it, so two clouds scanned from different passes
-    # describe the same corner differently. Pointing every normal into the
-    # same half-space makes the descriptors comparable. Both maps must share
-    # an up axis for that, which a lidar-inertial odometry gives on both
-    # sides; a premap of unknown provenance should turn this off.
+    # Point every normal into one half-space. Normal sign is arbitrary out of
+    # estimate_normals and FPFH is built from angles involving it, so without
+    # this two passes over the same corner describe it differently. Needs a
+    # shared up axis, which lidar-inertial odometry gives both sides; turn it
+    # off for a premap of unknown provenance.
     orient_normals: bool
-    # RANSAC is stochastic and its best hypothesis is sometimes simply
-    # wrong; ICP then polishes a wrong answer. Restarts take the best of
-    # several, and their spread is what `margin` reports. One suffices at
-    # mid360's settings, where the iteration budget already finds the place;
-    # restarts were what rescued the older, sparser search.
+    # Best-of-N RANSAC, by fitness. Its best hypothesis is sometimes simply
+    # wrong and ICP then polishes a wrong answer. One suffices at mid360's
+    # iteration budget; restarts rescued the older, sparser search.
     ransac_restarts: int
-    # ICP fitness a fix must clear to be published. Where it sits depends on
-    # how far apart the two populations land for a given rig - on the
-    # measured mid360 walk, fixes that found the right place score 0.84-0.94
-    # and places absent from the premap score 0.04-0.24, so mid360 puts it in
-    # the empty middle rather than snug against either. Being strict is not
-    # free: a relocalizer gets another cloud every couple of seconds, so a
-    # rejected fix is a retry, while an accepted wrong one is a TF the whole
-    # stack believes.
+    # ICP fitness a fix must clear to be published. On the mid360 walk the two
+    # populations sit far apart - right place 0.84-0.94, place absent from the
+    # premap 0.04-0.24 - so this goes in the empty middle. Strictness is
+    # cheap: a rejected fix is a retry, an accepted wrong one is a TF the
+    # whole stack believes.
     fitness_threshold: float
-    # The retry loop's evidence window, in accumulated scans. A relocalizer
-    # gets a first try once `min_frames` have arrived and keeps retrying on
-    # everything that has landed since, giving up past `max_frames`. Both are
-    # rig scales: how much of a place one sweep covers, and therefore how
-    # many it takes to be recognisable, is a fact about the sensor. These
-    # two are hand-picked rather than measured like the rest - a study
-    # should search them (tune.md).
+    # Retry window, in accumulated scans: first try at `min_frames`, give up
+    # past `max_frames`. Rig scales, but hand-picked rather than measured -
+    # a study should search them (tune.md).
     min_frames: int
     max_frames: int
 
@@ -155,9 +116,7 @@ class RelocalizeConfig(BaseConfig):
 
 # Livox mid360 on a Go2, outdoors, against a premap of the same block.
 # Trial 229 of the go2-sf-area1 study - the candidate that held its hit rate
-# on probes it was never tuned against, where others dropped forty points.
-# Its two neighbours on the front agree to within a few percent on every
-# field, so this is a plateau rather than a spike.
+# on probes it was never tuned against,
 MID360 = RelocalizeConfig(
     voxel_coarse=0.59,
     voxel_fine=0.30,
@@ -225,12 +184,15 @@ class LidarRelocalizer:
         fine = normals(cloud.voxel_down_sample(cfg.voxel_fine), cfg.voxel_fine)
         return _Prepared(coarse=coarse, fpfh=fpfh, fine=fine)
 
-    def align(self, local_map: PointCloud) -> LidarFix:
-        """Where ``local_map`` sits in the prior map, as a ``map`` -> ``world`` Transform.
+    def align(self, local_map: PointCloud) -> RegistrationResult:
+        """Open3D's registration result for ``local_map`` against the prior map.
 
-        Always answers, however poor the answer. :meth:`relocalize` is the
-        one to call - this is for a caller that wants to see a refused fix,
-        such as the eval measuring how far a rejected hypothesis landed.
+        Always answers, however poor the answer, and answers in open3d's own
+        terms: ``.transformation`` places the live cloud into the map,
+        ``.fitness`` and ``.inlier_rmse`` say how well. :meth:`relocalize` is
+        the one a runtime calls; this is for a caller that wants to see a
+        refused fix, such as the eval measuring where a rejected hypothesis
+        landed.
         """
         import open3d as o3d  # type: ignore[import-untyped]
 
@@ -281,24 +243,22 @@ class LidarRelocalizer:
             refine(np.asarray(hypothesis().transformation))
             for _ in range(max(cfg.ransac_restarts, 1))
         ]
-        scored.sort(key=lambda r: r.fitness, reverse=True)
-        best = scored[0]
-        return LidarFix(
-            transform=Transform.from_matrix(
-                np.asarray(best.transformation), frame_id=FRAME_MAP, child_frame_id=FRAME_WORLD
-            ),
-            fitness=float(best.fitness),
-            rmse=float(best.inlier_rmse),
-            margin=float(best.fitness - scored[1].fitness) if len(scored) > 1 else 0.0,
-        )
+        return max(scored, key=lambda r: r.fitness)
 
-    def relocalize(self, local_map: PointCloud) -> LidarFix | None:
-        """The fix, or ``None`` when nothing cleared ``config.fitness_threshold``.
+    def relocalize(self, local_map: PointCloud) -> Transform | None:
+        """The ``world -> map`` transform, or ``None`` when nothing was good enough.
 
-        Refusing is a real answer and the common one for a place the prior
-        map never saw. Everything the decision rests on - the aligner's
-        knobs and the threshold - is this object's config, so a caller
-        configures it once and just checks whether it got a fix.
+        Ready to publish: stamped with the frames the TF tree expects, and
+        already inverted from the placement open3d computes. Refusing is a
+        real answer and the common one for a place the prior map never saw.
+        Everything the decision rests on - the aligner's knobs and
+        ``fitness_threshold`` - is this object's config, so a caller
+        configures it once and checks whether it got a transform.
         """
-        fix = self.align(local_map)
-        return fix if fix.fitness >= self.config.fitness_threshold else None
+        result = self.align(local_map)
+        if result.fitness < self.config.fitness_threshold:
+            return None
+        placement = Transform.from_matrix(
+            np.asarray(result.transformation), frame_id=FRAME_MAP, child_frame_id=FRAME_WORLD
+        )
+        return placement.inverse()

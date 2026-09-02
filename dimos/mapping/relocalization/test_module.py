@@ -21,7 +21,7 @@ from scipy.spatial.transform import Rotation
 
 from dimos.core.stream import In
 from dimos.mapping.relocalization.lidar.module import LidarRelocalization
-from dimos.mapping.relocalization.module import Fix, RelocalizationModule
+from dimos.mapping.relocalization.module import RelocalizationModule
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
@@ -50,36 +50,17 @@ def fixes(m):
 
 
 def test_submit_publishes_and_checks_frames(module):
-    """submit no longer second-guesses fitness; the implementation already decided."""
+    """submit does not second-guess the fix; the implementation already decided."""
     m = module()
     got = fixes(m)
     tf = Transform.from_matrix(np.eye(4), frame_id="world", child_frame_id="map")
-    m.submit(tf, 0.3, "x")
-    m.submit(tf, 0.9, "x")
+    m.submit(tf, "x")
+    m.submit(tf, "x")
     assert got == [tf, tf]
+    # A strategy handing over the placement instead of the frame transform is
+    # caught here rather than publishing a backwards TF.
     with pytest.raises(AssertionError):
-        m.submit(Transform.from_matrix(np.eye(4), frame_id="map", child_frame_id="world"), 1.0)
-
-
-def test_accept_relocalization_inverts_the_fix(module):
-    """A Fix maps world points into the map; the TF tree wants the frame transform."""
-    T = np.eye(4)
-    T[:3, 3] = [3.0, -1.0, 0.0]  # the map sits 3 m +x of where the robot thought it was
-    m = module()
-    got = fixes(m)
-
-    m.accept_relocalization(
-        Fix(
-            transform=Transform.from_matrix(T, frame_id="map", child_frame_id="world"), fitness=0.9
-        ),
-        "test",
-    )
-    assert (got[0].frame_id, got[0].child_frame_id) == ("world", "map")
-    np.testing.assert_allclose(got[0].to_matrix(), np.linalg.inv(T), atol=1e-9)
-
-    # ... which makes submit's frame check a check on the Fix's own stamping.
-    with pytest.raises(AssertionError):
-        m.accept_relocalization(Fix(transform=Transform.from_matrix(T), fitness=0.9), "unstamped")
+        m.submit(Transform.from_matrix(np.eye(4), frame_id="map", child_frame_id="world"))
 
 
 def test_relocalize_once_stops_after_the_first_fix(module):
@@ -88,11 +69,11 @@ def test_relocalize_once_stops_after_the_first_fix(module):
 
     once = module()
     assert once.keep_relocalizing() and not once.placed
-    once.submit(tf, 0.9)
+    once.submit(tf)
     assert once.placed and not once.keep_relocalizing()
 
     forever = module(relocalize_once=False)
-    forever.submit(tf, 0.9)
+    forever.submit(tf)
     assert forever.placed and forever.keep_relocalizing()
 
 
@@ -121,9 +102,11 @@ def test_relocalizer_refuses_below_its_own_threshold(monkeypatch):
     """One config surface: the relocalizer holds the knobs and the accept decision."""
     from dimos.mapping.relocalization.lidar import relocalize as lidar
 
-    fix = lidar.LidarFix(transform=Transform(), fitness=0.4, rmse=0.1, margin=0.0)
+    placement = np.eye(4)
+    placement[:3, 3] = [3.0, -1.0, 0.0]  # the map is 3 m +x of where the robot thought
+    result = SimpleNamespace(transformation=placement, fitness=0.4, inlier_rmse=0.1)
     monkeypatch.setattr(lidar.LidarRelocalizer, "_prepare", lambda self, cloud: None)
-    monkeypatch.setattr(lidar.LidarRelocalizer, "align", lambda self, cloud: fix)
+    monkeypatch.setattr(lidar.LidarRelocalizer, "align", lambda self, cloud: result)
 
     def relocalizer(threshold):
         return lidar.LidarRelocalizer(
@@ -131,7 +114,12 @@ def test_relocalizer_refuses_below_its_own_threshold(monkeypatch):
         )
 
     assert relocalizer(0.5).relocalize(None) is None
-    assert relocalizer(0.3).relocalize(None) is fix
+
+    # Accepted: open3d places the live cloud in the map, the TF tree wants the
+    # other direction, and relocalize() is what turns one into the other.
+    tf = relocalizer(0.3).relocalize(None)
+    assert (tf.frame_id, tf.child_frame_id) == ("world", "map")
+    np.testing.assert_allclose(tf.to_matrix(), np.linalg.inv(placement), atol=1e-9)
 
 
 def test_no_config_without_naming_a_rig():

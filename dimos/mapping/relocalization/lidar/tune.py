@@ -222,8 +222,6 @@ class Probe(NamedTuple):
     fit_aligned_m: float
     fitness: float
     rmse: float
-    # Best minus runner-up fitness across RANSAC restarts; 0 with one restart.
-    margin: float
     # Frames the ladder had reached when it stopped, and how many attempts
     # that took. `accepted` is False when it climbed the whole ladder without
     # a fix clearing the cutoff - a refusal, not a failure to run.
@@ -513,19 +511,19 @@ def run_probes(
             frames = min(max(int(elapsed * rate), min_frames), max_frames)
             cloud = local_map(name, frames, start, voxel)
             t0, c0 = time.monotonic(), time.process_time()
-            fix = relocalizer.align(cloud.pointcloud)
+            result = relocalizer.align(cloud.pointcloud)
             dt = time.monotonic() - t0
             elapsed += dt
             wall += dt
             cpu += time.process_time() - c0
             attempts += 1
-            if fix.fitness >= config.fitness_threshold:
+            if result.fitness >= config.fitness_threshold:
                 accepted = True
                 break
             if frames >= max_frames:
                 break
 
-        T = fix.transform.to_matrix()
+        T = np.asarray(result.transformation)
         truth_points = np.asarray(cloud.pointcloud.points)
         moved = applied(T, cloud)
         translation, rotation, tilt = identity_error(T)
@@ -540,9 +538,8 @@ def run_probes(
                 displacement_m=float(np.median(np.linalg.norm(moved - truth_points, axis=1))),
                 fit_truth_m=float(np.median(premap_distance(name, truth_points))),
                 fit_aligned_m=float(np.median(premap_distance(name, moved))),
-                fitness=fix.fitness,
-                rmse=fix.rmse,
-                margin=fix.margin,
+                fitness=float(result.fitness),
+                rmse=float(result.inlier_rmse),
                 frames_used=frames,
                 attempts=attempts,
                 accepted=accepted,
