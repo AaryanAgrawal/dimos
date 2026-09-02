@@ -43,7 +43,7 @@ def test_submit_publishes_and_checks_frames():
         m.submit(Transform.from_matrix(np.eye(4), frame_id="map", child_frame_id="world"), 1.0)
 
 
-def test_accept_inverts_the_fix():
+def test_accept_relocalization_inverts_the_fix():
     """A Fix maps world points into the map; the TF tree wants the frame transform."""
     T = np.eye(4)
     T[:3, 3] = [3.0, -1.0, 0.0]  # the map sits 3 m +x of where the robot thought it was
@@ -53,7 +53,7 @@ def test_accept_inverts_the_fix():
     got = []
     m._world_to_map.subscribe(got.append)
 
-    m.accept(Fix(transform=T, fitness=0.9), "test")
+    m.accept_relocalization(Fix(transform=T, fitness=0.9), "test")
     assert (got[0].frame_id, got[0].child_frame_id) == ("world", "map")
     np.testing.assert_allclose(got[0].to_matrix(), np.linalg.inv(T), atol=1e-9)
 

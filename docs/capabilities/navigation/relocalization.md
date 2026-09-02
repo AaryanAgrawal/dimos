@@ -188,8 +188,8 @@ Relocalization is one contract, and the base
 that contract: every relocalizer, whatever it matches, loads a prior map and
 answers with a `Fix`, so it publishes the same two things: `tf`, and the placed
 prior map on `loaded_map`. The base owns both ports, `map_file` and the
-`.pc2.lcm` load behind it, and `accept(fix)`, which inverts a fix into the
-`world → map` transform and republishes it. The loaded map lands in
+`.pc2.lcm` load behind it, and `accept_relocalization(fix)`, which inverts a
+fix into the `world → map` transform and republishes it. The loaded map lands in
 `self.premap`, stamped into the `map` frame, and is republished on `loaded_map`
 only once a fix can resolve that frame.
 

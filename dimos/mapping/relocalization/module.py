@@ -19,7 +19,8 @@ prior map and answers with a :class:`Fix`, so it publishes the same two
 things - ``tf`` and the placed prior map on ``loaded_map``. All of that
 lives here: ``map_file`` is read into ``self.premap``, republished on
 ``loaded_map`` once a fix can resolve its frame, and
-:meth:`RelocalizationModule.accept` turns a fix into the transform.
+:meth:`RelocalizationModule.accept_relocalization` turns a fix into the
+transform.
 
 An implementation reads ``self.premap`` in its own ``start()`` (after
 ``super().start()``, and ``None`` means no map was configured), builds
@@ -124,7 +125,7 @@ class RelocalizationModule(Module):
                 .subscribe(lambda _: self.loaded_map.publish(premap))
             )
 
-    def accept(self, fix: Fix, source: str = "") -> None:
+    def accept_relocalization(self, fix: Fix, source: str = "") -> None:
         """Publish a fix an implementation already decided to believe."""
         # fix.transform maps world points into the map; the TF tree wants the
         # frame transform, which is its inverse.

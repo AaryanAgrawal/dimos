@@ -111,4 +111,4 @@ class LidarRelocalization(RelocalizationModule):
             f"relocalize lidar: time_cost={dt:.1f}s n_pts={len(msg)} "
             f"fitness={fix.fitness:.3f} rmse={fix.rmse:.3f} margin={fix.margin:.3f}"
         )
-        self.accept(fix, "lidar")
+        self.accept_relocalization(fix, "lidar")
