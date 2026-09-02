@@ -52,18 +52,26 @@ logger = setup_logger()
 MAP_SUFFIX = ".pc2.lcm"
 
 
-class Prepared(NamedTuple):
-    """A map's config-dependent preprocessing, which never changes with the query.
+class PreparedMap(NamedTuple):
+    """A prior map with the preprocessing a match needs, and the config it used.
 
     The premap is fixed for the life of a relocalizer, so down-sampling it,
     estimating its normals and computing its FPFH features belongs outside
     the per-call path - it dominates the cost otherwise, and a live module
     would redo it on every fix.
+
+    Carrying the config rather than taking it again per call is what makes
+    that safe: the derived forms below only mean anything under the settings
+    that produced them, and a second config argument at match time would be
+    a way to compare a map downsampled at one voxel against a query
+    downsampled at another, silently.
     """
 
+    cloud: PointCloud  # the map itself, as handed to prepare()
     coarse: PointCloud  # downsampled at voxel_coarse, with normals
     fpfh: Feature  # FPFH descriptors of `coarse`
     fine: PointCloud  # downsampled at voxel_fine, with normals
+    config: RelocalizeConfig
 
 
 class Fix(NamedTuple):
@@ -179,12 +187,12 @@ class RelocalizeConfig(BaseConfig):
     fitness_threshold: float = 0.5
 
 
-def prepare(cloud: PointCloud, config: RelocalizeConfig | None = None) -> Prepared:
+def prepare(cloud: PointCloud, config: RelocalizeConfig | None = None) -> PreparedMap:
     """A map's voxel-downsampled forms and FPFH features, ready to match against.
 
-    Call once per map per config and hand the result to :func:`relocalize`;
-    for the premap that turns the pipeline's dominant cost into a startup
-    cost. :func:`relocalize` does it inline when not given one.
+    Call once per map and hand the result to :func:`relocalize` for every
+    query against it; for the premap that turns the pipeline's dominant cost
+    into a startup cost.
     """
     import open3d as o3d  # type: ignore[import-untyped]
 
@@ -209,15 +217,10 @@ def prepare(cloud: PointCloud, config: RelocalizeConfig | None = None) -> Prepar
         ),
     )
     fine = normals(cloud.voxel_down_sample(cfg.voxel_fine), cfg.voxel_fine)
-    return Prepared(coarse=coarse, fpfh=fpfh, fine=fine)
+    return PreparedMap(cloud=cloud, coarse=coarse, fpfh=fpfh, fine=fine, config=cfg)
 
 
-def align(
-    global_map: PointCloud,
-    local_map: PointCloud,
-    config: RelocalizeConfig | None = None,
-    prepared: Prepared | None = None,
-) -> Fix:
+def align(premap: PreparedMap, local_map: PointCloud) -> Fix:
     """Open3D clouds in; the 4x4 T placing ``local_map`` into ``global_map`` (p_map = T @ p_local).
 
     Always answers, however poor the answer. :func:`relocalize` is the one
@@ -228,23 +231,20 @@ def align(
     widening-to-narrowing distances to settle it. Strategies + evals live in
     https://github.com/leshy/relocalization-test (this began as ``align_fast``).
 
-    ``prepared`` skips the target's preprocessing, which is the same on
-    every call for a fixed premap.
     """
     import open3d as o3d  # type: ignore[import-untyped]
 
-    cfg = config or RelocalizeConfig()
+    cfg = premap.config
     reg = o3d.pipelines.registration
-    target = prepared or prepare(global_map, cfg)
     source = prepare(local_map, cfg)
     dist = cfg.voxel_coarse * cfg.coarse_dist_factor
 
     def hypothesis() -> RegistrationResult:
         return reg.registration_ransac_based_on_feature_matching(
             source.coarse,
-            target.coarse,
+            premap.coarse,
             source.fpfh,
-            target.fpfh,
+            premap.fpfh,
             mutual_filter=cfg.mutual_filter,
             max_correspondence_distance=dist,
             estimation_method=reg.TransformationEstimationPointToPoint(False),
@@ -267,7 +267,7 @@ def align(
         for stage in reversed(range(max(cfg.icp_stages, 1))):
             result = reg.registration_icp(
                 source.fine,
-                target.fine,
+                premap.fine,
                 cfg.voxel_fine * cfg.icp_dist_factor * (2**stage),
                 coarse_T,
                 reg.TransformationEstimationPointToPlane(),
@@ -294,15 +294,16 @@ def align(
     )
 
 
-def relocalize(
-    global_map: PointCloud,
-    local_map: PointCloud,
-    config: RelocalizeConfig | None = None,
-    prepared: Prepared | None = None,
-) -> Fix | None:
-    cfg = config or RelocalizeConfig()
-    fix = align(global_map, local_map, cfg, prepared)
-    return fix if fix.fitness >= cfg.fitness_threshold else None
+def relocalize(premap: PreparedMap, local_map: PointCloud) -> Fix | None:
+    """The fix, or ``None`` when nothing cleared the map's ``fitness_threshold``.
+
+    Refusing is a real answer and the common one for a place the premap
+    never saw. Everything the decision rests on - the aligner's knobs and
+    the threshold - travels on the map that :func:`prepare` returned, so a
+    caller configures this in one place and just checks whether it got a fix.
+    """
+    fix = align(premap, local_map)
+    return fix if fix.fitness >= premap.config.fitness_threshold else None
 
 
 class LidarConfig(Config):
@@ -325,7 +326,7 @@ class LidarRelocalization(RelocalizationModule):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._premap: PointCloud2 | None = None
-        self._prepared: Prepared | None = None
+        self._prepared: PreparedMap | None = None
         self._last_skip_log = 0.0
 
     @rpc
@@ -378,12 +379,8 @@ class LidarRelocalization(RelocalizationModule):
         assert self._premap is not None
         t0 = time.monotonic()
         try:
-            fix = relocalize(
-                self._premap.pointcloud,
-                msg.pointcloud,
-                self.config.relocalize,
-                prepared=self._prepared,
-            )
+            assert self._prepared is not None
+            fix = relocalize(self._prepared, msg.pointcloud)
         except Exception:
             logger.exception("relocalize() failed")
             return

@@ -414,7 +414,7 @@ def run_probes(
             frames = min(max(int(elapsed * rate), min_frames), max_frames)
             cloud = local_map(name, frames, start, voxel)
             t0, c0 = time.monotonic(), time.process_time()
-            fix = align(premap.pointcloud, cloud.pointcloud, config, prepared=target)
+            fix = align(target, cloud.pointcloud)
             elapsed += time.monotonic() - t0
             cpu += time.process_time() - c0
             attempts += 1
