@@ -20,7 +20,8 @@ from reactivex import Subject
 from scipy.spatial.transform import Rotation
 
 from dimos.core.stream import In
-from dimos.mapping.relocalization.lidar.module import LidarRelocalization, _yaw_only
+from dimos.mapping.relocalization.lidar.module import LidarRelocalization
+from dimos.mapping.relocalization.lidar.relocalize import _yaw_only
 from dimos.mapping.relocalization.module import Config, RelocalizationModule
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
@@ -43,7 +44,7 @@ def test_submit_publishes_and_checks_frames():
 
 def test_relocalize_refuses_below_the_maps_own_threshold(monkeypatch):
     """One config surface: the prepared map carries the knobs and the accept decision."""
-    from dimos.mapping.relocalization.lidar import module as lidar
+    from dimos.mapping.relocalization.lidar import relocalize as lidar
 
     fix = lidar.Fix(transform=np.eye(4), fitness=0.4, rmse=0.1, margin=0.0)
     monkeypatch.setattr(lidar, "align", lambda *a, **k: fix)

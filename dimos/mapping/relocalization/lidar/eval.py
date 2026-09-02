@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import typer
 
-from dimos.mapping.relocalization.lidar.module import RelocalizeConfig, align, prepare
+from dimos.mapping.relocalization.lidar.relocalize import RelocalizeConfig, align, prepare
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import get_data
 
