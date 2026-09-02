@@ -16,8 +16,8 @@
 
 Coarse FPFH+RANSAC to find the place, then point-to-plane ICP over
 widening-to-narrowing distances to settle it. No streams, no modules, no
-clock - :mod:`dimos.mapping.relocalization.lidar.module` is the runtime
-around this, and ``eval.py`` measures it. Strategies + evals began at
+clock - :mod:`dimos.mapping.relocalization.module` is the runtime around
+this, and ``eval.py`` measures it. Strategies + evals began at
 https://github.com/leshy/relocalization-test (this was ``align_fast``).
 
     relocalizer = LidarRelocalizer(premap_cloud, PRESETS["mid360"])
@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
+from dimos.mapping.relocalization.module import Fix
 from dimos.protocol.service.spec import BaseConfig
 
 if TYPE_CHECKING:
@@ -47,21 +48,6 @@ if TYPE_CHECKING:
     # open3d ships no stubs, so mypy still widens them to Any.
     from open3d.geometry import PointCloud
     from open3d.pipelines.registration import Feature, RegistrationResult
-
-
-class Fix(NamedTuple):
-    """What one relocalization attempt concluded."""
-
-    transform: np.ndarray
-    fitness: float
-    # Inlier RMSE: how tightly the matched points sit, where fitness only
-    # counts how many matched. Unlike fitness it does not inflate when the
-    # correspondence distance is widened.
-    rmse: float
-    # Best minus runner-up fitness across restarts. A place that matches
-    # many parts of the map equally well scores near zero here however
-    # confident any single hypothesis looks; with one restart it is 0.
-    margin: float
 
 
 class _Prepared(NamedTuple):

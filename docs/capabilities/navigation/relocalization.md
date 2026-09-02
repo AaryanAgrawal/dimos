@@ -173,27 +173,41 @@ for example `--go2relocalization.map-file=…`.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `map_file` | `None` (module disabled) | Premap stem or path. dimOS appends `.pc2.lcm` automatically |
-| `fitness_threshold` | `0.45` | Minimum ICP fitness to accept a relocalization (0 to 1) |
+| `relocalize.fitness_threshold` | `0.5` | Minimum ICP fitness to accept a relocalization (0 to 1). One of many `relocalize.*` aligner knobs - see [`lidar/readme.md`](/dimos/mapping/relocalization/lidar/readme.md) |
 | `publish_loaded_map` | `false` | Republish raw premap on `loaded_map` every 2 s |
 | `use_carving` | `true` | Go2 only: column-carve when merging premap and live scan into `merged_map` |
-| `min_local_points` | `50000` | Minimum live map points before attempting relocalization |
+| `min_local_points` | `2000` | Minimum live map points before attempting relocalization |
 | `reloc_interval` | `2.0` | Seconds between relocalization attempts |
 
 `PUBLISH_INTERVAL` (2 s TF republish rate) is a constant, not overridable via CLI.
 
 ## Adding an implementation
 
-Relocalization is one contract: publish the `world → map` transform. The base
-[`RelocalizationModule`](/dimos/mapping/relocalization/module.py) owns the `tf`
-output, the fitness gate and the periodic republish; implementations under
-per-implementation directories (`dimos/mapping/relocalization/lidar/`, …) subclass it, declare their own inputs and
-prior-map config, and call `self.submit(tf, fitness, "name")` on every fix with
-a `Transform(frame_id="world", child_frame_id="map")`. `LidarRelocalization`
-publishes only `tf` and `loaded_map`; `Go2Relocalization` subclasses it to add
-the merged map the Go2 costmap consumes. Alignment strategies and their evals
-live in [relocalization-test](https://github.com/leshy/relocalization-test);
-the lidar module carries a copy of `align_fast`. A dual strategy is a subclass
-of two implementations: ports merge and `start()` chains through `super()`.
+Relocalization is one contract, and the base
+[`RelocalizationModule`](/dimos/mapping/relocalization/module.py) is exactly
+that contract: every relocalizer, whatever it matches, has a prior map and
+answers with a `Fix`, so it publishes the same two things: `tf`, and the placed
+prior map on `loaded_map`. The base owns both ports, `accept(fix)` (which
+inverts a fix into the `world → map` transform and republishes it), and
+`set_premap(premap)` (which stamps the map into the `map` frame and republishes
+it once a fix can resolve that frame).
+
+It owns no *input* and no map *format*. Matching lidar against a pointcloud
+premap, apriltags against a table of tag poses and GPS against a datum share no
+port type, no file format and no reason to attempt a fix at the same moment, so
+each implementation declares its own `In` ports and prior-map config and drives
+itself. Whether a fix is good enough is likewise the implementation's
+call, made against its own config; there is no second threshold in the base.
+
+[`LidarRelocalization`](/dimos/mapping/relocalization/lidar/module.py) is the
+pointcloud runtime: the `global_map` input, the `.pc2.lcm` premap,
+`min_local_points`, `reloc_interval`, and a
+[`LidarRelocalizer`](/dimos/mapping/relocalization/lidar/relocalize.py), the
+pure aligner: no streams, no modules, no clock, carrying its own named per-rig
+`PRESETS` (see [`lidar/readme.md`](/dimos/mapping/relocalization/lidar/readme.md#L99)).
+`Go2Relocalization` subclasses it to add the merged map the Go2 costmap
+consumes. A dual strategy is a subclass of two implementations: ports merge and
+`start()` chains through `super()`.
 
 To accept all candidates for visualization only (not for production nav):
 
