@@ -57,6 +57,9 @@ if TYPE_CHECKING:
 # Bump when the search space or the objective changes; it keys the study.
 SPACE = 12
 
+# Every study lands here; browse with `uvx optuna-dashboard sqlite:///optuna.db`.
+STORAGE = "sqlite:///optuna.db"
+
 # Ground truth, and the only thing that decides whether a fix is right: a
 # probe within this of identity found its place in the map. Real failures
 # are nothing like marginal - they land tens of meters out - so this splits
@@ -707,18 +710,24 @@ def tune(
     """Search RelocalizeConfig for the hit / false-fix / accuracy / speed tradeoff."""
     from functools import partial
 
-    from dimos.evals.tuning import study
+    import optuna
 
     name = _register(dataset, recording, premap, lidar, start_s, stop_s)
-    # Studies resume by name, so the name carries what a trial's numbers mean:
-    # the dataset and probes they were measured over, and the version of the
-    # space and objective below. Widening the space or changing the score
-    # bumps SPACE rather than silently mixing incomparable trials into one front.
-    s = study(
-        f"{name}-v{SPACE}-s{samples}",
-        ["maximize", "minimize", "minimize", "minimize", "minimize"],
-        names=["hit_rate", "false_fix", "error_m", "latency_s", "cpu_s"],
+    # Studies resume by name (load_if_exists), so the name carries what a
+    # trial's numbers mean: the dataset and probes they were measured over,
+    # and the version of the space and objective below. Widening the space or
+    # changing the score bumps SPACE rather than silently mixing incomparable
+    # trials into one front. Seeded sampler so a rerun repeats.
+    s = optuna.create_study(
+        study_name=f"{name}-v{SPACE}-s{samples}",
+        directions=["maximize", "minimize", "minimize", "minimize", "minimize"],
+        storage=STORAGE,
+        sampler=optuna.samplers.TPESampler(seed=0),
+        load_if_exists=True,
     )
+    # Named, so the dashboard and best_trials read as hit_rate/latency_s
+    # rather than an unlabelled list of floats.
+    s.set_metric_names(["hit_rate", "false_fix", "error_m", "latency_s", "cpu_s"])
     s.optimize(partial(objective, name=name, samples=samples, voxel=voxel), n_trials=trials)
     # The front is unordered; read it correctness-first, speed as the tiebreak.
     print(f"\n{len(s.best_trials)} trials on the Pareto front:")
@@ -760,8 +769,6 @@ def verify(
     handful of places are easy will fall over.
     """
     import optuna
-
-    from dimos.evals.tuning import STORAGE
 
     name = _register(dataset, recording, premap, lidar, start_s, stop_s)
     study = optuna.load_study(study_name=study_name, storage=STORAGE)
