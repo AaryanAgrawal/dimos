@@ -18,29 +18,30 @@ second:
     uv sync --group dev
     uv run maturin develop --uv -m dimos/mapping/ray_tracing/rust/py/Cargo.toml
 
-The sync prunes maturin-built extensions as extraneous, so doing it the
-other way round leaves you without `dimos_voxel_ray_tracing`, which every
-command here needs to accumulate a local map. Once the dev group is in the
-venv there is nothing left to sync, and both `uv run` and `uv run --group
-dev` leave the extension alone.
-
-If a run does die with "dimos_voxel_ray_tracing is not built", something
-re-synced: rerun the maturin line.
-
 ## What the eval needs
 
 A recording and a premap **in one coordinate frame**. The usual way to get
 that is a single recording with its premap assembled from a different
-stretch of it — `dimos map global <recording> --export` writes the
-`.pc2.lcm`. Ground truth is then the identity, and the error is how far the
+stretch of it. Ground truth is then the identity, and the error is how far the
 recovered transform sits from it, so nothing has to be hand-labelled.
+
+The shipped pair was built exactly this way. Both files are in `data/`, so
+this is only for reproducing them or doing the same to a new recording:
+
+    dimos map global recording_go2_mid360_2026-05-29_4-45pm-PST_corrected \
+      --lidar fastlio_lidar --voxel 0.005 --seek 400 --export --no-gui
+
+`--seek 400` is the whole trick: the premap is the walk *after* 400 s, so
+the probes, drawn from before it, are places the premap has never been shown
+directly. `--export` implies `--pgo` and writes `./<dataset>.pc2.lcm`. The
+walk is a loop, which is why the two halves overlap in space at all.
 
 Register the pair in `DATASETS`:
 
 ```python
 "go2-sf-area1": Dataset(
     recording="recording_go2_mid360_2026-05-29_4-45pm-PST_corrected.db",
-    premap="mid360_go2_sf_area1.pc2.lcm",
+    premap="recording_go2_mid360_2026-05-29_4-45pm-PST_corrected.pc2.lcm",
     window=(0.0, 400.0),   # premap was built from the scans after 400 s
 ),
 ```
