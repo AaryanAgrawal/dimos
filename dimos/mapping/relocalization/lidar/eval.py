@@ -42,7 +42,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import typer
 
-from dimos.mapping.relocalization.lidar.relocalize import RelocalizeConfig, align, prepare
+from dimos.mapping.relocalization.lidar.relocalize import (
+    DEFAULT_PRESET,
+    PRESETS,
+    LidarRelocalizer,
+    RelocalizeConfig,
+)
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import get_data
 
@@ -405,7 +410,7 @@ def run_probes(
     premap, _ = fixtures(name)
     # The premap's preprocessing depends on the config but not the probe, so
     # it is paid once per trial rather than once per attempt.
-    target = prepare(premap.pointcloud, config)
+    relocalizer = LidarRelocalizer(premap.pointcloud, config)
     rate = scan_rate(name)
     probes: list[Probe] = []
 
@@ -415,7 +420,7 @@ def run_probes(
             frames = min(max(int(elapsed * rate), min_frames), max_frames)
             cloud = local_map(name, frames, start, voxel)
             t0, c0 = time.monotonic(), time.process_time()
-            fix = align(target, cloud.pointcloud)
+            fix = relocalizer.align(cloud.pointcloud)
             elapsed += time.monotonic() - t0
             cpu += time.process_time() - c0
             attempts += 1
@@ -596,8 +601,9 @@ ToOpt = typer.Option(None, "--to", help="Latest second probes may come from")
 def run(
     samples: int = typer.Option(10, "--samples", "-s", help="Probes over the window"),
     voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
+    preset: str = typer.Option(DEFAULT_PRESET, "--preset", help=f"One of {sorted(PRESETS)}"),
     cutoff: float | None = typer.Option(
-        None, "--cutoff", help="Override the config's fitness_threshold"
+        None, "--cutoff", help="Override the preset's fitness_threshold"
     ),
     min_frames: int = typer.Option(MIN_FRAMES, "--min-frames", help="Scans before the first try"),
     max_frames: int = typer.Option(
@@ -615,7 +621,9 @@ def run(
     """Relocalize N accumulated scans against the premap, from starts across the window."""
     name = _register(dataset, recording, premap, lidar, start_s, stop_s)
     pre, _ = fixtures(name)
-    config = RelocalizeConfig()
+    if preset not in PRESETS:
+        raise typer.BadParameter(f"unknown preset {preset!r}; known: {', '.join(sorted(PRESETS))}")
+    config = PRESETS[preset]
     if cutoff is not None:
         config = config.model_copy(update={"fitness_threshold": cutoff})
     probes = run_probes(
@@ -635,7 +643,7 @@ def run(
     suspect = sum(1 for p in probes if p.truth_suspect)
     accuracy = f"{error:.3f} m off when hit" if error < NO_FIX_M else "never found its place"
     print(
-        f"{name} premap {len(pre)} pts, cutoff={config.fitness_threshold}: "
+        f"{name} premap {len(pre)} pts, preset={preset} cutoff={config.fitness_threshold}: "
         f"{hit_rate:.0%} of {in_map} in-map probes hit, "
         f"{false_rate:.0%} false fixes of {len(probes)} total "
         f"({', '.join(f'{n} {k}' for k, n in sorted(tally.items()))}), "

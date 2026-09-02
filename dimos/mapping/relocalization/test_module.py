@@ -41,24 +41,27 @@ def test_submit_publishes_and_checks_frames():
         m.submit(Transform.from_matrix(np.eye(4), frame_id="map", child_frame_id="world"), 1.0)
 
 
-def test_relocalize_refuses_below_the_maps_own_threshold(monkeypatch):
-    """One config surface: the prepared map carries the knobs and the accept decision."""
+def test_relocalizer_refuses_below_its_own_threshold(monkeypatch):
+    """One config surface: the relocalizer holds the knobs and the accept decision."""
     from dimos.mapping.relocalization.lidar import relocalize as lidar
 
     fix = lidar.Fix(transform=np.eye(4), fitness=0.4, rmse=0.1, margin=0.0)
-    monkeypatch.setattr(lidar, "align", lambda *a, **k: fix)
+    monkeypatch.setattr(lidar.LidarRelocalizer, "_prepare", lambda self, cloud: None)
+    monkeypatch.setattr(lidar.LidarRelocalizer, "align", lambda self, cloud: fix)
 
-    def premap(threshold):
-        return lidar.PreparedMap(
-            cloud=None,
-            coarse=None,
-            fpfh=None,
-            fine=None,
-            config=lidar.RelocalizeConfig(fitness_threshold=threshold),
-        )
+    def relocalizer(threshold):
+        return lidar.LidarRelocalizer(None, lidar.RelocalizeConfig(fitness_threshold=threshold))
 
-    assert lidar.relocalize(premap(0.5), None) is None
-    assert lidar.relocalize(premap(0.3), None) is fix
+    assert relocalizer(0.5).relocalize(None) is None
+    assert relocalizer(0.3).relocalize(None) is fix
+
+
+def test_presets_are_named_and_default_matches():
+    """A config is named after the rig it was measured on, not left universal."""
+    from dimos.mapping.relocalization.lidar import relocalize as lidar
+
+    assert lidar.DEFAULT_PRESET in lidar.PRESETS
+    assert lidar.PRESETS["mid360"] == lidar.RelocalizeConfig()
 
 
 def test_from_matrix_inverse_matches_linalg_inv():

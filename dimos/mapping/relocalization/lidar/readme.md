@@ -4,9 +4,9 @@
 whether it finds the right place, how tightly, and how fast, and `tune`
 searches `RelocalizeConfig` for a better tradeoff between those.
 
-    uv run python -m dimos.mapping.relocalization.lidar.eval run --frames 10 --samples 5
-    uv run python -m dimos.mapping.relocalization.lidar.eval run --frames 10 --view
-    uv run python -m dimos.mapping.relocalization.lidar.eval tune --trials 100
+    uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12
+    uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12 --view
+    uv run --group dev python -m dimos.mapping.relocalization.lidar.eval tune --trials 200
 
 `run` needs nothing extra. `tune` and `verify` need optuna, which lives in
 the `dev` group, and this project sets `default-groups = ["tests"]` - so a
@@ -91,6 +91,49 @@ start=  63s  cover 100.0%  MISS  off 88.319 m  (65.416 m, 105.00 deg, tilt 55.22
 - **fitness** — ICP's self-report. Diagnostic only: it never decides
   correctness, because tuning against a score the aligner computes about
   itself is circular.
+
+## Tuning a new rig
+
+`RelocalizeConfig`'s numbers are scales - voxel sizes, neighbourhood radii,
+correspondence distances - so they belong to a sensor and an environment,
+not to relocalization in general. `PRESETS` names them after the rig they
+were measured on. A mid360 walking an outdoor block is the only entry so
+far; do not nudge it to suit a new sensor, add one.
+
+The procedure, end to end:
+
+1. **Get a recording and a premap that share a frame.** The cheap way is one
+   recording with its premap built from a different stretch of it:
+   `dimos map global <recording> --seek <t> --export`. Ground truth is then
+   the identity and nothing needs labelling.
+2. **Register the pair** in `DATASETS`, with a `window` covering the stretch
+   the premap does *not* come from. Include some ground the premap never
+   saw - that is the only place a false fix can be caught, and it is the
+   failure that matters.
+3. **Check the split is real** before trusting anything:
+   `... run --samples 12`. The `cover` column should be near 1.0 for probes
+   inside the map and near 0.0 outside, with nothing in between. A premap
+   whose coverage is smeared means the window is wrong.
+4. **Search**: `uv run --group dev python -m ... eval tune --trials 200
+   --samples 30`. Wider is better than longer - the probe count sets the
+   resolution of the hit rate, and 200 trials against 8 probes mostly finds
+   lucky draws.
+5. **Verify, always**: `... verify --study <name> --top 8 --repeats 10`.
+   A study's front is single draws of a stochastic pipeline. In the run this
+   preset came from, twelve trials tied at "100%", none of them actually
+   reached it on repeats, and two lost forty points on the holdout.
+6. **Add the preset** in `relocalize.py`, named for the rig, with a comment
+   saying which study and trial it came from.
+
+Two failure modes worth knowing, because both bit this preset:
+
+- **A knob that looks essential can be an artifact of the others.** An
+  ablation that changes one field while the rest sit at old values measures
+  the interaction, not the field. Two defaults were set that way and later
+  removed.
+- **A tuned threshold does not transfer between call patterns.** The cutoff
+  fitted for a single shot at two frames was too strict for a retry loop,
+  and threw away fixes that were centimetres from correct.
 
 ## The objective
 

@@ -25,10 +25,8 @@ from reactivex import operators as ops
 from dimos.core.core import rpc
 from dimos.core.stream import In, Out
 from dimos.mapping.relocalization.lidar.relocalize import (
-    PreparedMap,
+    LidarRelocalizer,
     RelocalizeConfig,
-    prepare,
-    relocalize,
 )
 from dimos.mapping.relocalization.module import (
     FRAME_MAP,
@@ -54,7 +52,14 @@ class LidarConfig(Config):
     )
     publish_loaded_map: bool = False
     reloc_interval: float = 2.0
-    min_local_points: int = 50_000
+    # Skip a cloud too sparse to be worth a match, in points of the *voxel
+    # map* the mapper emits - not raw sensor points. A mid360 sweep is only
+    # ~2.8k points and two of them voxel down to ~3.5k, which is already
+    # enough to relocalize; even twenty frames reach only ~13k. The old
+    # 50_000 was sized for a denser mapper and would skip every cloud this
+    # rig produces, forever. This floor only rejects a map that is nearly
+    # empty; a merely unhelpful one is cheaper to refuse on fitness.
+    min_local_points: int = 1_000
     relocalize: RelocalizeConfig = RelocalizeConfig()
 
 
@@ -68,7 +73,7 @@ class LidarRelocalization(RelocalizationModule):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._premap: PointCloud2 | None = None
-        self._prepared: PreparedMap | None = None
+        self._relocalizer: LidarRelocalizer | None = None
         self._last_skip_log = 0.0
 
     @rpc
@@ -83,7 +88,7 @@ class LidarRelocalization(RelocalizationModule):
         self._premap.frame_id = FRAME_MAP
         # The premap never changes, so its downsampling, normals and FPFH are
         # a startup cost rather than a per-fix one.
-        self._prepared = prepare(self._premap.pointcloud, self.config.relocalize)
+        self._relocalizer = LidarRelocalizer(self._premap.pointcloud, self.config.relocalize)
 
         self.register_disposable(
             backpressure(
@@ -121,8 +126,8 @@ class LidarRelocalization(RelocalizationModule):
         assert self._premap is not None
         t0 = time.monotonic()
         try:
-            assert self._prepared is not None
-            fix = relocalize(self._prepared, msg.pointcloud)
+            assert self._relocalizer is not None
+            fix = self._relocalizer.relocalize(msg.pointcloud)
         except Exception:
             logger.exception("relocalize() failed")
             return
