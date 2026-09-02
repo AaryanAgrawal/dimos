@@ -1,6 +1,6 @@
 # Premap & Relocalization
 
-Relocalization lets a Go2 navigate on a previously built map instead of only on what it sees right now. At runtime, `RelocalizationModule` aligns live LiDAR to a saved premap and publishes a `world → map` transform, so the costmap and planner operate on the live scan and premap together.
+Relocalization lets a Go2 navigate on a previously built map instead of only on what it sees right now. At runtime, `Go2Relocalization` aligns live LiDAR to a saved premap, publishes a `world → map` transform and merges the premap into the live scan, so the costmap and planner operate on both together.
 
 ![relocalize on the live go2 and nav_to a point in the premap](assets/reloc_and_nav_to.webp)
 
@@ -154,7 +154,7 @@ to_svg(unitree_go2_relocalization, "assets/go2_reloc_blueprint.svg")
 
 ![unitree-go2-relocalization blueprint module graph](assets/go2_reloc_blueprint.svg)
 
-Note that [`CostMapper`](/dimos/mapping/costmapper.py) builds the costmap from the merged map only while [`RelocalizationModule`](/dimos/mapping/relocalization/module.py) has a good alignment; until then it falls back to the live map alone.
+Note that [`CostMapper`](/dimos/mapping/costmapper.py) builds the costmap from the merged map only while `Go2Relocalization` has a good alignment; until then it falls back to the live map alone.
 
 ### File formats
 
@@ -168,22 +168,32 @@ Note that [`CostMapper`](/dimos/mapping/costmapper.py) builds the costmap from t
 
 CLI overrides use dynamically generated kebab-case flags such as
 `--map-file=…`. If a shorthand is ambiguous, qualify it with the module key,
-for example `--relocalizationmodule.map-file=…`.
+for example `--go2relocalization.map-file=…`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `map_file` | `None` (module disabled) | Premap stem or path. dimOS appends `.pc2.lcm` automatically |
 | `fitness_threshold` | `0.45` | Minimum ICP fitness to accept a relocalization (0 to 1) |
 | `publish_loaded_map` | `false` | Republish raw premap on `loaded_map` every 2 s |
-| `use_carving` | `true` | Column-carve when merging premap and live scan |
+| `use_carving` | `true` | Go2 only: column-carve when merging premap and live scan into `merged_map` |
+| `min_local_points` | `50000` | Minimum live map points before attempting relocalization |
+| `reloc_interval` | `2.0` | Seconds between relocalization attempts |
 
-Constants are not overridable via CLI today:
+`PUBLISH_INTERVAL` (2 s TF republish rate) is a constant, not overridable via CLI.
 
-| Constant | Value | Role |
-|----------|-------|------|
-| `MIN_LOCAL_POINTS` | `50_000` | Minimum live map points before attempting relocalization |
-| `RELOC_INTERVAL` | `2.0` s | Throttle between relocalization attempts |
-| `PUBLISH_INTERVAL` | `2.0` s | TF publish rate |
+## Adding an implementation
+
+Relocalization is one contract: publish the `world → map` transform. The base
+[`RelocalizationModule`](/dimos/mapping/relocalization/module.py) owns the `tf`
+output, the fitness gate and the periodic republish; implementations under
+per-implementation directories (`dimos/mapping/relocalization/lidar/`, …) subclass it, declare their own inputs and
+prior-map config, and call `self.submit(tf, fitness, "name")` on every fix with
+a `Transform(frame_id="world", child_frame_id="map")`. `LidarRelocalization`
+publishes only `tf` and `loaded_map`; `Go2Relocalization` subclasses it to add
+the merged map the Go2 costmap consumes. Alignment strategies and their evals
+live in [relocalization-test](https://github.com/leshy/relocalization-test);
+the lidar module carries a copy of `align_fast`. A dual strategy is a subclass
+of two implementations: ports merge and `start()` chains through `super()`.
 
 To accept all candidates for visualization only (not for production nav):
 
