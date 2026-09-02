@@ -55,11 +55,8 @@ class LidarConfig(Config):
     # Skip a cloud too sparse to be worth a match, in points of the *voxel
     # map* the mapper emits - not raw sensor points. A mid360 sweep is only
     # ~2.8k points and two of them voxel down to ~3.5k, which is already
-    # enough to relocalize; even twenty frames reach only ~13k. The old
-    # 50_000 was sized for a denser mapper and would skip every cloud this
-    # rig produces, forever. This floor only rejects a map that is nearly
-    # empty; a merely unhelpful one is cheaper to refuse on fitness.
-    min_local_points: int = 1_000
+    # enough to relocalize
+    min_local_points: int = 2_000
     relocalize: RelocalizeConfig = RelocalizeConfig()
 
 
@@ -102,8 +99,16 @@ class LidarRelocalization(RelocalizationModule):
 
         if self.config.publish_loaded_map:
             premap = self._premap
+            # Gated on there being a fix, the same way the base republishes
+            # tf. The premap is stamped in the `map` frame, and `map` only
+            # exists once a fix has placed it against `world` - publishing
+            # before that sends a cloud whose frame nothing can resolve,
+            # which a viewer either drops or, worse, draws at identity.
+            # `with_latest_from` emits nothing until the first fix lands.
             self.register_disposable(
-                rx.interval(PUBLISH_INTERVAL).subscribe(lambda _: self.loaded_map.publish(premap))
+                rx.interval(PUBLISH_INTERVAL)
+                .pipe(ops.with_latest_from(self._world_to_map))
+                .subscribe(lambda _: self.loaded_map.publish(premap))
             )
 
         logger.info(f"Relocalization module started: map_file={self.config.map_file!r}")
