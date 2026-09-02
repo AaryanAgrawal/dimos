@@ -89,8 +89,12 @@ class RecordingPlayer(Module):
         scan = SqliteStore(path=str(path), must_exist=True)
         scan.start()
         try:
+            # Keyed on the *cloud's* stamp, which is what the replay hands
+            # back later. It is not the observation's: a recorder stamps the
+            # row when it writes, and on the go2 walk that sits up to a scan
+            # period away from the sensor stamp inside the message.
             poses = {
-                obs.ts: obs.pose
+                obs.data.ts: obs.pose
                 for obs in scan.stream(self.config.stream, PointCloud2)
                 if obs.pose is not None
             }
