@@ -1,0 +1,580 @@
+import { defineSoftwareMap } from "@dev.fast/progressive-review/software-map-model";
+
+export default defineSoftwareMap({
+  people: {
+    operator: {
+      label: "Robot operator",
+      description:
+        "Runs `dimos run <blueprint>` on a Go2, a desk webcam, or a recording, hands the stack a premap, and watches the fix land in Rerun.",
+    },
+    developer: {
+      label: "Relocalization developer",
+      description:
+        "Tunes the lidar aligner with tune.py studies, adds a relocalizer implementation under the base contract, and verifies the AprilTag fixtures.",
+    },
+  },
+  systems: {
+    dimos: {
+      label: "DimOS",
+      description:
+        "The Python robotics stack: modules with typed In/Out ports, wired by autoconnect blueprints, launched by the `dimos` CLI. Relocalization places the live `world` frame inside a prior `map`; fiducial perception turns camera frames into world-frame marker poses.",
+      containers: {
+        relocalization: {
+          label: "mapping/relocalization",
+          description:
+            "One base contract (load a premap, publish `world -> map` on `tf`) and its implementations: a lidar FPFH+RANSAC+ICP matcher, the Go2 variant that also merges the premap into the live map, a recording-driven demo blueprint, and the tuning eval.",
+          coverage: { globs: ["dimos/mapping/relocalization/**"] },
+          components: {
+            contract: {
+              label: "module.py (base contract)",
+              description:
+                "`RelocalizationModule`: reads `map_file` (.pc2.lcm) into `self.premap`, republishes the accepted `world -> map` Transform on `tf` every 2 s and the placed premap on `loaded_map`. `submit()` takes a fix the implementation already decided to believe; `keep_relocalizing()` gates further attempts once placed (`relocalize_once`).",
+              coverage: { files: ["dimos/mapping/relocalization/module.py"] },
+              codeElements: {
+                Config: {
+                  label: "Config",
+                  description: "map_file, publish_loaded_map, relocalize_once.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/module.py", fromLine: 65, toLine: 77 },
+                  ],
+                },
+                RelocalizationModule: {
+                  label: "RelocalizationModule",
+                  description:
+                    "Ports `tf: Out[TFMessage]`, `loaded_map: Out[PointCloud2]`; `_load_premap` stamps the cloud `map`.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/module.py", fromLine: 79, toLine: 127 },
+                  ],
+                },
+                submit: {
+                  label: "submit()",
+                  description:
+                    "Asserts the fix is `world -> map`, pushes it to the republish subject, marks the module placed.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/module.py", fromLine: 129, toLine: 139 },
+                  ],
+                },
+              },
+            },
+            lidar: {
+              label: "lidar/module.py",
+              description:
+                "`LidarRelocalization`: throttles `global_map` to `reloc_interval`, skips clouds under `min_local_points`, hands each to the aligner, submits the result as source `lidar`.",
+              coverage: { files: ["dimos/mapping/relocalization/lidar/module.py"] },
+              codeElements: {
+                LidarConfig: {
+                  label: "LidarConfig",
+                  description: "reloc_interval 2 s, min_local_points 2000, `relocalize: RelocalizeConfig = MID360`.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/lidar/module.py", fromLine: 45, toLine: 54 },
+                  ],
+                },
+                LidarRelocalization: {
+                  label: "LidarRelocalization",
+                  description: "Port `global_map: In[PointCloud2]`; builds one LidarRelocalizer at start.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/lidar/module.py", fromLine: 57, toLine: 117 },
+                  ],
+                },
+              },
+            },
+            aligner: {
+              label: "lidar/relocalize.py (aligner)",
+              description:
+                "Pure geometry, no streams: the premap is downsampled, normal-estimated and FPFH-featured once; each query runs RANSAC feature matching then wide-to-narrow point-to-plane ICP and is refused below `fitness_threshold`. Every scale is a per-rig preset.",
+              coverage: { files: ["dimos/mapping/relocalization/lidar/relocalize.py"] },
+              codeElements: {
+                RelocalizeConfig: {
+                  label: "RelocalizeConfig",
+                  description: "Required per-rig scales (voxel_coarse, voxel_fine, fitness_threshold ...); no defaults on purpose.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/lidar/relocalize.py", fromLine: 63, toLine: 117 },
+                  ],
+                },
+                MID360: {
+                  label: "MID360 preset",
+                  description: "Livox mid360 on a Go2, trial 229 of the go2-sf-area1 study; the only entry in PRESETS.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/lidar/relocalize.py", fromLine: 120, toLine: 141 },
+                  ],
+                },
+                LidarRelocalizer: {
+                  label: "LidarRelocalizer",
+                  description: "`align()` always answers with an open3d RegistrationResult; `relocalize()` returns the inverted `world -> map` Transform or None.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/lidar/relocalize.py", fromLine: 144, toLine: 264 },
+                  ],
+                },
+              },
+            },
+            go2: {
+              label: "go2/module.py",
+              description:
+                "`Go2Relocalization`: lidar relocalization plus `merged_map` (premap transformed into `world` and carved together with the live scan) for the Go2 costmap.",
+              coverage: { files: ["dimos/mapping/relocalization/go2/module.py"] },
+              codeElements: {
+                Go2Relocalization: {
+                  label: "Go2Relocalization",
+                  description: "Port `merged_map: Out[PointCloud2]`; combine_latest(global_map, world_to_map).",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/go2/module.py", fromLine: 28, toLine: 65 },
+                  ],
+                },
+              },
+            },
+            replay: {
+              label: "blueprints.py (relocalize-mid360)",
+              description:
+                "`RecordingPlayer` replays a recording's lidar as a live sensor would (cloud plus the tf that places it) into a RayTracingVoxelMap, so LidarRelocalization sees the same `global_map` it would on hardware and has to find the walk inside a premap built from it.",
+              coverage: { files: ["dimos/mapping/relocalization/blueprints.py"] },
+              codeElements: {
+                RecordingPlayer: {
+                  label: "RecordingPlayer",
+                  description: "Ports `lidar: Out[PointCloud2]`, `tf: Out[TFMessage]`; two SqliteStores, one pose cursor.",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/blueprints.py", fromLine: 55, toLine: 152 },
+                  ],
+                },
+                relocalize_mid360: {
+                  label: "relocalize_mid360",
+                  description: "autoconnect(RecordingPlayer, RayTracingVoxelMap, LidarRelocalization(map_file=DATASET), rerun).",
+                  sourceRanges: [
+                    { file: "dimos/mapping/relocalization/blueprints.py", fromLine: 179, toLine: 187 },
+                  ],
+                },
+              },
+            },
+            eval: {
+              label: "lidar/tune.py + tune.md",
+              description:
+                "Probes a recording against a premap built from the same walk (ground truth = identity), reports hit rate and error, and runs the optuna study that produces a preset.",
+              coverage: {
+                files: [
+                  "dimos/mapping/relocalization/lidar/tune.py",
+                  "dimos/mapping/relocalization/lidar/tune.md",
+                ],
+              },
+            },
+            tests: {
+              label: "test_module.py",
+              description:
+                "Builds real modules and asserts the contract: submit publishes and checks frames, relocalize_once stops further attempts, port declarations.",
+              coverage: { files: ["dimos/mapping/relocalization/test_module.py"] },
+            },
+          },
+        },
+        fiducial: {
+          label: "perception/fiducial",
+          description:
+            "ArUco / AprilTag perception: a StreamModule that turns quality-gated camera frames plus the camera's TF pose into world-frame `Detection3DArray` messages, the memory transformers behind it, OpenCV pose helpers, a TF mirror, a desk webcam blueprint, and fixture verification for the printed boards.",
+          coverage: { globs: ["dimos/perception/fiducial/**"] },
+          components: {
+            detector_module: {
+              label: "marker_detection_stream_module.py",
+              description:
+                "`MarkerDetectionStreamModule`: appends each `color_image` to a stream with the `world -> optical` pose looked up in its TF buffer, runs QualityWindow, optional SpeedLimit, DetectMarkers and MarkersPerFrame, and publishes one `Detection3DArray` per processed frame on `detections`.",
+              coverage: { files: ["dimos/perception/fiducial/marker_detection_stream_module.py"] },
+              codeElements: {
+                MarkerDetectionStreamModuleConfig: {
+                  label: "MarkerDetectionStreamModuleConfig",
+                  description: "marker_length_m (required), aruco_dictionary, quality_window_s, smoothing_window, camera_info.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_detection_stream_module.py", fromLine: 49, toLine: 63 },
+                  ],
+                },
+                MarkerDetectionStreamModule: {
+                  label: "MarkerDetectionStreamModule",
+                  description: "Ports `color_image: In[Image]`, `tf: In[TFMessage]`, `detections: Out[Detection3DArray]`.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_detection_stream_module.py", fromLine: 66, toLine: 183 },
+                  ],
+                },
+              },
+            },
+            transformers: {
+              label: "marker_transformer.py",
+              description:
+                "Memory transformers: `DetectMarkers` emits one world-pose `Detection3DMarker` observation per decoded marker (optional sliding-window smoothing); `MarkersPerFrame` collapses that fan-out back into one `Detection3DArray` per source image, empty frames included.",
+              coverage: { files: ["dimos/perception/fiducial/marker_transformer.py"] },
+              codeElements: {
+                DetectMarkers: {
+                  label: "DetectMarkers",
+                  description: "Transformer[Image, Detection3DMarker]; caches the OpenCV detector per CameraInfo.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_transformer.py", fromLine: 134, toLine: 306 },
+                  ],
+                },
+                MarkersPerFrame: {
+                  label: "MarkersPerFrame",
+                  description: "Transformer[Detection3DMarker | None, Detection3DArray]; flushes on the tagged frame count.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_transformer.py", fromLine: 309, toLine: 412 },
+                  ],
+                },
+              },
+            },
+            detect: {
+              label: "marker_detect.py",
+              description:
+                "`detect_markers_in_image`: grayscale, ArUco detect, IPPE_SQUARE pose per marker, compose `world_T_marker = world_T_optical + optical_T_marker`, attach bbox and RMS reprojection error.",
+              coverage: { files: ["dimos/perception/fiducial/marker_detect.py"] },
+              codeElements: {
+                detect_markers_in_image: {
+                  label: "detect_markers_in_image()",
+                  description: "One image in, a list of world-frame Detection3DMarker out.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_detect.py", fromLine: 39, toLine: 140 },
+                  ],
+                },
+              },
+            },
+            pose: {
+              label: "marker_pose.py",
+              description:
+                "OpenCV helpers: CameraInfo to K/D, fisheye undistortion, solvePnP IPPE_SQUARE, Rodrigues to Transform, ArUco detector construction, corner bbox and reprojection error.",
+              coverage: { files: ["dimos/perception/fiducial/marker_pose.py"] },
+              codeElements: {
+                estimate_marker_pose: {
+                  label: "estimate_marker_pose()",
+                  description: "(rvec, tvec) for optical <- marker; fisheye corners are undistorted into pinhole K first.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_pose.py", fromLine: 74, toLine: 113 },
+                  ],
+                },
+                create_aruco_detector: {
+                  label: "create_aruco_detector()",
+                  description: "cv2.aruco.ArucoDetector for a named predefined dictionary.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_pose.py", fromLine: 139, toLine: 150 },
+                  ],
+                },
+              },
+            },
+            tf_module: {
+              label: "marker_tf_module.py",
+              description:
+                "`MarkerTfModule`: mirrors each detection's bbox center pose into TF as `world -> markers` (identity) and `markers -> marker_{id}`; owns no pose estimation.",
+              coverage: { files: ["dimos/perception/fiducial/marker_tf_module.py"] },
+              codeElements: {
+                MarkerTfModule: {
+                  label: "MarkerTfModule",
+                  description: "Ports `detections: In[Detection3DArray]`, `tf: Out[TFMessage]`.",
+                  sourceRanges: [
+                    { file: "dimos/perception/fiducial/marker_tf_module.py", fromLine: 59, toLine: 151 },
+                  ],
+                },
+              },
+            },
+            desk_blueprint: {
+              label: "blueprints/desk_marker_tf.py",
+              description:
+                "`desk-marker-tf`: a webcam CameraModule, a static `world -> base_link -> camera_optical` TF republisher, the detector at 5 cm tags, and the TF mirror under the `marker_tf` namespace.",
+              coverage: {
+                files: [
+                  "dimos/perception/fiducial/blueprints/desk_marker_tf.py",
+                  "dimos/perception/fiducial/blueprints/fixtures/camera_info.yaml",
+                ],
+              },
+            },
+            fixture_verification: {
+              label: "fixture_verification.py",
+              description:
+                "Checks the checked-in AprilTag board photos against the generated board layout: detected ids, apparent scale, footprint, layout reprojection error.",
+              coverage: { files: ["dimos/perception/fiducial/fixture_verification.py"] },
+            },
+            tests: {
+              label: "test_*.py",
+              description:
+                "Hermetic tests with a synthetic 640x480 CameraInfo: pose math, the transformers, the stream module's ports and pipeline, the TF mirror, the desk blueprint, fixture verification.",
+              coverage: {
+                globs: ["dimos/perception/fiducial/test_*.py"],
+                files: ["dimos/perception/fiducial/blueprints/test_desk_marker_tf.py"],
+              },
+            },
+          },
+        },
+        go2_stack: {
+          label: "robot/unitree/go2",
+          description:
+            "The Unitree Go2 robot: the WebRTC connection module that publishes lidar, camera and odometry, and the smart blueprints that compose mapping, navigation, markers and relocalization on top of it.",
+          coverage: { globs: ["dimos/robot/unitree/go2/**"] },
+          components: {
+            connection: {
+              label: "connection.py (GO2Connection)",
+              description:
+                "Ports `lidar`, `pointcloud`, `odom`, `color_image`, `camera_info`, `tf` out, `cmd_vel` in; `camera_info_static` carries the front camera intrinsics blueprints hand to the marker detector.",
+              coverage: { files: ["dimos/robot/unitree/go2/connection.py"] },
+            },
+            smart_blueprints: {
+              label: "blueprints/smart/unitree_go2.py",
+              description:
+                "`unitree_go2` (basic + VoxelGridMapper + CostMapper + planner + explorer + patrolling + MovementManager) and the stacks built on it: `unitree_go2_markers`, `unitree_go2_relocalization`, `unitree_go2_memory`.",
+              coverage: { files: ["dimos/robot/unitree/go2/blueprints/smart/unitree_go2.py"] },
+              codeElements: {
+                unitree_go2: {
+                  label: "unitree_go2",
+                  sourceRanges: [
+                    { file: "dimos/robot/unitree/go2/blueprints/smart/unitree_go2.py", fromLine: 42, toLine: 50 },
+                  ],
+                },
+                unitree_go2_markers: {
+                  label: "unitree_go2_markers",
+                  description: "MarkerDetectionStreamModule(marker_length_m=0.1, camera_info_static) + MarkerTfModule; `detections` over LCM.",
+                  sourceRanges: [
+                    { file: "dimos/robot/unitree/go2/blueprints/smart/unitree_go2.py", fromLine: 79, toLine: 97 },
+                  ],
+                },
+                unitree_go2_relocalization: {
+                  label: "unitree_go2_relocalization",
+                  description: "unitree_go2 + Go2Relocalization.blueprint().",
+                  sourceRanges: [
+                    { file: "dimos/robot/unitree/go2/blueprints/smart/unitree_go2.py", fromLine: 99, toLine: 101 },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        registry: {
+          label: "robot/all_blueprints.py",
+          description:
+            "Generated name -> dotted-path tables for every blueprint and module the CLI can run (`relocalize-mid360`, `unitree-go2-relocalization`, `desk-marker-tf`, `lidar-relocalization`, `marker-tf-module`, ...).",
+          coverage: { files: ["dimos/robot/all_blueprints.py"] },
+        },
+        core: {
+          label: "core",
+          description:
+            "`Module` with typed `In`/`Out` ports and `@rpc` lifecycle, the TF buffer every module carries, `autoconnect` blueprints that wire ports by name and type, transports (LCM, zenoh) and the global config.",
+          coverage: { globs: ["dimos/core/**"] },
+        },
+        memory: {
+          label: "memory",
+          description:
+            "`StreamModule`, `Stream`, `Transformer` and observation stores (SqliteStore recordings, NullStore); the QualityWindow / SpeedLimit transforms and the Recorder.",
+          coverage: { globs: ["dimos/memory/**"] },
+        },
+        mapping: {
+          label: "mapping (other)",
+          description:
+            "Live mapping around relocalization: the VoxelGridMapper that turns lidar into `global_map`, the native RayTracingVoxelMap, the CostMapper that consumes `global_map` or `merged_map`, loop closure and PGO.",
+          coverage: {
+            globs: [
+              "dimos/mapping/*",
+              "dimos/mapping/voxels/**",
+              "dimos/mapping/ray_tracing/**",
+              "dimos/mapping/loop_closure/**",
+              "dimos/mapping/pointclouds/**",
+              "dimos/mapping/occupancy/**",
+              "dimos/mapping/utils/**",
+              "dimos/mapping/cli/**",
+            ],
+          },
+          components: {
+            voxel_mapper: {
+              label: "voxels/module.py (VoxelGridMapper)",
+              description: "StreamModule: `lidar: In[PointCloud2]` accumulated into a VoxelGrid, `global_map: Out[PointCloud2]` every `emit_every` frames.",
+              coverage: { files: ["dimos/mapping/voxels/module.py"] },
+            },
+            ray_tracing: {
+              label: "ray_tracing/module.py (RayTracingVoxelMap)",
+              description: "Native module: `lidar` + `tf` in, `global_map`, `local_map` out; places sensor-frame clouds itself.",
+              coverage: { files: ["dimos/mapping/ray_tracing/module.py"] },
+            },
+            costmapper: {
+              label: "costmapper.py (CostMapper)",
+              description: "`global_map` and `merged_map: In[PointCloud2]` to `global_costmap: Out[OccupancyGrid]`.",
+              coverage: { files: ["dimos/mapping/costmapper.py"] },
+            },
+          },
+        },
+        perception: {
+          label: "perception (other)",
+          description:
+            "Detection types shared with fiducial: `Detection3DMarker` (marker id, corners, dictionary, reprojection error) and `ImageDetections3D.to_ros_detection3d_array`; object detection and perception memory.",
+          coverage: { globs: ["dimos/perception/detection/**", "dimos/perception/memory/**", "dimos/perception/experimental/**"] },
+        },
+        msgs: {
+          label: "msgs",
+          description:
+            "LCM-encodable message types: PointCloud2, Transform / TFMessage, Image, CameraInfo, Detection3D / Detection3DArray, OccupancyGrid.",
+          coverage: { globs: ["dimos/msgs/**"] },
+        },
+        cli: {
+          label: "cli",
+          description:
+            "The `dimos` Typer app: `run <blueprint>`, `map`, `topic`, `data`, and `apriltag` (prints tag boards; its `_grid_layout` is what fixture verification reproduces).",
+          coverage: { globs: ["dimos/cli/**"] },
+        },
+        hardware: {
+          label: "hardware",
+          description: "Sensor and actuator drivers: CameraModule / Webcam, lidar (FAST-LIO, mid360), drive trains, manipulators.",
+          coverage: { globs: ["dimos/hardware/**"] },
+        },
+        navigation: {
+          label: "navigation",
+          description: "Costmap consumers: ReplanningAStarPlanner, WavefrontFrontierExplorer, PatrollingModule, MovementManager, nav_3d.",
+          coverage: { globs: ["dimos/navigation/**"] },
+        },
+        visualization: {
+          label: "visualization",
+          description: "`vis_module`: Rerun / web viewer bridge with per-entity visual overrides.",
+          coverage: { globs: ["dimos/visualization/**"] },
+        },
+        utils: {
+          label: "utils",
+          description: "`resolve_named_path` (stem -> data file, LFS-fetched on miss), structlog `setup_logger`, reactive backpressure helpers.",
+          coverage: { globs: ["dimos/utils/**"] },
+        },
+        other: {
+          label: "other packages",
+          description: "Agents, skills, control, teleop, simulation, web, protocol, models, manipulation and the rest of the stack; untouched by this change.",
+          coverage: {
+            globs: [
+              "dimos/agents/**",
+              "dimos/skills/**",
+              "dimos/control/**",
+              "dimos/teleop/**",
+              "dimos/simulation/**",
+              "dimos/web/**",
+              "dimos/protocol/**",
+              "dimos/models/**",
+              "dimos/manipulation/**",
+              "dimos/imitation/**",
+              "dimos/stream/**",
+              "dimos/types/**",
+              "dimos/spec/**",
+              "dimos/porcelain/**",
+              "dimos/cloud/**",
+              "dimos/evals/**",
+              "dimos/experimental/**",
+            ],
+          },
+        },
+        native: {
+          label: "native (Rust / C++)",
+          description: "Native modules (ray tracing, Point-LIO, mid360 driver) built through the Cargo workspace.",
+          coverage: { globs: ["native/**"], files: ["Cargo.toml"] },
+        },
+      },
+      dataStores: {
+        premaps: {
+          label: "Premap files (.pc2.lcm)",
+          kind: "fileStore",
+          description:
+            "Prior maps: one LCM-encoded PointCloud2 per stem, e.g. `recording_go2_mid360_2026-05-29_4-45pm-PST_corrected.pc2.lcm`, resolved by `resolve_named_path` and LFS-fetched on miss. The premap *is* the `map` frame.",
+        },
+        recordings: {
+          label: "Recordings (.db)",
+          kind: "database",
+          description:
+            "SqliteStore recordings of a walk: per-stream observation rows (`fastlio_lidar` clouds with pose and ts) that RecordingPlayer replays and tune.py probes.",
+        },
+      },
+    },
+    go2_robot: {
+      label: "Unitree Go2",
+      external: true,
+      description: "The quadruped itself: WebRTC stream of lidar scans, front camera frames and odometry; takes `cmd_vel`.",
+    },
+    open3d: {
+      label: "Open3D",
+      external: true,
+      description: "Registration pipeline: voxel downsampling, normal estimation, FPFH features, RANSAC feature matching, point-to-plane ICP. Imported lazily.",
+    },
+    opencv: {
+      label: "OpenCV",
+      external: true,
+      description: "cv2.aruco ArucoDetector, solvePnP (IPPE_SQUARE), fisheye undistortPoints, Rodrigues, projectPoints.",
+    },
+    lcm: {
+      label: "LCM bus",
+      external: true,
+      description: "UDP multicast pub/sub carrying module ports between processes; `/marker_detection/detections` is pinned to it explicitly.",
+    },
+    rerun: {
+      label: "Rerun",
+      external: true,
+      description: "The 3D viewer: `world/global_map`, `world/loaded_map` (appears only once a fix lands), `world/merged_map`.",
+    },
+  },
+  relationships: [
+    { kind: "semantic", from: "operator", to: "dimos.cli", label: "dimos run <blueprint>" },
+    { kind: "semantic", from: "operator", to: "dimos.go2_stack.smart_blueprints", label: "unitree-go2-relocalization / unitree-go2-markers" },
+    { kind: "semantic", from: "operator", to: "dimos.relocalization.replay", label: "relocalize-mid360 on a recording" },
+    { kind: "semantic", from: "operator", to: "dimos.fiducial.desk_blueprint", label: "desk-marker-tf on a webcam" },
+    { kind: "semantic", from: "operator", to: "dimos.premaps", label: "Supplies map_file" },
+    { kind: "semantic", from: "developer", to: "dimos.relocalization.eval", label: "Runs tune.py probes and studies" },
+    { kind: "semantic", from: "developer", to: "dimos.fiducial.fixture_verification", label: "Verifies the printed AprilTag boards" },
+    { kind: "semantic", from: "dimos.cli", to: "dimos.registry", label: "Resolves the blueprint name" },
+    { kind: "semantic", from: "dimos.registry", to: "dimos.go2_stack.smart_blueprints", label: "unitree-go2-*" },
+    { kind: "semantic", from: "dimos.registry", to: "dimos.relocalization.replay", label: "relocalize-mid360" },
+    { kind: "semantic", from: "dimos.registry", to: "dimos.fiducial.desk_blueprint", label: "desk-marker-tf" },
+    { kind: "semantic", from: "dimos.registry", to: "dimos.other", label: "Names modules across every package" },
+    { kind: "semantic", from: "dimos.registry", to: "dimos.hardware", label: "Names sensor modules" },
+    { kind: "semantic", from: "dimos.registry", to: "dimos.navigation", label: "Names navigation modules" },
+    { kind: "semantic", from: "dimos.cli", to: "dimos.native", label: "Builds and launches native modules" },
+    { kind: "semantic", from: "go2_robot", to: "dimos.go2_stack.connection", label: "WebRTC: lidar, color_image, odom" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2", to: "dimos.go2_stack.connection", label: "unitree_go2_basic = GO2Connection + vis" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2", to: "dimos.mapping.voxel_mapper", label: "VoxelGridMapper(emit_every=5)" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2", to: "dimos.mapping.costmapper", label: "CostMapper" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2", to: "dimos.navigation", label: "Planner, explorer, patrolling, MovementManager" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2_relocalization", to: "dimos.relocalization.go2.Go2Relocalization", label: "Go2Relocalization.blueprint()" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2_markers", to: "dimos.fiducial.detector_module.MarkerDetectionStreamModuleConfig", label: "marker_length_m=0.1, camera_info=camera_info_static" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2_markers", to: "dimos.fiducial.tf_module.MarkerTfModule", label: "MarkerTfModule.blueprint()" },
+    { kind: "semantic", from: "dimos.go2_stack.smart_blueprints.unitree_go2_markers", to: "lcm", label: "LCMTransport('/marker_detection/detections')" },
+    { kind: "semantic", from: "dimos.go2_stack.connection", to: "dimos.mapping.voxel_mapper", label: "lidar: Out[PointCloud2] (world frame)" },
+    { kind: "semantic", from: "dimos.go2_stack.connection", to: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", label: "color_image: Out[Image], tf: Out[TFMessage]" },
+    { kind: "semantic", from: "dimos.mapping.voxel_mapper", to: "dimos.relocalization.lidar.LidarRelocalization", label: "global_map: Out[PointCloud2] -> In" },
+    { kind: "semantic", from: "dimos.mapping.voxel_mapper", to: "dimos.memory", label: "StreamModule + VoxelMapTransformer" },
+    { kind: "semantic", from: "dimos.relocalization.contract.RelocalizationModule", to: "dimos.premaps", label: "_load_premap: PointCloud2.lcm_decode(map_file + .pc2.lcm)" },
+    { kind: "semantic", from: "dimos.relocalization.contract.RelocalizationModule", to: "dimos.core", label: "tf: Out[TFMessage] world -> map every 2 s; loaded_map: Out[PointCloud2]" },
+    { kind: "semantic", from: "dimos.relocalization.contract.RelocalizationModule", to: "dimos.msgs", label: "Transform, TFMessage, PointCloud2" },
+    { kind: "semantic", from: "dimos.relocalization.contract.RelocalizationModule", to: "dimos.utils", label: "resolve_named_path, setup_logger" },
+    { kind: "semantic", from: "dimos.relocalization.lidar.LidarConfig", to: "dimos.relocalization.contract.Config", label: "extends" },
+    { kind: "semantic", from: "dimos.relocalization.lidar.LidarConfig", to: "dimos.relocalization.aligner.RelocalizeConfig", label: "relocalize: RelocalizeConfig = MID360" },
+    { kind: "semantic", from: "dimos.relocalization.lidar.LidarRelocalization", to: "dimos.relocalization.contract.RelocalizationModule", label: "extends; gates on keep_relocalizing()" },
+    { kind: "semantic", from: "dimos.relocalization.lidar.LidarRelocalization", to: "dimos.relocalization.contract.submit", label: "submit(tf, 'lidar')" },
+    { kind: "semantic", from: "dimos.relocalization.lidar.LidarRelocalization", to: "dimos.relocalization.aligner.LidarRelocalizer", label: "relocalize(local cloud) per throttled global_map" },
+    { kind: "semantic", from: "dimos.relocalization.aligner.LidarRelocalizer", to: "open3d", label: "FPFH + RANSAC, then point-to-plane ICP" },
+    { kind: "semantic", from: "dimos.relocalization.aligner.LidarRelocalizer", to: "dimos.relocalization.aligner.RelocalizeConfig", label: "Prepares the premap under one config" },
+    { kind: "semantic", from: "dimos.relocalization.aligner.MID360", to: "dimos.relocalization.aligner.RelocalizeConfig", label: "instance" },
+    { kind: "semantic", from: "dimos.relocalization.eval", to: "dimos.relocalization.aligner.MID360", label: "A study freezes its winner here" },
+    { kind: "semantic", from: "dimos.relocalization.eval", to: "dimos.relocalization.aligner.LidarRelocalizer", label: "align() on accumulated scans, scored against identity" },
+    { kind: "semantic", from: "dimos.relocalization.eval", to: "dimos.recordings", label: "Reads the walk and its premap" },
+    { kind: "semantic", from: "dimos.relocalization.go2.Go2Relocalization", to: "dimos.relocalization.lidar.LidarRelocalization", label: "extends" },
+    { kind: "semantic", from: "dimos.relocalization.go2.Go2Relocalization", to: "dimos.mapping.costmapper", label: "merged_map: Out[PointCloud2] (premap in world + live scan)" },
+    { kind: "semantic", from: "dimos.relocalization.replay.RecordingPlayer", to: "dimos.recordings", label: "SqliteStore.replay(stream=fastlio_lidar)" },
+    { kind: "semantic", from: "dimos.relocalization.replay.RecordingPlayer", to: "dimos.mapping.ray_tracing", label: "lidar + tf: Out -> RayTracingVoxelMap" },
+    { kind: "semantic", from: "dimos.mapping.ray_tracing", to: "dimos.relocalization.lidar.LidarRelocalization", label: "global_map: Out[PointCloud2] (replay)" },
+    { kind: "semantic", from: "dimos.relocalization.replay.relocalize_mid360", to: "dimos.relocalization.lidar.LidarRelocalization", label: "LidarRelocalization.blueprint(map_file=DATASET, publish_loaded_map=True)" },
+    { kind: "semantic", from: "dimos.relocalization.replay.relocalize_mid360", to: "dimos.visualization", label: "vis_module('rerun', loaded_map at 1.5 mm)" },
+    { kind: "semantic", from: "dimos.visualization", to: "rerun", label: "Logs entities" },
+    { kind: "semantic", from: "dimos.relocalization.tests", to: "dimos.relocalization.contract.submit", label: "Asserts frame check and relocalize_once" },
+    { kind: "semantic", from: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", to: "dimos.memory", label: "StreamModule; QualityWindow, SpeedLimit, stream_to_port" },
+    { kind: "semantic", from: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", to: "dimos.fiducial.transformers.DetectMarkers", label: "pipeline: DetectMarkers(emit_empty_frames=True)" },
+    { kind: "semantic", from: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", to: "dimos.fiducial.transformers.MarkersPerFrame", label: "then MarkersPerFrame(frame_id=world_frame)" },
+    { kind: "semantic", from: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", to: "dimos.fiducial.tf_module.MarkerTfModule", label: "detections: Out[Detection3DArray] -> In" },
+    { kind: "semantic", from: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", to: "dimos.fiducial.pose", label: "camera_optical_frame_id, is_fisheye_model" },
+    { kind: "semantic", from: "dimos.fiducial.detector_module.MarkerDetectionStreamModuleConfig", to: "dimos.fiducial.transformers.DetectMarkers", label: "marker_length_m, aruco_dictionary, smoothing_window" },
+    { kind: "semantic", from: "dimos.fiducial.transformers.DetectMarkers", to: "dimos.fiducial.detect.detect_markers_in_image", label: "per observation, with the cached detector and K/D" },
+    { kind: "semantic", from: "dimos.fiducial.transformers.DetectMarkers", to: "dimos.fiducial.pose.create_aruco_detector", label: "rebuilds the detector when CameraInfo changes" },
+    { kind: "semantic", from: "dimos.fiducial.transformers.MarkersPerFrame", to: "dimos.perception", label: "ImageDetections3D.to_ros_detection3d_array" },
+    { kind: "semantic", from: "dimos.fiducial.detect.detect_markers_in_image", to: "dimos.fiducial.pose.estimate_marker_pose", label: "per marker corner set" },
+    { kind: "semantic", from: "dimos.fiducial.detect.detect_markers_in_image", to: "dimos.fiducial.pose", label: "rvec_tvec_to_transform, marker_corners_to_bbox, marker_reprojection_error" },
+    { kind: "semantic", from: "dimos.fiducial.detect.detect_markers_in_image", to: "dimos.perception", label: "emits Detection3DMarker" },
+    { kind: "semantic", from: "dimos.fiducial.pose.estimate_marker_pose", to: "opencv", label: "cv2.solvePnP(SOLVEPNP_IPPE_SQUARE), fisheye.undistortPoints" },
+    { kind: "semantic", from: "dimos.fiducial.pose.create_aruco_detector", to: "opencv", label: "cv2.aruco.ArucoDetector" },
+    { kind: "semantic", from: "dimos.fiducial.tf_module.MarkerTfModule", to: "dimos.core", label: "tf: Out[TFMessage] world -> markers -> marker_{id}" },
+    { kind: "semantic", from: "dimos.fiducial.tf_module.MarkerTfModule", to: "dimos.msgs", label: "Detection3DArray in, Transform / TFMessage out" },
+    { kind: "semantic", from: "dimos.fiducial.desk_blueprint", to: "dimos.fiducial.detector_module.MarkerDetectionStreamModuleConfig", label: "marker_length_m=0.05, desk CameraInfo" },
+    { kind: "semantic", from: "dimos.fiducial.desk_blueprint", to: "dimos.fiducial.tf_module.MarkerTfModule", label: "marker_namespace_prefix='marker_tf'" },
+    { kind: "semantic", from: "dimos.fiducial.desk_blueprint", to: "dimos.hardware", label: "CameraModule(hardware=Webcam)" },
+    { kind: "semantic", from: "dimos.fiducial.desk_blueprint", to: "lcm", label: "LCMTransport('/marker_detection/detections')" },
+    { kind: "semantic", from: "dimos.fiducial.fixture_verification", to: "dimos.cli", label: "dimos.cli.apriltag._grid_layout" },
+    { kind: "semantic", from: "dimos.fiducial.fixture_verification", to: "opencv", label: "Detects tags in the fixture photos" },
+    { kind: "semantic", from: "dimos.fiducial.tests", to: "dimos.fiducial.detector_module.MarkerDetectionStreamModule", label: "Asserts ports {color_image, tf} -> {detections}" },
+    { kind: "semantic", from: "dimos.fiducial.tests", to: "dimos.fiducial.transformers.DetectMarkers", label: "Synthetic marker frames" },
+    { kind: "semantic", from: "dimos.core", to: "lcm", label: "LCMTransport, rpc backend" },
+    { kind: "semantic", from: "dimos.core", to: "dimos.msgs", label: "Port payloads" },
+  ],
+});
