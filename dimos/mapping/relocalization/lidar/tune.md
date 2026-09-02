@@ -93,15 +93,11 @@ latency / 34.1s cpu; 0.147 m off when hit
 - **lat** the robot's wait: gathering the first scans, plus every attempt,
   including the failed ones.
 - **wall** real seconds spent matching, with the waiting taken out. The gap
-  between `lat` and `wall` is how much of the wait was gathering evidence.
+  between `lat` and `wall` is how much of the wait was gathering frames.
 - **cpu** CPU seconds across every thread. Open3D threads FPFH and RANSAC, so
   this runs several times `wall`, by a ratio that moves with the parameters.
   On a robot the cores are shared, so it is a real price even when the wait
   is short.
-
-A miss can also be marked `TRUTH?`. That means it fits the premap *better*
-than ground truth does, so the recording's own poses drifted. The eval is
-wrong there, not the aligner.
 
 ## Tuning a new rig
 
@@ -125,30 +121,22 @@ The procedure:
    `... run --samples 12`. The `cover` column should be near 1.0 for probes
    inside the map and near 0.0 outside, with nothing in between. If coverage
    is smeared, the window is wrong.
-4. **Search**: `python -m dimos.mapping.relocalization.lidar.tune tune --trials 200
-   --samples 30`. Wider beats longer. The probe count sets the resolution of
-   the hit rate, and 200 trials against 8 probes mostly finds lucky draws.
-5. **Verify, always**: `python -m dimos.mapping.relocalization.lidar.tune verify --study <name> --top 8 --repeats 10`.
-   A study's front is single draws of a random pipeline. In the run this
-   preset came from, twelve trials tied at "100%", none of them actually
-   reached it on repeats, and two lost forty points on the holdout.
+4. **Search**:
+    `python -m dimos.mapping.relocalization.lidar.tune tune --trials 200 --samples 30`
+    Samples are how many relocalization attempts we have per trial. we want wide samples like this
+    otherwise we can overfit. 200 trials against 8 probes mostly finds lucky draws.
+
+5. **Verify, always**:
+    run top studies against previously unseen data to check for overfiting
+    `python -m dimos.mapping.relocalization.lidar.tune verify --study <name> --top 8 --repeats 10`.
+
 6. **Add the preset** in `relocalize.py`, named for the rig, with a comment
    saying which study and trial it came from.
 
-Two failure modes worth knowing, because both bit this preset:
-
-- **A knob that looks essential can be an artifact of the others.** An
-  ablation that changes one field while the rest sit at old values measures
-  the interaction, not the field. Two defaults were set that way and later
-  removed.
-- **A tuned threshold does not carry over to a different call pattern.** The
-  cutoff fitted for a single shot at two frames was too strict for a retry
-  loop, and threw away fixes that were centimetres from correct.
 
 ## The objective
 
-`tune` optimises five values at once: `(good up, bad down, error down, lat
-down, cpu down)`.
+`tune` optimises five values at once:
 
 - **good** share of probes placed within `TOLERANCE_M` / `TOLERANCE_DEG`,
   *and* accepted by the fitness cutoff.
@@ -164,12 +152,6 @@ down, cpu down)`.
   can be quick on the clock while eating every core, and the ratio moves with
   the parameters.
 
-There is no single winner. `study.best_trials` is a Pareto front: every config
-that nothing else beats on all five. It prints correctness first, speed as
-the tiebreak. Expect useless corners, like a cutoff near 1.0 that accepts
-nothing, scores 0% good and 0% bad, and technically nothing beats it. Ignore
-those.
-
 `fitness_threshold` is tuned alongside the aligner because it is what turns a
 fitness number into a decision. One catch: `icp_dist_factor` and `voxel_fine`
 change what fitness *means*, so cutoffs cannot be compared across trials with
@@ -179,36 +161,13 @@ different values of those.
 
 Every field of `RelocalizeConfig` was a literal in the aligner's body. The
 scales are required, so there is no `RelocalizeConfig()` to fall into by
-accident. `MID360` is `align_fast` as measured on an outdoor mid360 walk, and
-a different sensor or a room-sized map gets its own instance next to it. The
-few defaulted fields are search budgets and caps, not scales. `objective()`
-declares which fields are searched and over what range. Add one by calling
-`trial.suggest_*` there, and bump `SPACE`.
-
-`min_frames` and `max_frames` **should** be searched. They trade directly
-against everything else in the objective: a wider window buys hit rate and
-spends latency. Right now they are not, and the values in the mid360 preset
-are hand-picked (3 to 7). That is a shortcut, not a decision. Add them to
-`objective()` with `suggest_int` and bump `SPACE` when it is worth the
-trials. `run --min-frames/--max-frames` overrides the preset for one run.
+accident.
 
 ## Studies
 
 Results live in `optuna.db` at the repo root, keyed
-`<dataset>-v<SPACE>-n<frames>s<samples>`. The same name resumes, which is why
-the name carries the dataset, the probe setup, and the space version.
-Widening the space or changing the score bumps `SPACE` instead of mixing
-trials that cannot be compared into one front.
+`<dataset>-v<SPACE>-n<frames>s<samples>`.
 
-    uvx optuna-dashboard sqlite:///optuna.db
-
-The dashboard's hyperparameter-importance view is the fastest way to find out
-which knobs did nothing, so the next study can drop them.
-
-## Noise
-
-RANSAC is left unseeded on purpose. The variance is real and the robot will
-face it, so hiding it behind a seed would only make the numbers look better
-than they are. The cost is a noisy objective: with 5 probes the rates jump in
-20% steps and a trial can beat its neighbour by luck. Raise `--samples`
-before raising `--trials`.
+Running a trial with the same name will resume previous trial, it doesn't overwrite
+You can run `uvx optuna-dashboard sqlite:///optuna.db` for a web dashboard at
+`http://localhost:8080`
