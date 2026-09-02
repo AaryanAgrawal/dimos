@@ -71,18 +71,31 @@ class Fix(NamedTuple):
     margin: float
 
 
-def _yaw_only(T: np.ndarray) -> np.ndarray:
-    """``T`` with roll and pitch dropped, keeping its yaw and translation.
+def _yaw_only(T: np.ndarray, pivot: np.ndarray | None = None) -> np.ndarray:
+    """``T`` with roll and pitch dropped, rotating about ``pivot``.
 
     The yaw is read off the transformed x-axis rather than by decomposing
     Euler angles, so a hypothesis tilted right past vertical degrades
     instead of hitting a gimbal singularity.
+
+    ``pivot`` matters more than the flattening itself. Swapping the rotation
+    while keeping the translation pivots the cloud about the world origin,
+    and these clouds sit a hundred metres from it - half a degree of tilt
+    then throws them 0.36 m, past the distance ICP will look, so the
+    correction destroys the hypothesis it was meant to clean up. Pivoting
+    about the cloud's own centre removes the tilt and leaves the cloud where
+    the hypothesis put it. ``None`` keeps the origin, which is only right
+    when the cloud is already centred there.
     """
-    flat = np.eye(4)
-    flat[:3, 3] = T[:3, 3]
     yaw = np.arctan2(T[1, 0], T[0, 0])
     c, s = np.cos(yaw), np.sin(yaw)
-    flat[:2, :2] = [[c, -s], [s, c]]
+    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    pivot = np.zeros(3) if pivot is None else np.asarray(pivot, dtype=float)
+
+    flat = np.eye(4)
+    flat[:3, :3] = rotation
+    # The pivot lands where the original transform put it; only the tilt goes.
+    flat[:3, 3] = (T[:3, :3] @ pivot + T[:3, 3]) - rotation @ pivot
     return flat
 
 
@@ -236,7 +249,7 @@ def relocalize(
     for _ in range(max(cfg.ransac_restarts, 1)):
         coarse_T = np.asarray(hypothesis().transformation)
         if cfg.gravity_aligned:
-            coarse_T = _yaw_only(coarse_T)
+            coarse_T = _yaw_only(coarse_T, pivot=np.asarray(source.coarse.points).mean(axis=0))
         scored.append(refine(coarse_T))
 
     scored.sort(key=lambda r: r.fitness, reverse=True)
