@@ -136,6 +136,11 @@ class RecordingPlayer(Module):
         return publish
 
 
+def _fine_points(cloud: Any) -> Any:
+    """The premap is millimetre-scale; draw it at that size, not the 5 cm default."""
+    return cloud.to_rerun(voxel_size=0.0025)
+
+
 relocalize_mid360 = autoconnect(
     RecordingPlayer.blueprint(),
     # The raycaster, not VoxelGridMapper: it registers each cloud through tf
@@ -144,5 +149,5 @@ relocalize_mid360 = autoconnect(
     # demo that looks wrong and an eval that scores badly are one bug.
     RayTracingVoxelMap.blueprint(voxel_size=0.1, world_frame=FRAME_WORLD, global_emit_every=5),
     LidarRelocalization.blueprint(map_file=DATASET, publish_loaded_map=True),
-    vis_module("rerun"),
+    vis_module("rerun", {"visual_override": {"world/loaded_map": _fine_points}}),
 ).global_config(n_workers=5, robot_model="relocalize_mid360")
