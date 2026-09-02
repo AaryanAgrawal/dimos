@@ -102,33 +102,39 @@ def _yaw_only(T: np.ndarray, pivot: np.ndarray | None = None) -> np.ndarray:
 class RelocalizeConfig(BaseConfig):
     """Knobs of :func:`relocalize`. Every field was a literal in its body.
 
-    The defaults are ``align_fast`` as it was measured; they are the scale of
-    an outdoor mid360 walk, so a different sensor or a room-sized map wants
-    its own instance. Tune one with
-    ``dimos.mapping.relocalization.lidar.eval tune``.
+    The defaults are trial 229 of the ``go2-sf-area1`` study - the candidate
+    that held its hit rate on probes it was never tuned against, where
+    others dropped forty points. Its two neighbours on the front agree with
+    it to within a few percent on every field, so this is a plateau rather
+    than a spike, which is the kind worth shipping.
+
+    They were measured on one outdoor mid360 walk against a premap of the
+    same neighbourhood. A different sensor, or a room-sized map, wants its
+    own instance and its own study - ``dimos.mapping.relocalization.lidar.eval
+    tune``, then ``verify`` before believing any of it.
     """
 
-    voxel_coarse: float = 0.8  # FPFH + RANSAC scale
-    voxel_fine: float = 0.5  # ICP scale
+    voxel_coarse: float = 0.59  # FPFH + RANSAC scale
+    voxel_fine: float = 0.30  # ICP scale
     # Normal and feature neighbourhoods, in multiples of the working voxel.
-    normal_radius_factor: float = 2.0
-    fpfh_radius_factor: float = 5.0
+    normal_radius_factor: float = 1.72
+    fpfh_radius_factor: float = 4.13
     normal_max_nn: int = 30
     fpfh_max_nn: int = 100
     # RANSAC correspondence distance, in multiples of voxel_coarse.
-    coarse_dist_factor: float = 1.5
-    ransac_iters: int = 500_000
+    coarse_dist_factor: float = 2.73
+    ransac_iters: int = 1_578_291
     ransac_confidence: float = 0.999
     ransac_n: int = 3
     mutual_filter: bool = True
-    edge_length: float = 0.9
+    edge_length: float = 0.70
     # ICP correspondence distance, in multiples of voxel_fine - the distance
     # of the *last* stage. Earlier stages double it each step back, so a
     # hypothesis landing further out than the final threshold still has a
     # stage wide enough to see its correspondences. One stage is a single
-    # pass at icp_dist_factor, which is what this did before.
-    icp_dist_factor: float = 0.4
-    icp_stages: int = 3
+    # pass at icp_dist_factor.
+    icp_dist_factor: float = 0.55
+    icp_stages: int = 2
     icp_max_iter: int = 200
     # Normal *sign* is arbitrary out of estimate_normals, and FPFH is built
     # from angles involving it, so two clouds scanned from different passes
@@ -136,20 +142,18 @@ class RelocalizeConfig(BaseConfig):
     # same half-space makes the descriptors comparable. Needs a shared up
     # axis, which gravity_aligned already asserts.
     orient_normals: bool = True
-    # RANSAC is stochastic and its best hypothesis is sometimes simply
-    # wrong; ICP then polishes a wrong answer. Restarts take the best of
-    # several, and their spread is what `margin` reports. Three is the
-    # dominant cost of a fix and worth it for a cold global search, where
-    # the failure being bought off is a confidently wrong pose.
-    ransac_restarts: int = 3
     # Both clouds gravity-aligned, so the transform between them is a pure
     # yaw and any roll or pitch RANSAC proposes is error by construction.
-    # Flattening its hypothesis to yaw before the refine drops two of the
-    # six degrees of freedom that ICP would otherwise have to walk back.
-    # On by default: a premap and a live map both come from lidar-inertial
-    # odometry here, which is gravity-aligned. Turn it off for a premap of
-    # unknown provenance, where a tilt between the two frames is real.
-    gravity_aligned: bool = True
+    # Off by default only because the tuning found it neither helps nor
+    # hurts once _yaw_only pivots about the cloud (it was actively harmful
+    # before that fix); a rig whose hypotheses come out tilted should try it.
+    gravity_aligned: bool = False
+    # RANSAC is stochastic and its best hypothesis is sometimes simply
+    # wrong; ICP then polishes a wrong answer. Restarts take the best of
+    # several, and their spread is what `margin` reports. One suffices at
+    # these settings, where the iteration budget above already finds the
+    # place; restarts were what rescued the older, sparser search.
+    ransac_restarts: int = 1
 
 
 def prepare(cloud: Any, config: RelocalizeConfig | None = None) -> Prepared:
