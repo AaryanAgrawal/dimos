@@ -64,6 +64,35 @@ class RecordingPlayerConfig(ModuleConfig):
     loop: bool = False
 
 
+def _pose_cursor(observations: Any) -> Any:
+    """A pose lookup for clouds arriving in timestamp order.
+
+    Matches on the *cloud's* stamp, not the observation's: a recorder stamps
+    the row when it writes it, and on the go2 walk that sits up to a scan
+    period away from the sensor stamp inside the message.
+
+    One observation in hand at a time. The replay and this stream both walk
+    the recording forwards, so a single cursor keeps up - where reading the
+    whole stream into a dict would decode every scan in the file before
+    playback could start, `--duration 30` or not.
+    """
+    cursor = iter(observations)
+    held: list[Any] = []
+
+    def pose_at(ts: float) -> Any:
+        while True:
+            obs = held.pop() if held else next(cursor, None)
+            if obs is None:
+                return None
+            if obs.data.ts == ts:
+                return obs.pose
+            if obs.data.ts > ts:
+                held.append(obs)  # the replay skipped a frame; this one is for later
+                return None
+
+    return pose_at
+
+
 class RecordingPlayer(Module):
     """Replay a recording's lidar as a live sensor would: cloud plus the tf that places it.
 
@@ -84,25 +113,13 @@ class RecordingPlayer(Module):
     def start(self) -> None:
         super().start()
         path = resolve_named_path(self.config.dataset, ".db")
-        # A separate store for the pose scan: reading a stream to exhaustion
-        # leaves the replay's own iteration on a closed database.
-        scan = SqliteStore(path=str(path), must_exist=True)
-        scan.start()
-        try:
-            # Keyed on the *cloud's* stamp, which is what the replay hands
-            # back later. It is not the observation's: a recorder stamps the
-            # row when it writes, and on the go2 walk that sits up to a scan
-            # period away from the sensor stamp inside the message.
-            poses = {
-                obs.data.ts: obs.pose
-                for obs in scan.stream(self.config.stream, PointCloud2)
-                if obs.pose is not None
-            }
-        finally:
-            scan.dispose()
-
+        # Two stores: reading one to exhaustion leaves the other's iteration
+        # on a closed database.
+        poses = self.register_disposable(SqliteStore(path=str(path), must_exist=True))
+        poses.start()
         store = self.register_disposable(SqliteStore(path=str(path), must_exist=True))
         store.start()
+
         replay = store.replay(
             speed=self.config.speed,
             seek=self.config.seek,
@@ -111,16 +128,17 @@ class RecordingPlayer(Module):
         )
         stream: Any = replay.stream(self.config.stream)
         logger.info(
-            f"Replaying {path.name}:{self.config.stream} ({stream.count()} frames "
-            f"at {self.config.speed}x, {len(poses)} posed)"
+            f"Replaying {path.name}:{self.config.stream} "
+            f"({stream.count()} frames at {self.config.speed}x)"
         )
-        self.register_disposable(stream.observable().subscribe(self._publish(poses)))
+        pose_at = _pose_cursor(poses.stream(self.config.stream, PointCloud2).order_by("ts"))
+        self.register_disposable(stream.observable().subscribe(self._publish(pose_at)))
 
-    def _publish(self, poses: dict[float, Any]) -> Any:
+    def _publish(self, pose_at: Any) -> Any:
         frame = self.config.sensor_frame
 
         def publish(cloud: PointCloud2) -> None:
-            pose = poses.get(cloud.ts)
+            pose = pose_at(cloud.ts)
             if pose is None:  # unposed scan: nothing can place it
                 return
             tf = Transform.from_pose(FRAME_WORLD, pose)
@@ -145,10 +163,7 @@ def _fine_points(cloud: Any) -> Any:
     return cloud.to_rerun(voxel_size=0.0015)
 
 
-# Off until asked for. The question this demo answers is whether the premap
-# and the live map land on top of each other, and the raw scans, the live
-# global map and the raycaster's region box all sit in the same space and
-# bury it. Toggle any of them back on in the viewer.
+# Off until asked for.
 HIDDEN = ("world/global_map", "world/lidar", "world/region_bounds")
 
 
@@ -169,10 +184,6 @@ def _view() -> Any:
 
 relocalize_mid360 = autoconnect(
     RecordingPlayer.blueprint(),
-    # The raycaster, not VoxelGridMapper: it registers each cloud through tf
-    # and clears the space the rays passed through, which is also what the
-    # eval accumulates its local maps with. Same mapper on both sides means a
-    # demo that looks wrong and an eval that scores badly are one bug.
     RayTracingVoxelMap.blueprint(voxel_size=0.1, world_frame=FRAME_WORLD, global_emit_every=5),
     LidarRelocalization.blueprint(map_file=DATASET, publish_loaded_map=True),
     vis_module(
