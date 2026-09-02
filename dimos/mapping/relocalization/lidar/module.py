@@ -14,8 +14,10 @@
 
 """Lidar relocalization: align the live voxel map to a pointcloud premap."""
 
+from __future__ import annotations
+
 import time
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import reactivex as rx
@@ -37,6 +39,14 @@ from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure
 
+if TYPE_CHECKING:
+    # open3d is imported lazily inside the functions that need it - it is a
+    # heavy import and a module-scope one would cost every process that
+    # merely touches this file. These names are for reading the signatures;
+    # open3d ships no stubs, so mypy still widens them to Any.
+    from open3d.geometry import PointCloud
+    from open3d.pipelines.registration import Feature, RegistrationResult
+
 logger = setup_logger()
 
 MAP_SUFFIX = ".pc2.lcm"
@@ -51,9 +61,9 @@ class Prepared(NamedTuple):
     would redo it on every fix.
     """
 
-    coarse: Any
-    fpfh: Any
-    fine: Any
+    coarse: PointCloud  # downsampled at voxel_coarse, with normals
+    fpfh: Feature  # FPFH descriptors of `coarse`
+    fine: PointCloud  # downsampled at voxel_fine, with normals
 
 
 class Fix(NamedTuple):
@@ -169,7 +179,7 @@ class RelocalizeConfig(BaseConfig):
     fitness_threshold: float = 0.5
 
 
-def prepare(cloud: Any, config: RelocalizeConfig | None = None) -> Prepared:
+def prepare(cloud: PointCloud, config: RelocalizeConfig | None = None) -> Prepared:
     """A map's voxel-downsampled forms and FPFH features, ready to match against.
 
     Call once per map per config and hand the result to :func:`relocalize`;
@@ -181,7 +191,7 @@ def prepare(cloud: Any, config: RelocalizeConfig | None = None) -> Prepared:
     cfg = config or RelocalizeConfig()
     reg = o3d.pipelines.registration
 
-    def normals(pcd: Any, voxel: float) -> Any:
+    def normals(pcd: PointCloud, voxel: float) -> PointCloud:
         pcd.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(
                 radius=voxel * cfg.normal_radius_factor, max_nn=cfg.normal_max_nn
@@ -203,8 +213,8 @@ def prepare(cloud: Any, config: RelocalizeConfig | None = None) -> Prepared:
 
 
 def align(
-    global_map: Any,
-    local_map: Any,
+    global_map: PointCloud,
+    local_map: PointCloud,
     config: RelocalizeConfig | None = None,
     prepared: Prepared | None = None,
 ) -> Fix:
@@ -229,7 +239,7 @@ def align(
     source = prepare(local_map, cfg)
     dist = cfg.voxel_coarse * cfg.coarse_dist_factor
 
-    def hypothesis() -> Any:
+    def hypothesis() -> RegistrationResult:
         return reg.registration_ransac_based_on_feature_matching(
             source.coarse,
             target.coarse,
@@ -246,7 +256,7 @@ def align(
             criteria=reg.RANSACConvergenceCriteria(cfg.ransac_iters, cfg.ransac_confidence),
         )
 
-    def refine(coarse_T: np.ndarray) -> Any:
+    def refine(coarse_T: np.ndarray) -> RegistrationResult:
         """Point-to-plane ICP from wide to narrow, so a distant guess is still reachable.
 
         A single pass at the final distance cannot pull in a hypothesis
@@ -266,7 +276,7 @@ def align(
             coarse_T = result.transformation
         return result
 
-    scored: list[Any] = []
+    scored: list[RegistrationResult] = []
     for _ in range(max(cfg.ransac_restarts, 1)):
         coarse_T = np.asarray(hypothesis().transformation)
         if cfg.gravity_aligned:
@@ -285,18 +295,11 @@ def align(
 
 
 def relocalize(
-    global_map: Any,
-    local_map: Any,
+    global_map: PointCloud,
+    local_map: PointCloud,
     config: RelocalizeConfig | None = None,
     prepared: Prepared | None = None,
 ) -> Fix | None:
-    """The fix, or ``None`` when nothing cleared ``config.fitness_threshold``.
-
-    Refusing is a real answer and the common one for a place the premap
-    never saw. Everything the decision rests on - the aligner's knobs and
-    the threshold - lives on the one :class:`RelocalizeConfig`, so a caller
-    configures this in a single place and just checks whether it got a fix.
-    """
     cfg = config or RelocalizeConfig()
     fix = align(global_map, local_map, cfg, prepared)
     return fix if fix.fitness >= cfg.fitness_threshold else None
