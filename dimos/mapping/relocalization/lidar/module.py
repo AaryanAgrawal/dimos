@@ -50,7 +50,7 @@ class LidarConfig(Config):
     min_local_points: int = 2_000
     # Which rig's measured scales to align with. mid360 because that is
     # what has been measured; a different sensor wants its own preset
-    # (see relocalize.PRESETS and readme.md), not these numbers.
+    # (see relocalize.PRESETS and eval.md), not these numbers.
     relocalize: RelocalizeConfig = MID360
 
 

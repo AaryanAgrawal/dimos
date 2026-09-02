@@ -23,7 +23,7 @@ built from it. Watch it in Rerun: `world/loaded_map` appears only once a fix
 lands, and lands on top of `world/global_map` when the fix is right.
 
 The recording and the premap are the eval's dataset (``lidar/eval.py``,
-``lidar/readme.md``), so a demo that looks wrong and an eval that scores
+``lidar/eval.md``), so a demo that looks wrong and an eval that scores
 badly are the same bug.
 """
 

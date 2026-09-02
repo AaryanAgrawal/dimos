@@ -29,7 +29,7 @@ dominant cost, and it does not change between queries.
 
 Every scale in a :class:`RelocalizeConfig` was measured against one rig on
 one recording, so configs are named rather than universal - there is no
-default config, only :data:`PRESETS`. See readme.md for how to measure one
+default config, only :data:`PRESETS`. See eval.md for how to measure one
 for a rig that is not in there yet.
 """
 
@@ -91,7 +91,7 @@ class RelocalizeConfig(BaseConfig):
     caps below, which are about how hard to search rather than how big the
     world is.
 
-    Measure a new rig's scales with a study (readme.md) and add it to
+    Measure a new rig's scales with a study (eval.md) and add it to
     :data:`PRESETS`, rather than nudging an existing preset.
     """
 
@@ -166,7 +166,7 @@ MID360 = RelocalizeConfig(
 )
 
 # A rig's name to its measured settings. Add an entry by running a study for
-# that rig (readme.md); do not retune an existing one for a new sensor.
+# that rig (eval.md); do not retune an existing one for a new sensor.
 PRESETS: dict[str, RelocalizeConfig] = {"mid360": MID360}
 DEFAULT_PRESET = "mid360"
 

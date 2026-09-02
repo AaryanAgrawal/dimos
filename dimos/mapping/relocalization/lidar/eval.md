@@ -6,20 +6,24 @@ searches a rig's `RelocalizeConfig` for a better tradeoff between those.
 
     uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12
     uv run python -m dimos.mapping.relocalization.lidar.eval run --samples 12 --view
-    uv run --group dev python -m dimos.mapping.relocalization.lidar.eval tune --trials 200
+    uv run python -m dimos.mapping.relocalization.lidar.eval tune --trials 200
+    uv run python -m dimos.mapping.relocalization.lidar.eval verify --study <name>
 
-`run` needs nothing extra. `tune` and `verify` need optuna, which lives in
-the `dev` group, and this project sets `default-groups = ["tests"]` - so a
-plain `uv run` not only skips optuna, it *uninstalls* it as extraneous.
-Ask for the group on every invocation:
+### Setup, once
 
-    uv run --group dev python -m dimos.mapping.relocalization.lidar.eval tune --trials 200
+Everything here needs the rust raycaster, and `tune`/`verify` also need
+optuna. Install optuna **into the venv, without a sync**:
 
-`run` is unaffected and needs no group. Note that `uv sync` also prunes the
-maturin extensions (`dimos_voxel_ray_tracing`, which `accumulate` needs), so
-on a box where those are already built, re-add them with
-`uv run maturin develop --uv -m dimos/mapping/ray_tracing/rust/py/Cargo.toml`
-rather than re-syncing.
+    VIRTUAL_ENV=$PWD/.venv uv pip install optuna
+    uv run maturin develop --uv -m dimos/mapping/ray_tracing/rust/py/Cargo.toml
+
+Do *not* reach for `uv run --group dev`, even though that is where optuna is
+declared. Asking for a group triggers a full sync, and a sync prunes every
+maturin-built extension as extraneous - so `--group dev` gets you optuna and
+takes away `dimos_voxel_ray_tracing`, which every command here needs to
+accumulate a local map. `uv pip install` adds the package without resyncing,
+and the two survive together. If a run does die with "dimos_voxel_ray_tracing
+is not built", something re-synced: run the maturin line again.
 
 ## What the eval needs
 
@@ -114,7 +118,7 @@ The procedure, end to end:
    `... run --samples 12`. The `cover` column should be near 1.0 for probes
    inside the map and near 0.0 outside, with nothing in between. A premap
    whose coverage is smeared means the window is wrong.
-4. **Search**: `uv run --group dev python -m ... eval tune --trials 200
+4. **Search**: `uv run python -m ... eval tune --trials 200
    --samples 30`. Wider is better than longer - the probe count sets the
    resolution of the hit rate, and 200 trials against 8 probes mostly finds
    lucky draws.
