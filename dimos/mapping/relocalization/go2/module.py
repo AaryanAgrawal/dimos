@@ -38,7 +38,7 @@ class Go2Relocalization(LidarRelocalization):
     @rpc
     def start(self) -> None:
         super().start()
-        if self._premap is None:
+        if self.premap is None:
             return
         self.register_disposable(
             backpressure(
@@ -51,8 +51,8 @@ class Go2Relocalization(LidarRelocalization):
 
     def _on_merge_input(self, pair: tuple[PointCloud2, Transform]) -> None:
         local, tf = pair
-        assert self._premap is not None
-        premap_in_world = self._premap.transform(tf)
+        assert self.premap is not None
+        premap_in_world = self.premap.transform(tf)
         if self.config.use_carving:
             grid = VoxelGrid(carve_columns=True, frame_id=local.frame_id, show_startup_log=False)
             try:

@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Lidar relocalization runtime: the live voxel map against a pointcloud premap.
+"""Lidar relocalization runtime: the live voxel map against the premap's points.
 
-Everything here is about *pointclouds* - the ``global_map`` input, reading a
-``.pc2.lcm`` premap, the sparsity gate, how often to attempt a match. The
-alignment is ``relocalize.py``'s; publishing what comes out of it is the
-base module's. A strategy that matches something other than a pointcloud
-(apriltags, GPS) subclasses the base directly and writes its own runtime -
-none of this file would fit it.
+What is here is what only a pointcloud matcher needs - the ``global_map``
+input, how often to attempt a match, how sparse a cloud is too sparse, and
+the aligner. Loading the premap and publishing what comes back is the base
+module's; the alignment itself is ``relocalize.py``'s.
 """
 
 from __future__ import annotations
@@ -34,19 +32,13 @@ from dimos.core.stream import In
 from dimos.mapping.relocalization.lidar.relocalize import LidarRelocalizer, RelocalizeConfig
 from dimos.mapping.relocalization.module import Config, RelocalizationModule
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure
 
 logger = setup_logger()
 
-MAP_SUFFIX = ".pc2.lcm"
-
 
 class LidarConfig(Config):
-    # Premap stem or path, e.g. `--map-file=go2_hongkong_office_twopass_map`.
-    # Without one the module runs but never attempts a fix.
-    map_file: str | None = None
     reloc_interval: float = 2.0
     # Skip a cloud too sparse to be worth a match, in points of the *voxel
     # map* the mapper emits - not raw sensor points. A mid360 sweep is only
@@ -71,17 +63,11 @@ class LidarRelocalization(RelocalizationModule):
     @rpc
     def start(self) -> None:
         super().start()
-        if not self.config.map_file:
-            logger.info("Relocalization module disabled (no map_file configured)")
+        if self.premap is None:
             return
-
-        path = resolve_named_path(self.config.map_file, MAP_SUFFIX)
-        premap = PointCloud2.lcm_decode(path.read_bytes())
-        self.set_premap(premap)
         # Downsampling the premap and computing its normals and FPFH is the
         # pipeline's dominant cost, so it is a startup cost, not a per-fix one.
-        self._relocalizer = LidarRelocalizer(premap.pointcloud, self.config.relocalize)
-
+        self._relocalizer = LidarRelocalizer(self.premap.pointcloud, self.config.relocalize)
         self.register_disposable(
             backpressure(
                 self.global_map.observable().pipe(  # type: ignore[no-untyped-call]
@@ -91,8 +77,6 @@ class LidarRelocalization(RelocalizationModule):
                 )
             ).subscribe(self._relocalize)
         )
-
-        logger.info(f"Relocalization module started: map_file={self.config.map_file!r}")
 
     def _maybe_log_skip(self, msg: PointCloud2) -> None:
         if self._has_enough_points(msg):

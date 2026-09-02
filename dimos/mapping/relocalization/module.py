@@ -14,19 +14,20 @@
 
 """Relocalization: place the live ``world`` frame inside a prior map's ``map`` frame.
 
-This file is the contract: every relocalizer, whatever it matches, has a
+This file is the contract: every relocalizer, whatever it matches, loads a
 prior map and answers with a :class:`Fix`, so it publishes the same two
-things - ``tf`` and the placed prior map on ``loaded_map``. Both live here,
-along with :meth:`RelocalizationModule.accept` to turn a fix into a
-transform and :meth:`RelocalizationModule.set_premap` to hand over the map.
+things - ``tf`` and the placed prior map on ``loaded_map``. All of that
+lives here: ``map_file`` is read into ``self.premap``, republished on
+``loaded_map`` once a fix can resolve its frame, and
+:meth:`RelocalizationModule.accept` turns a fix into the transform.
 
-It deliberately owns no *input* and no map *format*. Matching lidar against
-a pointcloud premap, apriltags against a table of tag poses and GPS against
-a datum share no port type, no file format and no reason to attempt a fix at
-the same moment - so each implementation declares its own ``In`` ports and
-prior-map config and drives itself. See ``lidar/module.py``, which is the
-pointcloud runtime; a GPS one subclasses this directly and inherits none of
-it.
+An implementation reads ``self.premap`` in its own ``start()`` (after
+``super().start()``, and ``None`` means no map was configured), builds
+whatever it matches against, and drives itself from its own inputs. It owns
+what the base cannot know: which ports it listens on, when to attempt a fix,
+and how good a fix must be. Matching lidar against the premap's points,
+apriltags against tag poses baked into it and GPS against a datum share none
+of that. See ``lidar/module.py``, the pointcloud runtime.
 
 Whether a fix is good enough is the implementation's call, made against its
 own config. A second threshold here would be a second place to configure one
@@ -50,6 +51,7 @@ from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
+from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -57,7 +59,8 @@ logger = setup_logger()
 FRAME_MAP = "map"
 FRAME_WORLD = "world"
 
-PUBLISH_INTERVAL = 2.0  # TF republish period
+PUBLISH_INTERVAL = 2.0  # TF and loaded_map republish period
+MAP_SUFFIX = ".pc2.lcm"
 
 
 class Fix(NamedTuple):
@@ -75,6 +78,10 @@ class Fix(NamedTuple):
 
 
 class Config(ModuleConfig):
+    # Premap stem or path, e.g. `--map-file=go2_hongkong_office_twopass_map`;
+    # `.pc2.lcm` is appended if absent. Without one the module runs but never
+    # attempts a fix.
+    map_file: str | None = None
     publish_loaded_map: bool = False
 
 
@@ -86,7 +93,8 @@ class RelocalizationModule(Module):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._world_to_map: Subject[Transform] = Subject()
-        self._premap: PointCloud2 | None = None
+        # The prior map, for implementations to match against. Set by start().
+        self.premap: PointCloud2 | None = None
 
     @rpc
     def start(self) -> None:
@@ -96,18 +104,20 @@ class RelocalizationModule(Module):
             .pipe(ops.with_latest_from(self._world_to_map))
             .subscribe(lambda pair: self.tf.publish(TFMessage(pair[1].now())))
         )
+        if not self.config.map_file:
+            logger.info("Relocalization module disabled (no map_file configured)")
+            return
+        self._load_premap(self.config.map_file)
+        logger.info(f"Relocalization module started: map_file={self.config.map_file!r}")
 
-    def set_premap(self, premap: PointCloud2) -> None:
-        """Adopt the loaded prior map. Implementations call this once, from ``start()``.
-
-        Loading is the implementation's job - only it knows the format - but
-        what happens next is the same everywhere: the map defines the ``map``
-        frame, and republishing it is gated on a fix, because until one lands
-        there is nothing to resolve that frame against.
-        """
+    def _load_premap(self, map_file: str) -> None:
+        premap = PointCloud2.lcm_decode(resolve_named_path(map_file, MAP_SUFFIX).read_bytes())
+        # The premap *is* the map frame - it defines where `map` is.
         premap.frame_id = FRAME_MAP
-        self._premap = premap
+        self.premap = premap
         if self.config.publish_loaded_map:
+            # Gated on a fix: until one ties `map` to `world` there is nothing
+            # downstream that can resolve the frame this cloud is stamped with.
             self.register_disposable(
                 rx.interval(PUBLISH_INTERVAL)
                 .pipe(ops.with_latest_from(self._world_to_map))

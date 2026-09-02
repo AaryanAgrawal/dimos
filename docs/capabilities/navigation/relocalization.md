@@ -174,7 +174,7 @@ for example `--go2relocalization.map-file=…`.
 |-------|---------|-------------|
 | `map_file` | `None` (module disabled) | Premap stem or path. dimOS appends `.pc2.lcm` automatically |
 | `relocalize.fitness_threshold` | `0.5` | Minimum ICP fitness to accept a relocalization (0 to 1). One of many `relocalize.*` aligner knobs - see [`lidar/readme.md`](/dimos/mapping/relocalization/lidar/readme.md) |
-| `publish_loaded_map` | `false` | Republish raw premap on `loaded_map` every 2 s |
+| `publish_loaded_map` | `false` | Republish raw premap on `loaded_map` every 2 s, once a fix places it |
 | `use_carving` | `true` | Go2 only: column-carve when merging premap and live scan into `merged_map` |
 | `min_local_points` | `2000` | Minimum live map points before attempting relocalization |
 | `reloc_interval` | `2.0` | Seconds between relocalization attempts |
@@ -185,23 +185,26 @@ for example `--go2relocalization.map-file=…`.
 
 Relocalization is one contract, and the base
 [`RelocalizationModule`](/dimos/mapping/relocalization/module.py) is exactly
-that contract: every relocalizer, whatever it matches, has a prior map and
+that contract: every relocalizer, whatever it matches, loads a prior map and
 answers with a `Fix`, so it publishes the same two things: `tf`, and the placed
-prior map on `loaded_map`. The base owns both ports, `accept(fix)` (which
-inverts a fix into the `world → map` transform and republishes it), and
-`set_premap(premap)` (which stamps the map into the `map` frame and republishes
-it once a fix can resolve that frame).
+prior map on `loaded_map`. The base owns both ports, `map_file` and the
+`.pc2.lcm` load behind it, and `accept(fix)`, which inverts a fix into the
+`world → map` transform and republishes it. The loaded map lands in
+`self.premap`, stamped into the `map` frame, and is republished on `loaded_map`
+only once a fix can resolve that frame.
 
-It owns no *input* and no map *format*. Matching lidar against a pointcloud
-premap, apriltags against a table of tag poses and GPS against a datum share no
-port type, no file format and no reason to attempt a fix at the same moment, so
-each implementation declares its own `In` ports and prior-map config and drives
-itself. Whether a fix is good enough is likewise the implementation's
-call, made against its own config; there is no second threshold in the base.
+It owns no *input* and decides nothing. An implementation reads `self.premap` in
+its own `start()` (after `super().start()`; `None` means no map was configured),
+builds whatever it matches against, and drives itself from ports it declares.
+Matching lidar against the premap's points, apriltags against tag poses baked
+into it and GPS against a datum share no port type and no reason to attempt a
+fix at the same moment. Whether a fix is good enough is likewise the
+implementation's call, made against its own config; there is no second
+threshold in the base.
 
 [`LidarRelocalization`](/dimos/mapping/relocalization/lidar/module.py) is the
-pointcloud runtime: the `global_map` input, the `.pc2.lcm` premap,
-`min_local_points`, `reloc_interval`, and a
+pointcloud runtime: the `global_map` input, `min_local_points`,
+`reloc_interval`, and a
 [`LidarRelocalizer`](/dimos/mapping/relocalization/lidar/relocalize.py), the
 pure aligner: no streams, no modules, no clock, carrying its own named per-rig
 `PRESETS` (see [`lidar/readme.md`](/dimos/mapping/relocalization/lidar/readme.md#L99)).

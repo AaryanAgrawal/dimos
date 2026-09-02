@@ -21,7 +21,7 @@ from reactivex import Subject
 from scipy.spatial.transform import Rotation
 
 from dimos.core.stream import In
-from dimos.mapping.relocalization.lidar.module import LidarConfig, LidarRelocalization
+from dimos.mapping.relocalization.lidar.module import LidarRelocalization
 from dimos.mapping.relocalization.module import Config, Fix, RelocalizationModule
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -58,19 +58,22 @@ def test_accept_inverts_the_fix():
     np.testing.assert_allclose(got[0].to_matrix(), np.linalg.inv(T), atol=1e-9)
 
 
-def test_premap_defines_the_map_frame_and_waits_for_a_fix():
-    """loaded_map is the base's: every strategy has a prior map, none can place it early."""
-    m = LidarRelocalization.__new__(LidarRelocalization)
+def test_premap_defines_the_map_frame_and_waits_for_a_fix(tmp_path):
+    """Loading is the base's: every strategy reads a premap and publishes it, once placed."""
+    path = tmp_path / "somewhere.pc2.lcm"
+    path.write_bytes(
+        PointCloud2.from_numpy(np.zeros((5, 3), dtype=np.float32), timestamp=0.0).lcm_encode()
+    )
+    m = RelocalizationModule.__new__(RelocalizationModule)
     m._world_to_map = Subject()
-    m.config = LidarConfig(publish_loaded_map=True)
+    m.config = Config(publish_loaded_map=True)
     published, disposables = [], []
     m.loaded_map = SimpleNamespace(publish=published.append)
     m.register_disposable = disposables.append
 
-    premap = PointCloud2.from_numpy(np.zeros((5, 3), dtype=np.float32), timestamp=0.0)
-    m.set_premap(premap)
-    assert premap.frame_id == "map"
-    assert m._premap is premap
+    m._load_premap(str(path))
+    assert m.premap is not None and len(m.premap) == 5
+    assert m.premap.frame_id == "map"
     assert len(disposables) == 1  # the gated republish
     assert published == []  # ... which stays silent until a fix lands
     disposables[0].dispose()  # rx.interval runs on a thread
