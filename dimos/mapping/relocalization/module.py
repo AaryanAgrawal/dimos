@@ -19,8 +19,9 @@ and a prior map's ``map`` frame. Implementations live in ``impl/`` and
 subclass :class:`RelocalizationModule`: declare your own ``In`` ports and
 prior-map config, call ``super().start()``, subscribe, and call
 :meth:`RelocalizationModule.submit` on every fix. The base gates on
-``fitness_threshold``, keeps the last accepted fix and republishes it on
-``tf`` every ``PUBLISH_INTERVAL``.
+keeps the last accepted fix and republishes it on ``tf`` every
+``PUBLISH_INTERVAL``. Deciding whether a fix is worth submitting belongs to
+the implementation and its own config, not to a second threshold here.
 
 A dual strategy is a subclass of two implementations: ports merge across the
 MRO and ``start()`` chains through ``super()``.
@@ -47,7 +48,7 @@ PUBLISH_INTERVAL = 2.0  # TF republish period
 
 
 class Config(ModuleConfig):
-    fitness_threshold: float = 0.45  # min fitness (0..1, impl-defined) to accept a fix
+    pass
 
 
 class RelocalizationModule(Module):
@@ -68,17 +69,19 @@ class RelocalizationModule(Module):
         )
 
     def submit(self, tf: Transform, fitness: float, source: str = "") -> None:
-        """Accept a ``world -> map`` fix; fitness in [0, 1] is impl-defined."""
+        """Publish a ``world -> map`` fix; fitness in [0, 1] is impl-defined.
+
+        Whether a fix is good enough is the implementation's call, made
+        against its own config - the lidar one refuses inside
+        :func:`~dimos.mapping.relocalization.lidar.module.relocalize`, which
+        returns nothing rather than a fix it does not believe. A second
+        threshold here would be a second place to configure the same
+        decision, and the two would drift.
+        """
         assert (tf.frame_id, tf.child_frame_id) == (FRAME_WORLD, FRAME_MAP), (
             f"relocalize {source}: expected {FRAME_WORLD!r} -> {FRAME_MAP!r}, "
             f"got {tf.frame_id!r} -> {tf.child_frame_id!r}"
         )
-        if fitness < self.config.fitness_threshold:
-            logger.warning(
-                f"relocalize {source}: rejected fitness={fitness:.3f} "
-                f"< threshold={self.config.fitness_threshold}"
-            )
-            return
         logger.info(
             f"relocalize {source}: fitness={fitness:.3f} "
             f"TF {FRAME_WORLD!r} -> {FRAME_MAP!r} t={tf.translation}"

@@ -144,16 +144,29 @@ class RelocalizeConfig(BaseConfig):
     orient_normals: bool = True
     # Both clouds gravity-aligned, so the transform between them is a pure
     # yaw and any roll or pitch RANSAC proposes is error by construction.
-    # Off by default only because the tuning found it neither helps nor
-    # hurts once _yaw_only pivots about the cloud (it was actively harmful
-    # before that fix); a rig whose hypotheses come out tilted should try it.
-    gravity_aligned: bool = False
+    # On: the constraint is simply true when both maps come from a
+    # lidar-inertial odometry, and it removes a degree of freedom the answer
+    # cannot use. The tuning measured it as a wash once _yaw_only pivots
+    # about the cloud rather than the origin (before that fix it was
+    # actively harmful, which is why the search buried it) - a wash on a
+    # walk whose hypotheses rarely come out tilted is not evidence against
+    # the cases where they do. Turn it off for a premap whose frame is not
+    # known to be level.
+    gravity_aligned: bool = True
     # RANSAC is stochastic and its best hypothesis is sometimes simply
     # wrong; ICP then polishes a wrong answer. Restarts take the best of
     # several, and their spread is what `margin` reports. One suffices at
     # these settings, where the iteration budget above already finds the
     # place; restarts were what rescued the older, sparser search.
     ransac_restarts: int = 1
+    # ICP fitness a fix must clear to be published. The two populations sit
+    # far apart - on the measured walk, fixes that found the right place
+    # score 0.58-0.76 and places absent from the premap score 0.13-0.17 - so
+    # this sits in the empty middle rather than snug against either. Being
+    # strict is not free: a relocalizer gets another cloud every couple of
+    # seconds, so a rejected fix is a retry, while an accepted wrong one is
+    # a TF the whole stack believes.
+    fitness_threshold: float = 0.5
 
 
 def prepare(cloud: Any, config: RelocalizeConfig | None = None) -> Prepared:
@@ -189,13 +202,17 @@ def prepare(cloud: Any, config: RelocalizeConfig | None = None) -> Prepared:
     return Prepared(coarse=coarse, fpfh=fpfh, fine=fine)
 
 
-def relocalize(
+def align(
     global_map: Any,
     local_map: Any,
     config: RelocalizeConfig | None = None,
     prepared: Prepared | None = None,
 ) -> Fix:
     """Open3D clouds in; the 4x4 T placing ``local_map`` into ``global_map`` (p_map = T @ p_local).
+
+    Always answers, however poor the answer. :func:`relocalize` is the one
+    to call - this is for a caller that wants to see a refused fix, such as
+    the eval measuring how far a rejected hypothesis actually landed.
 
     Coarse FPFH+RANSAC to find the place, then point-to-plane ICP over
     widening-to-narrowing distances to settle it. Strategies + evals live in
@@ -265,6 +282,24 @@ def relocalize(
         rmse=float(best.inlier_rmse),
         margin=float(margin),
     )
+
+
+def relocalize(
+    global_map: Any,
+    local_map: Any,
+    config: RelocalizeConfig | None = None,
+    prepared: Prepared | None = None,
+) -> Fix | None:
+    """The fix, or ``None`` when nothing cleared ``config.fitness_threshold``.
+
+    Refusing is a real answer and the common one for a place the premap
+    never saw. Everything the decision rests on - the aligner's knobs and
+    the threshold - lives on the one :class:`RelocalizeConfig`, so a caller
+    configures this in a single place and just checks whether it got a fix.
+    """
+    cfg = config or RelocalizeConfig()
+    fix = align(global_map, local_map, cfg, prepared)
+    return fix if fix.fitness >= cfg.fitness_threshold else None
 
 
 class LidarConfig(Config):
@@ -350,9 +385,15 @@ class LidarRelocalization(RelocalizationModule):
             logger.exception("relocalize() failed")
             return
         dt = time.monotonic() - t0
+        if fix is None:
+            logger.info(
+                f"relocalize lidar: refused after {dt:.1f}s n_pts={len(msg)} "
+                f"(below fitness_threshold={self.config.relocalize.fitness_threshold})"
+            )
+            return
         logger.info(
             f"relocalize lidar: time_cost={dt:.1f}s n_pts={len(msg)} "
-            f"rmse={fix.rmse:.3f} margin={fix.margin:.3f}"
+            f"fitness={fix.fitness:.3f} rmse={fix.rmse:.3f} margin={fix.margin:.3f}"
         )
         # relocalize() returns T with p_map = T @ p_world; the TF tree wants world -> map.
         tf = Transform.from_matrix(

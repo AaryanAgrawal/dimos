@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import typer
 
-from dimos.mapping.relocalization.lidar.module import RelocalizeConfig, prepare, relocalize
+from dimos.mapping.relocalization.lidar.module import RelocalizeConfig, align, prepare
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import get_data
 
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from dimos.memory.store.sqlite import SqliteStore
 
 # Bump when the search space or the objective changes; it keys the study.
-SPACE = 10
+SPACE = 11
 
 # Ground truth, and the only thing that decides whether a fix is right: a
 # probe within this of identity found its place in the map. Real failures
@@ -381,7 +381,6 @@ def applied(T: np.ndarray, cloud: PointCloud2) -> np.ndarray:
 def run_probes(
     name: str,
     *,
-    cutoff: float,
     samples: int,
     voxel: float,
     config: RelocalizeConfig,
@@ -390,7 +389,11 @@ def run_probes(
     half_step: bool = False,
     echo: bool = False,
 ) -> list[Probe]:
-    """Retry at each start until a fix clears ``cutoff``, or the evidence runs out.
+    """Retry at each start until a fix clears the config's threshold, or evidence runs out.
+
+    Uses :func:`align` rather than :func:`relocalize` so a refused fix is
+    still visible: where a rejected hypothesis actually landed is the whole
+    diagnosis, and the accept decision is a comparison this makes itself.
 
     Scans keep arriving while a match runs, so each attempt sees everything
     the lidar has delivered by the time it starts - the clock, not a
@@ -411,11 +414,11 @@ def run_probes(
             frames = min(max(int(elapsed * rate), min_frames), max_frames)
             cloud = local_map(name, frames, start, voxel)
             t0, c0 = time.monotonic(), time.process_time()
-            fix = relocalize(premap.pointcloud, cloud.pointcloud, config, prepared=target)
+            fix = align(premap.pointcloud, cloud.pointcloud, config, prepared=target)
             elapsed += time.monotonic() - t0
             cpu += time.process_time() - c0
             attempts += 1
-            if fix.fitness >= cutoff:
+            if fix.fitness >= config.fitness_threshold:
                 accepted = True
                 break
             if frames >= max_frames:
@@ -592,7 +595,9 @@ ToOpt = typer.Option(None, "--to", help="Latest second probes may come from")
 def run(
     samples: int = typer.Option(10, "--samples", "-s", help="Probes over the window"),
     voxel: float = typer.Option(0.1, "--voxel", help="Local-map voxel size (m)"),
-    cutoff: float = typer.Option(0.45, "--cutoff", help="ICP fitness a fix must clear"),
+    cutoff: float | None = typer.Option(
+        None, "--cutoff", help="Override the config's fitness_threshold"
+    ),
     min_frames: int = typer.Option(MIN_FRAMES, "--min-frames", help="Scans before the first try"),
     max_frames: int = typer.Option(
         MAX_FRAMES, "--max-frames", help="Scans after which it gives up"
@@ -614,12 +619,14 @@ def run(
     """Relocalize N accumulated scans against the premap, from starts across the window."""
     name = _register(dataset, recording, premap, lidar, start_s, stop_s)
     pre, _ = fixtures(name)
+    config = RelocalizeConfig(gravity_aligned=gravity)
+    if cutoff is not None:
+        config = config.model_copy(update={"fitness_threshold": cutoff})
     probes = run_probes(
         name,
-        cutoff=cutoff,
         samples=samples,
         voxel=voxel,
-        config=RelocalizeConfig(gravity_aligned=gravity),
+        config=config,
         min_frames=min_frames,
         max_frames=max_frames,
         echo=True,
@@ -632,7 +639,7 @@ def run(
     suspect = sum(1 for p in probes if p.truth_suspect)
     accuracy = f"{error:.3f} m off when hit" if error < NO_FIX_M else "never found its place"
     print(
-        f"{name} premap {len(pre)} pts, cutoff={cutoff}: "
+        f"{name} premap {len(pre)} pts, cutoff={config.fitness_threshold}: "
         f"{hit_rate:.0%} of {in_map} in-map probes hit, "
         f"{false_rate:.0%} false fixes of {len(probes)} total "
         f"({', '.join(f'{n} {k}' for k, n in sorted(tally.items()))}), "
@@ -665,17 +672,14 @@ def objective(
         gravity_aligned=trial.suggest_categorical("gravity_aligned", [True, False]),
         orient_normals=trial.suggest_categorical("orient_normals", [True, False]),
         ransac_restarts=trial.suggest_int("ransac_restarts", 1, 3),
+        # The publish gate is tuned alongside the aligner - it is what turns
+        # a fitness number into a decision, and it is a field of the same config.
+        fitness_threshold=trial.suggest_float("fitness_threshold", 0.0, 0.9),
     )
-    # The publish gate is tuned alongside the aligner: it is what turns a
-    # fitness number into a decision, and it lives on the module's own
-    # `Config.fitness_threshold`.
-    cutoff = trial.suggest_float("fitness_threshold", 0.0, 0.9)
     # How many scans the retry loop may reach before giving up. The counts
     # in between are not searched - the clock sets them.
     max_frames = trial.suggest_int("max_frames", 4, 30)
-    probes = run_probes(
-        name, cutoff=cutoff, samples=samples, voxel=voxel, config=config, max_frames=max_frames
-    )
+    probes = run_probes(name, samples=samples, voxel=voxel, config=config, max_frames=max_frames)
     hit_rate, false_rate, error, latency, cpu = summarize(probes)
     trial.set_user_attr("median_attempts", float(np.median([p.attempts for p in probes])))
     print(
@@ -722,11 +726,11 @@ def tune(
         )
 
 
-def config_from_params(params: dict[str, Any]) -> tuple[RelocalizeConfig, float, int]:
-    """Rebuild a trial's ``(config, cutoff, max_frames)`` from the params optuna recorded."""
+def config_from_params(params: dict[str, Any]) -> tuple[RelocalizeConfig, int]:
+    """Rebuild a trial's ``(config, max_frames)`` from the params optuna recorded."""
     fields = set(RelocalizeConfig.model_fields)
     config = RelocalizeConfig(**{k: v for k, v in params.items() if k in fields})
-    return config, float(params["fitness_threshold"]), int(params.get("max_frames", MAX_FRAMES))
+    return config, int(params.get("max_frames", MAX_FRAMES))
 
 
 @app.command()
@@ -771,13 +775,12 @@ def verify(
     print("  trial   probes hit      false     err_m   lat_s  frames grav ornt stg rst")
 
     for trial in clean[:top]:
-        config, cutoff, max_frames = config_from_params(trial.params)
+        config, max_frames = config_from_params(trial.params)
         for label, half in (("tuned ", False), ("holdout", True)):
             runs = [
                 summarize(
                     run_probes(
                         name,
-                        cutoff=cutoff,
                         samples=samples,
                         voxel=voxel,
                         config=config,

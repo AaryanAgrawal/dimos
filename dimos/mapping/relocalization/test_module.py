@@ -26,19 +26,30 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 
 
-def test_submit_gates_on_fitness_and_frames():
+def test_submit_publishes_and_checks_frames():
+    """submit no longer second-guesses fitness; the implementation already decided."""
     m = RelocalizationModule.__new__(RelocalizationModule)  # no Module.__init__: no threads
     m._world_to_map = Subject()
-    m.config = Config(fitness_threshold=0.45)
+    m.config = Config()
     got = []
     m._world_to_map.subscribe(got.append)
     tf = Transform.from_matrix(np.eye(4), frame_id="world", child_frame_id="map")
     m.submit(tf, 0.3, "x")
-    assert got == []
     m.submit(tf, 0.9, "x")
-    assert got == [tf]
+    assert got == [tf, tf]
     with pytest.raises(AssertionError):
         m.submit(Transform.from_matrix(np.eye(4), frame_id="map", child_frame_id="world"), 1.0)
+
+
+def test_relocalize_refuses_below_its_own_threshold(monkeypatch):
+    """One config surface: the same object carries the knobs and the accept decision."""
+    from dimos.mapping.relocalization.lidar import module as lidar
+
+    fix = lidar.Fix(transform=np.eye(4), fitness=0.4, rmse=0.1, margin=0.0)
+    monkeypatch.setattr(lidar, "align", lambda *a, **k: fix)
+
+    assert lidar.relocalize(None, None, lidar.RelocalizeConfig(fitness_threshold=0.5)) is None
+    assert lidar.relocalize(None, None, lidar.RelocalizeConfig(fitness_threshold=0.3)) is fix
 
 
 def test_from_matrix_inverse_matches_linalg_inv():
