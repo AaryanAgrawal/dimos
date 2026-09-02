@@ -95,14 +95,8 @@ def _pose_cursor(observations: Any) -> Any:
 
 class RecordingPlayer(Module):
     """Replay a recording's lidar as a live sensor would: cloud plus the tf that places it.
-
-    A recorded scan comes in one of two shapes, and the mapper downstream
-    wants neither of them directly. Point-LIO stores the sensor-frame cloud
-    with its pose alongside; FAST-LIO stores the cloud already registered
-    into the world. Both are published here as the sensor frame plus a
-    ``world -> sensor`` transform, so the raycaster registers them itself and
-    knows where the rays started from - which is the whole point of using it
-    over a mapper that just stacks clouds.
+    This replay is a bit goofy in order to be able to replay a recording with world frame clouds (old sf dataset)
+    as well as swnsor frame clouds (athens dataset)
     """
 
     config: RecordingPlayerConfig
