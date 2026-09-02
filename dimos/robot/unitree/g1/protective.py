@@ -21,10 +21,12 @@ import math
 
 # A standing G1 reads about 2 deg; a fall passes 45 deg on the way down.
 MAX_TILT_DEG = 45.0
-# SIMULATED GR00T walking swings one knee or ankle to 7.5 rad/s; the real G1 stands at a 0.77 peak.
-FLAIL_JOINT_SPEED_RAD_S = 5.0
-# SIMULATED walking never has two joints past that at once; lifted has 9-11, fallen 13-17.
+# SIMULATED GR00T: walking puts 1 joint past 4 rad/s, a lift 12 and a fall 17 - the widest split.
+FLAIL_JOINT_SPEED_RAD_S = 4.0
+# Two clear of walking, ten clear of a lift.
 FLAIL_JOINT_COUNT = 3
+# SIMULATED: a lift or fall holds the reason for 0.5 s and more; the arming snap lasts 15 ms.
+STOP_HOLD_S = 0.05
 
 
 def tilt_deg(quaternion_wxyz: Sequence[float]) -> float:
@@ -49,3 +51,19 @@ def stop_reason(
     if fast >= flail_joint_count:
         return f"flailing, {fast} joints past {flail_joint_speed_rad_s:g} rad/s"
     return ""
+
+
+class Hold:
+    """A reason once it has held for hold_s of wall time; a clean sample resets the clock."""
+
+    def __init__(self, hold_s: float = STOP_HOLD_S) -> None:
+        self.hold_s = hold_s
+        self._since: float | None = None
+
+    def __call__(self, reason: str, now_s: float) -> str:
+        if not reason:
+            self._since = None
+            return ""
+        if self._since is None:
+            self._since = now_s
+        return reason if now_s - self._since >= self.hold_s else ""

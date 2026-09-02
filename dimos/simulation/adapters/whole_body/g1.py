@@ -36,7 +36,7 @@ from dimos.hardware.whole_body.spec import (
     MotorCommand,
     MotorState,
 )
-from dimos.robot.unitree.g1.protective import stop_reason
+from dimos.robot.unitree.g1.protective import Hold, stop_reason
 from dimos.simulation.engines.mujoco_shm import (
     ManipShmReader,
     shm_key_from_path,
@@ -81,6 +81,7 @@ class SimMujocoG1WholeBodyAdapter:
         self._shm: ManipShmReader | None = None
         self._connected = False
         self._stopped = False
+        self._hold = Hold()
         self._kd = [0.0] * _NUM_MOTORS
 
     # Lifecycle
@@ -165,7 +166,9 @@ class SimMujocoG1WholeBodyAdapter:
         assert self._shm is not None
         quat, gyro, accel = self._shm.read_imu()
         if not self._stopped:
-            reason = stop_reason(quat, self._shm.read_velocities(_NUM_MOTORS))
+            reason = self._hold(
+                stop_reason(quat, self._shm.read_velocities(_NUM_MOTORS)), time.monotonic()
+            )
             if reason:
                 self._damp(reason)
         # rpy is left at its zero default to match the real G1 adapter

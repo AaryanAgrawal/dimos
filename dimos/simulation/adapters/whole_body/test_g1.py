@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dimos.hardware.whole_body.spec import MotorCommand, WholeBodyAdapter
+from dimos.robot.unitree.g1.protective import Hold
 from dimos.simulation.adapters.whole_body.g1 import _NUM_MOTORS, SimMujocoG1WholeBodyAdapter
 
 _UPRIGHT = (1.0, 0.0, 0.0, 0.0)
@@ -49,6 +50,7 @@ class _Shm:
 
 def _adapter() -> tuple[SimMujocoG1WholeBodyAdapter, _Shm]:
     adapter, shm = SimMujocoG1WholeBodyAdapter(address="g1.xml"), _Shm()
+    adapter._hold = Hold(0.0)  # these tests cover the damp path, not the hold
     adapter._shm, adapter._connected = shm, True  # type: ignore[assignment]
     return adapter, shm
 

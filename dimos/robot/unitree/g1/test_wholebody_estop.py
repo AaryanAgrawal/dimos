@@ -22,7 +22,7 @@ import math
 import pytest
 
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
-from dimos.robot.unitree.g1.protective import stop_reason, tilt_deg
+from dimos.robot.unitree.g1.protective import Hold, stop_reason, tilt_deg
 from dimos.robot.unitree.g1.wholebody_connection import (
     _NUM_MOTOR_SLOTS,
     _NUM_MOTORS,
@@ -99,7 +99,7 @@ class _Stop:
 
 @pytest.fixture()
 def connection() -> Generator[G1WholeBodyConnection, None, None]:
-    module = G1WholeBodyConnection()
+    module = G1WholeBodyConnection(stop_hold_s=0.0)
     module._estop = _Stop()  # type: ignore[assignment]
     module._publisher, module._crc, module._low_cmd = _Publisher(), _Crc(), _LowCmd()  # type: ignore[assignment]
     module._mode_machine = 5
@@ -112,7 +112,7 @@ def connection() -> Generator[G1WholeBodyConnection, None, None]:
 def test_stop_reason_names_the_condition() -> None:
     """A fall reports its tilt, a flail how many joints; upright, spinning and walking report nothing."""
     assert stop_reason(_quat(80.0), [0.0] * _NUM_MOTORS) == "fallen, tilt 80 deg"
-    assert stop_reason(_quat(0.0), [6.0] * 3 + [0.0] * 26) == "flailing, 3 joints past 5 rad/s"
+    assert stop_reason(_quat(0.0), [6.0] * 3 + [0.0] * 26) == "flailing, 3 joints past 4 rad/s"
     assert stop_reason(_quat(2.0), [7.5, -7.5] + [0.0] * 27) == ""
     assert tilt_deg(_quat(0.0, yaw_deg=135.0)) == 0.0
 
@@ -137,3 +137,11 @@ def test_a_trip_damps_once_then_drops_commands(
     )
     assert connection._publisher.frames == [[(0.1, 0.0, 2.0, 0.0)] * _NUM_MOTORS]  # type: ignore[union-attr]
     assert connection._estop.calls == 1  # type: ignore[attr-defined]
+
+
+def test_hold_fires_only_after_the_reason_persists() -> None:
+    """A 15 ms blip never fires; a reason held for hold_s does; a clean sample resets the clock."""
+    hold = Hold(hold_s=0.05)
+    assert [hold("flailing", t) for t in (0.000, 0.015)] == ["", ""]  # the arming snap
+    assert hold("", 0.020) == ""
+    assert [hold("flailing", t) for t in (0.100, 0.125, 0.200)] == ["", "", "flailing"]

@@ -50,6 +50,8 @@ from dimos.robot.unitree.g1.protective import (
     FLAIL_JOINT_COUNT,
     FLAIL_JOINT_SPEED_RAD_S,
     MAX_TILT_DEG,
+    STOP_HOLD_S,
+    Hold,
     stop_reason,
 )
 from dimos.spec.control import EStop
@@ -94,6 +96,7 @@ class G1WholeBodyConnectionConfig(ModuleConfig):
     max_tilt_deg: float = Field(default=MAX_TILT_DEG, gt=0.0, le=90.0)
     flail_joint_speed_rad_s: float = Field(default=FLAIL_JOINT_SPEED_RAD_S, gt=0.0)
     flail_joint_count: int = Field(default=FLAIL_JOINT_COUNT, ge=1, le=_NUM_MOTORS)
+    stop_hold_s: float = Field(default=STOP_HOLD_S, ge=0.0)
     release_sport_mode: bool = True
     publish_rate_hz: float = 500.0
     frame_id: str = "g1_pelvis"
@@ -143,6 +146,7 @@ class G1WholeBodyConnection(Module):
         super().__init__(**kwargs)
 
         self._stopped = False
+        self._hold = Hold(self.config.stop_hold_s)
         self._publisher: ChannelPublisher | None = None
         self._subscriber: ChannelSubscriber | None = None
         self._low_cmd: LowCmd_ | None = None
@@ -398,12 +402,15 @@ class G1WholeBodyConnection(Module):
         """Damp the robot the first time it falls or flails; only stop() clears it."""
         if self._stopped:
             return
-        reason = stop_reason(
-            sample.quaternion,
-            sample.velocities,
-            max_tilt_deg=self.config.max_tilt_deg,
-            flail_joint_speed_rad_s=self.config.flail_joint_speed_rad_s,
-            flail_joint_count=self.config.flail_joint_count,
+        reason = self._hold(
+            stop_reason(
+                sample.quaternion,
+                sample.velocities,
+                max_tilt_deg=self.config.max_tilt_deg,
+                flail_joint_speed_rad_s=self.config.flail_joint_speed_rad_s,
+                flail_joint_count=self.config.flail_joint_count,
+            ),
+            time.monotonic(),
         )
         if reason:
             self._damp(sample.positions)
