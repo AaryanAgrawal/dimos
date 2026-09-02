@@ -241,3 +241,26 @@ def test_view_pc2(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stderr
     assert "256 points" in res.stdout
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_pgo_overrides() -> None:
+    """PGO's defaults assume a level platform; these are the ways past that."""
+    import pytest as _pytest
+    import typer as _typer
+
+    from dimos.mapping.cli.map import _pgo_overrides
+
+    assert _pgo_overrides([]) == {}
+    # --non-planar means "trust z like xy", so it reads xy rather than hardcoding.
+    assert _pgo_overrides([], non_planar=True) == {"odom_trans_var_z": 1e-4}
+    assert _pgo_overrides(["odom_trans_var_xy=1e-3"], non_planar=True) == {
+        "odom_trans_var_xy": 1e-3,
+        "odom_trans_var_z": 1e-3,
+    }
+    # An explicit setting wins over the flag.
+    assert _pgo_overrides(["odom_trans_var_z=5e-5"], non_planar=True) == {"odom_trans_var_z": 5e-5}
+    # Parsed with the field's own type, so a typo is a CLI error, not a config
+    # that quietly means something else.
+    assert _pgo_overrides(["loop_search_radius=4"]) == {"loop_search_radius": 4.0}
+    with _pytest.raises(_typer.BadParameter):
+        _pgo_overrides(["nope=1"])

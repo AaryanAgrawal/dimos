@@ -156,6 +156,31 @@ def _accumulate(
     return result.data if result is not None else None
 
 
+def _pgo_overrides(settings: list[str], non_planar: bool = False) -> dict[str, Any]:
+    """PGOConfig overrides from ``--non-planar`` and ``--pgo-set name=value`` pairs.
+
+    Values are parsed with the field's own type, so an unknown or unparseable
+    one is a CLI error rather than a config that silently means something else.
+    """
+    from dimos.mapping.loop_closure.pgo import PGOConfig
+
+    fields = PGOConfig.model_fields
+    out: dict[str, Any] = {}
+    for setting in settings:
+        name, _, raw = setting.partition("=")
+        if name not in fields:
+            raise typer.BadParameter(
+                f"unknown PGO field {name!r}; known: {', '.join(sorted(fields))}"
+            )
+        out[name] = fields[name].annotation(raw)  # type: ignore[misc]
+    if non_planar and "odom_trans_var_z" not in out:
+        # Explicit --pgo-set wins; and if xy was also set, match that.
+        out["odom_trans_var_z"] = out.get(
+            "odom_trans_var_xy", PGOConfig.model_fields["odom_trans_var_xy"].default
+        )
+    return out
+
+
 def _denoise(cloud: PointCloud2 | None) -> PointCloud2 | None:
     """Statistical outlier removal via o3d; drops sparse floaters, keeps colors."""
     from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -321,6 +346,19 @@ def main(
         0.3,
         "--pgo-tol",
         help="Spatial dedup tolerance (meters); applies to both raw and --pgo maps. 0 disables dedup (keep every posed frame)",
+    ),
+    non_planar: bool = typer.Option(
+        False,
+        "--non-planar",
+        help="Trust the odometry's z like its xy. PGO's defaults are tuned for a "
+        "ground robot that stays level and trust z 100x tighter, which fights the "
+        "loop closures on anything that climbs (stairs, drones, handheld)",
+    ),
+    pgo_set: list[str] = typer.Option(
+        [],
+        "--pgo-set",
+        help="Override any PGOConfig field, repeatable: --pgo-set loop_search_radius=4. "
+        "Wins over --non-planar",
     ),
     block_count: int = typer.Option(
         2_000_000, "--block-count", help="VoxelBlockGrid capacity (raw and PGO rebuilds)"
@@ -548,9 +586,10 @@ def main(
     pgo_path: list[tuple[float, float, float]] = []
     graph: PoseGraph | None = None
     if pgo:
-        print("running PGO twopass map...")
+        overrides = _pgo_overrides(pgo_set, non_planar)
+        print(f"running PGO twopass map{f' {overrides}' if overrides else ''}...")
         with progress(total, "pgo pass 1 (optimizing)") as bar:
-            graph = lidar.tap(bar).transform(PGO()).last().data
+            graph = lidar.tap(bar).transform(PGO(**overrides)).last().data
 
         pgo_path = [
             (kf.optimized.translation.x, kf.optimized.translation.y, kf.optimized.translation.z)
