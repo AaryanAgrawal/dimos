@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
+from dimos.perception.fiducial.marker_aggregation import AggregationConfig, TagAggregator
 from dimos.perception.fiducial.marker_detection_stream_module import MarkerDetectionStreamModule
 from dimos.perception.fiducial.marker_transformer import MarkersPerFrame
 from dimos.perception.fiducial.test_helpers import (
@@ -97,6 +99,27 @@ def test_marker_detection_stream_module_exposes_single_stream_input() -> None:
         assert set(module.outputs) == {"detections", "aggregated_detections"}
     finally:
         module.stop()
+
+
+def test_the_tap_publishes_one_aggregated_pose_per_visit() -> None:
+    """Four glimpses of one tag publish once, on real detections rather than a stand-in."""
+    image = blank_image(ts=10.0)
+    # The camera sits at (1, 2, 3) with identity rotation, so a tag 0.5 m up its +z axis is
+    # head-on and clears the view gate; _marker's own (7, 2, 3) is 90 deg off and would not.
+    head_on = dataclasses.replace(_marker(image, 7), center=Vector3(1.0, 2.0, 3.5))
+
+    published: list[Detection3DArray] = []
+    aggregate = TagAggregator(published.append, AggregationConfig(), "world")
+    for obs_id in range(1, 5):
+        aggregate(_marker_obs(image, head_on, obs_id=obs_id, marker_count=1))
+
+    assert len(published) == 1  # min_observations fuses on the third, the fourth is the same visit
+    msg = published[0]
+    assert msg.header.frame_id == "world"
+    assert msg.detections_length == 1
+    assert msg.detections[0].id == "7"
+    # 0.5 m and a sharp 0.01 px reprojection both sit under the reference, so the score saturates.
+    assert msg.detections[0].results[0].hypothesis.score == pytest.approx(1.0)
 
 
 def test_markers_per_frame_groups_markers_and_preserves_empty_frames() -> None:
