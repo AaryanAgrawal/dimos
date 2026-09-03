@@ -85,6 +85,9 @@ latency / 34.1s cpu; 0.147 m off when hit
   Translation and rotation do not add up into one number, because a small
   angle far from the cloud moves it more than a big angle through its middle.
   Displacement is what the robot actually feels.
+- **tilt** degrees the fix leans off world up. Both clouds come from a
+  gravity-aligned odometry, so anything but ~0 is a wrong answer, which is
+  what `max_tilt_deg` refuses.
 - **f/t** frames used over attempts made. `7/2` means it gave up after two
   tries at `max_frames`.
 - **fit** ICP's own score. Diagnostic only. It never decides correctness,

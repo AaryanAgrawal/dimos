@@ -47,6 +47,7 @@ from dimos.mapping.relocalization.lidar.relocalize import (
     PRESETS,
     LidarRelocalizer,
     RelocalizeConfig,
+    tilt_deg,
 )
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import get_data
@@ -57,9 +58,10 @@ if TYPE_CHECKING:
     from rich.table import Table
 
     from dimos.memory.store.sqlite import SqliteStore
+    from dimos.memory.type.observation import Observation
 
 # Bump when the search space or the objective changes; it keys the study.
-SPACE = 13
+SPACE = 14
 
 # Every study lands here; browse with `uvx optuna-dashboard sqlite:///optuna.db`.
 STORAGE = "sqlite:///optuna.db"
@@ -147,6 +149,7 @@ def probe_row(probe: Probe) -> list[str]:
         f"[{OUTCOME_STYLE[probe.outcome]}]{probe.outcome}[/]"
         + (" [yellow]TRUTH?[/]" if probe.truth_suspect else ""),
         f"{probe.displacement_m:.3f}",
+        f"{probe.tilt_deg:.1f}",
         f"{probe.frames_used}/{probe.attempts}",
         f"{probe.fitness:.3f}",
         f"{probe.latency_s:.2f}",
@@ -161,6 +164,7 @@ PROBE_COLUMNS = (
     "<where",
     "<outcome",
     "off m",
+    "tilt",
     "f/t",
     "fit",
     "lat",
@@ -196,6 +200,27 @@ DATASETS = {
         # Probes land in both, so every run carries places that must be
         # found and - about a third of them - places that must be refused.
         window=(0.0, 400.0),
+    ),
+    # The same walk in today's shape - pointlio_lidar in mid360_link - split at the same 400 s.
+    "go2-sf-area1-pointlio": Dataset(
+        recording="go2_mid360_sf_office_outdoors_2026-05-29.db",
+        premap="go2_mid360_sf_office_outdoors_2026-05-29.pc2.lcm",
+        lidar_stream="pointlio_lidar",
+        window=(0.0, 400.0),
+    ),
+    # 1194 s indoors with no per-scan pose, so tf is the only registration; premap after 950 s.
+    "go2-china-office": Dataset(
+        recording="go2_mid360_china_office_2026-06-12.db",
+        premap="go2_mid360_china_office_2026-06-12.pc2.lcm",
+        lidar_stream="pointlio_lidar",
+        window=(0.0, 950.0),
+    ),
+    # 596 s inside one office: every probe is in the premap, so this one cannot catch a false fix.
+    "go2-sf-office": Dataset(
+        recording="go2_mid360_office_2026-09-02.db",
+        premap="go2_mid360_office_2026-09-02.pc2.lcm",
+        lidar_stream="pointlio_lidar",
+        window=(0.0, 300.0),
     ),
 }
 DEFAULT_DATASET = "go2-sf-area1"
@@ -301,6 +326,43 @@ def premap_distance(name: str, points: np.ndarray) -> np.ndarray:
     return np.asarray(cloud.pointcloud.compute_point_cloud_distance(premap_index(name)))
 
 
+@lru_cache(maxsize=4)
+def registration(store: SqliteStore, lidar_stream: str) -> tuple[str, Any]:
+    """The world frame ``lidar_stream`` resolves into, and the tf buffer lifting its clouds there.
+
+    Detected as ``dimos map global`` detects it, so a premap and the probes
+    scored against it are registered by one rule. A ``None`` buffer means the
+    clouds already carry the world frame.
+    """
+    from dimos.mapping.cli.map import _detect_world
+    from dimos.memory.tf import StreamTF
+
+    first = next(iter(store.stream(lidar_stream, PointCloud2).order_by("ts")), None)
+    if first is None:
+        raise ValueError(f"{lidar_stream!r} has no scans")
+    tf_buf = StreamTF.from_store(store)
+    world = _detect_world(tf_buf, first.data.frame_id, first.ts)
+    if world is None:
+        raise ValueError(
+            f"got {first.data.frame_id!r} clouds; want a world frame or a tf that reaches one"
+        )
+    return world, None if first.data.frame_id == world else tf_buf
+
+
+def world_scan(
+    obs: Observation[PointCloud2], world: str, tf_buf: Any
+) -> tuple[np.ndarray, tuple[float, float, float]] | None:
+    """``obs``'s points in ``world`` and the sensor origin they were seen from."""
+    if tf_buf is None:
+        pose = obs.pose_tuple
+        return None if pose is None else (obs.data.points_f32(), pose[:3])
+    world_T_sensor = tf_buf.get(world, obs.data.frame_id, time_point=obs.ts)
+    if world_T_sensor is None:
+        return None
+    t = world_T_sensor.translation
+    return obs.data.transform(world_T_sensor).points_f32(), (t.x, t.y, t.z)
+
+
 def accumulate(
     store: SqliteStore,
     n_frames: int,
@@ -313,10 +375,10 @@ def accumulate(
 ) -> PointCloud2:
     """``n_frames`` lidar scans from ``start`` s in, ray-traced into one world cloud.
 
-    ``fastlio_lidar`` clouds arrive already registered into the world frame,
-    so each observation's own pose is only the sensor origin the raycast
-    clears from - there is no tf tree to walk and no odom to join against.
-    ``stop`` bounds the window in seconds from the recording's first scan.
+    Sensor-frame clouds are lifted by the recording's own tf; clouds already
+    in the world frame accumulate verbatim, their stored pose the origin the
+    raycast clears from. ``stop`` bounds the window in seconds from the
+    recording's first scan.
     """
     from dimos.mapping.ray_tracing.voxel_map import VoxelRayMapper
 
@@ -325,26 +387,26 @@ def accumulate(
     frames = iter(lidar.after(t0 + start))
     limit = None if stop is None else t0 + stop
 
+    world, tf_buf = registration(store, lidar_stream)
     mapper = VoxelRayMapper(voxel_size=voxel, max_range=max_range, emit_every=1)
     used = 0
     last_ts = t0 + start
-    # A cloud with no pose is skipped, not counted: n_frames is a number of
-    # registered scans, which is what the window question is about.
     for obs in islice(frames, n_frames * 4):
         if limit is not None and obs.ts > limit:
             break
-        if obs.pose_tuple is None:
+        scan = world_scan(obs, world, tf_buf)
+        # Unregisterable clouds are skipped, not counted: n_frames means registered scans.
+        if scan is None:
             continue
-        x, y, z = obs.pose_tuple[:3]
-        mapper.add_frame_world(obs.data.points_f32(), (x, y, z))
+        mapper.add_frame_world(*scan)
         used += 1
         last_ts = obs.ts
         if used == n_frames:
             break
     if used < n_frames:
-        raise ValueError(f"only {used} of {n_frames} scans had a pose from {start:.0f}s")
+        raise ValueError(f"only {used} of {n_frames} scans registered from {start:.0f}s")
 
-    return PointCloud2.from_numpy(mapper.global_map(), frame_id="world", timestamp=last_ts)
+    return PointCloud2.from_numpy(mapper.global_map(), frame_id=world, timestamp=last_ts)
 
 
 @lru_cache(maxsize=512)
@@ -460,8 +522,7 @@ def identity_error(T: np.ndarray) -> tuple[float, float, float]:
     translation = float(np.linalg.norm(T[:3, 3]))
     cos = (float(np.trace(T[:3, :3])) - 1.0) / 2.0
     rotation = float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
-    tilt = float(np.degrees(np.arccos(np.clip(T[2, 2], -1.0, 1.0))))
-    return translation, rotation, tilt
+    return translation, rotation, tilt_deg(T)
 
 
 def applied(T: np.ndarray, cloud: PointCloud2) -> np.ndarray:
@@ -483,7 +544,7 @@ def run_probes(
 
     Uses :func:`align` rather than :func:`relocalize` so a refused fix is
     still visible: where a rejected hypothesis actually landed is the whole
-    diagnosis, and the accept decision is a comparison this makes itself.
+    diagnosis, and :meth:`LidarRelocalizer.accepted` still makes the call.
 
     Scans keep arriving while a match runs, so each attempt sees everything
     the lidar has delivered by the time it starts - the clock, not a
@@ -517,7 +578,7 @@ def run_probes(
             wall += dt
             cpu += time.process_time() - c0
             attempts += 1
-            if result.fitness >= config.fitness_threshold:
+            if relocalizer.accepted(result):
                 accepted = True
                 break
             if frames >= max_frames:
@@ -699,6 +760,9 @@ def run(
     max_frames: int | None = typer.Option(
         None, "--max-frames", help="Override the preset's scans after which it gives up"
     ),
+    max_tilt_deg: float | None = typer.Option(
+        None, "--max-tilt", help="Override the preset's degrees a fix may lean off world up"
+    ),
     dataset: str = DatasetOpt,
     recording: str | None = RecordingOpt,
     premap: str | None = PremapOpt,
@@ -718,6 +782,7 @@ def run(
         "fitness_threshold": cutoff,
         "min_frames": min_frames,
         "max_frames": max_frames,
+        "max_tilt_deg": max_tilt_deg,
     }
     config = config.model_copy(update={k: v for k, v in overrides.items() if v is not None})
     from rich.console import Console
@@ -726,7 +791,7 @@ def run(
     console = Console()
     table = _table(
         f"{name}  premap {len(pre):,} pts  preset={preset}  "
-        f"cutoff={config.fitness_threshold}  "
+        f"cutoff={config.fitness_threshold}  tilt<={config.max_tilt_deg:g}  "
         f"frames {config.min_frames}-{config.max_frames}",
         *PROBE_COLUMNS,
     )
@@ -769,7 +834,7 @@ def objective(
     The knobs are declared here by calling ``suggest_*`` - that is the search
     space, and why a conditional knob costs nothing to add.
     """
-    base = PRESETS[DEFAULT_PRESET]
+    min_frames = trial.suggest_int("min_frames", 1, 10)
     config = RelocalizeConfig(
         voxel_coarse=trial.suggest_float("voxel_coarse", 0.2, 2.0, log=True),
         voxel_fine=trial.suggest_float("voxel_fine", 0.1, 1.0, log=True),
@@ -786,13 +851,12 @@ def objective(
         # The publish gate is tuned alongside the aligner - it is what turns
         # a fitness number into a decision, and it is a field of the same config.
         fitness_threshold=trial.suggest_float("fitness_threshold", 0.0, 0.9),
-        # These belong in the search space - the window trades hit rate
-        # against latency exactly like the knobs above do. Taking them from
-        # the preset instead is a shortcut, and the preset's values are
-        # hand-picked. suggest_int them and bump SPACE when it is worth the
-        # trials.
-        min_frames=base.min_frames,
-        max_frames=base.max_frames,
+        # 180 deg admits any rotation, so the top of the range is "no tilt gate".
+        max_tilt_deg=trial.suggest_float("max_tilt_deg", 1.0, 180.0, log=True),
+        # The window trades hit rate against latency exactly like the knobs above.
+        min_frames=min_frames,
+        # Suggested from min_frames up, so the window cannot close backwards.
+        max_frames=trial.suggest_int("max_frames", min_frames, 20),
     )
     probes = run_probes(name, samples=samples, voxel=voxel, config=config)
     hit_rate, false_rate, error, latency, cpu = summarize(probes)
@@ -874,8 +938,8 @@ def tune(
 def config_from_params(params: dict[str, Any]) -> RelocalizeConfig:
     """Rebuild a trial's config from the params optuna recorded.
 
-    Anything the study did not search (the retry window) comes from the
-    default preset, which is where it was set by hand.
+    Anything an older study did not search comes from the default preset,
+    which is where it was set by hand.
     """
     fields = set(RelocalizeConfig.model_fields)
     searched = {k: v for k, v in params.items() if k in fields}

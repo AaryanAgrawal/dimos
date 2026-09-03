@@ -112,6 +112,8 @@ class RelocalizeConfig(BaseConfig):
     ransac_confidence: float = 0.999
     ransac_n: int = 3  # the minimum for a rigid transform
     icp_max_iter: int = 200
+    # How far a fix may lean off world up before it is refused; 180 is no gate.
+    max_tilt_deg: float = 180.0
 
 
 # Livox mid360 on a Go2, outdoors, against a premap of the same block.
@@ -139,6 +141,11 @@ MID360 = RelocalizeConfig(
 # that rig (tune.md); do not retune an existing one for a new sensor.
 PRESETS: dict[str, RelocalizeConfig] = {"mid360": MID360}
 DEFAULT_PRESET = "mid360"
+
+
+def tilt_deg(T: np.ndarray) -> float:
+    """Degrees ``T``'s z axis leans off world up."""
+    return float(np.degrees(np.arccos(np.clip(T[2, 2], -1.0, 1.0))))
 
 
 class LidarRelocalizer:
@@ -252,13 +259,26 @@ class LidarRelocalizer:
         already inverted from the placement open3d computes. Refusing is a
         real answer and the common one for a place the prior map never saw.
         Everything the decision rests on - the aligner's knobs and
-        ``fitness_threshold`` - is this object's config, so a caller
-        configures it once and checks whether it got a transform.
+        :meth:`accepted` - is this object's config, so a caller configures it
+        once and checks whether it got a transform.
         """
         result = self.align(local_map)
-        if result.fitness < self.config.fitness_threshold:
+        if not self.accepted(result):
             return None
         placement = Transform.from_matrix(
             np.asarray(result.transformation), frame_id=FRAME_MAP, child_frame_id=FRAME_WORLD
         )
         return placement.inverse()
+
+    def accepted(self, result: RegistrationResult) -> bool:
+        """Is an alignment good enough to publish? The one place that decides.
+
+        The eval asks it of a result it got straight from :meth:`align`, so
+        the config that tunes the decision is the config that makes it.
+        """
+        map_T_world = np.asarray(result.transformation)
+        # Gravity-aligned odometry on both sides, so a tilted fix is physically impossible.
+        return (
+            result.fitness >= self.config.fitness_threshold
+            and tilt_deg(map_T_world) <= self.config.max_tilt_deg
+        )
