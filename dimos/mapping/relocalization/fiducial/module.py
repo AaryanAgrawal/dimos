@@ -105,24 +105,28 @@ class FiducialRelocalization(RelocalizationModule):
                 min_score=self.config.min_score,
             )
             return None
-        c = det.bbox.center  # world_T_marker, aggregated by the detector
-        world_T_marker = matrix_from_pose7(
-            (
-                c.position.x,
-                c.position.y,
-                c.position.z,
-                c.orientation.x,
-                c.orientation.y,
-                c.orientation.z,
-                c.orientation.w,
-            )
-        )
         logger.info("relocalize fiducial", marker_id=marker_id, score=round(score, 2))
         return Transform.from_matrix(
-            world_T_marker @ np.linalg.inv(map_T_marker),
+            _world_T_marker(det) @ np.linalg.inv(map_T_marker),
             frame_id=FRAME_WORLD,
             child_frame_id=FRAME_MAP,
         )
+
+
+def _world_T_marker(det: Detection3D) -> np.ndarray:
+    """The aggregated marker pose the detector published, as a 4x4."""
+    c = det.bbox.center
+    return matrix_from_pose7(
+        (
+            c.position.x,
+            c.position.y,
+            c.position.z,
+            c.orientation.x,
+            c.orientation.y,
+            c.orientation.z,
+            c.orientation.w,
+        )
+    )
 
 
 def _marker_id(det: Detection3D) -> int | None:
