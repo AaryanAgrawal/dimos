@@ -700,6 +700,8 @@ export default defineSoftwareMap({
     { kind: "semantic", from: "dimos.relocalization.fiducial.FiducialRelocalization", to: "dimos.relocalization.fiducial.load_marker_map", label: "marker_id -> map_T_marker at start()" },
     { kind: "semantic", from: "dimos.relocalization.fiducial.load_marker_map", to: "dimos.relocalization.fiducial.map_T_marker", label: "one entry per marker id" },
     { kind: "semantic", from: "dimos.relocalization.fiducial.load_marker_map", to: "dimos.marker_maps", label: "json.loads(path.read_text())['markers']" },
+    { kind: "semantic", from: "dimos.relocalization.fiducial.FiducialRelocalization", to: "dimos.relocalization.fiducial.marker_id", label: "_fix(): which surveyed tag this is" },
+    { kind: "semantic", from: "dimos.relocalization.fiducial.marker_id", to: "dimos.msgs", label: "Detection3D.id, the detector's tag id as a string" },
     { kind: "semantic", from: "dimos.relocalization.fiducial.world_T_marker", to: "dimos.fiducial.aggregation.matrix_from_pose7", label: "bbox.center as a 4x4" },
     { kind: "semantic", from: "dimos.relocalization.fiducial.map_T_marker", to: "dimos.fiducial.aggregation.matrix_from_pose7", label: "(*translation, *rotation) as a 4x4" },
     { kind: "semantic", from: "dimos.relocalization.replay.RecordingPlayer", to: "dimos.recordings", label: "SqliteStore.replay(stream=fastlio_lidar)" },
