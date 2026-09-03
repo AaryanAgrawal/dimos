@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections.abc import Iterator
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,7 +21,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from dimos.mapping.relocalization.fiducial.module import FiducialRelocalization
+from dimos.mapping.relocalization.fiducial.module import FiducialRelocalization, load_marker_map
 
 
 def pose(xyz: list[float], yaw_deg: float) -> np.ndarray:
@@ -89,3 +90,16 @@ def test_relocalize_once_takes_the_first_sighting_only(module: FiducialRelocaliz
     )
     module._on_aggregated(burst)
     assert len(got) == 1 and module.placed
+
+
+def test_marker_map_loads_poses_and_names_the_bad_entry(tmp_path: Any) -> None:
+    """A survey JSON becomes map_T_marker per id; a malformed entry fails naming its marker."""
+    q = Rotation.from_matrix(MAP_T_MARKER[:3, :3]).as_quat().tolist()
+    good = {"translation": MAP_T_MARKER[:3, 3].tolist(), "rotation": q}
+    path = tmp_path / "survey.json"
+    path.write_text(json.dumps({"markers": {"7": good}}))
+    np.testing.assert_allclose(load_marker_map(path)[7], MAP_T_MARKER, atol=1e-9)
+
+    path.write_text(json.dumps({"markers": {"7": {**good, "rotation": [0, 0, 0, 0]}}}))
+    with pytest.raises(ValueError, match="marker 7: rotation"):
+        load_marker_map(path)

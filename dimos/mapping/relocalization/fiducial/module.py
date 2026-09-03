@@ -22,6 +22,8 @@ surveyed pose is the map.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,19 +41,18 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.vision_msgs.Detection3D import Detection3D
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.fiducial.marker_aggregation import matrix_from_pose7
-from dimos.perception.fiducial.marker_map import MARKER_MAP_SUFFIX, load_marker_map
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
+MARKER_MAP_SUFFIX = ".json"
+
 
 class FiducialConfig(Config):
-    # Surveyed marker map, `marker_id -> map_T_marker`; `.json` is appended if
-    # absent. Without one the module runs but never attempts a fix.
+    # Surveyed marker map, `marker_id -> map_T_marker`; `.json` is appended if absent. Without one the module runs but never attempts a fix.
     marker_map_file: str | None = None
-    # Accept bar on the aggregated sighting's score, 0-1 (the detector's
-    # min(1, 1/noise_scale)). 0 accepts every aggregated sighting; the bar is unmeasured.
+    # 0-1, the detector's min(1, 1/noise_scale) on the fused sighting. 0 accepts every one: the bar is unmeasured on our recordings.
     min_score: float = 0.0
 
 
@@ -72,9 +73,7 @@ class FiducialRelocalization(RelocalizationModule):
             logger.info("fiducial relocalization disabled (no marker_map_file configured)")
             return
         path = resolve_named_path(self.config.marker_map_file, MARKER_MAP_SUFFIX)
-        self._map_T_marker = {
-            marker_id: tf.to_matrix() for marker_id, tf in load_marker_map(path).items()
-        }
+        self._map_T_marker = load_marker_map(path)
         logger.info(
             "fiducial relocalization started",
             marker_map_file=str(path),
@@ -130,3 +129,23 @@ def _marker_id(det: Detection3D) -> int | None:
     """The tag id the detector stamped on ``id``; ``None`` for anything else."""
     raw = str(det.id).strip()
     return int(raw) if raw.isdigit() else None
+
+
+def load_marker_map(path: Path) -> dict[int, np.ndarray]:
+    """``marker_id -> map_T_marker`` (4x4) from a survey JSON of ``{"markers": {id: {"translation": [x, y, z], "rotation": [x, y, z, w]}}}``."""
+    markers = (json.loads(path.read_text()) or {}).get("markers") or {}
+    return {int(mid): _map_T_marker(int(mid), entry) for mid, entry in markers.items()}
+
+
+def _map_T_marker(marker_id: int, entry: dict[str, Any]) -> np.ndarray:
+    """One survey entry as a 4x4, failing loudly on a short vector or an unusable quaternion."""
+    t, q = entry["translation"], entry["rotation"]
+    if len(t) != 3 or not np.all(np.isfinite(t)):
+        raise ValueError(f"marker {marker_id}: translation must be 3 finite values, got {t!r}")
+    norm = float(np.linalg.norm(q)) if len(q) == 4 else 0.0
+    # Below unit-quaternion round-off there is no direction to normalize.
+    if not np.isfinite(norm) or norm < 1e-6:
+        raise ValueError(
+            f"marker {marker_id}: rotation must be a usable xyzw quaternion, got {q!r}"
+        )
+    return matrix_from_pose7((*t, *q))

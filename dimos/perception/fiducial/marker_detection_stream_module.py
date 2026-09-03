@@ -39,13 +39,9 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
-from dimos.perception.fiducial.marker_aggregation import AggregationConfig
+from dimos.perception.fiducial.marker_aggregation import AggregationConfig, TagAggregator
 from dimos.perception.fiducial.marker_pose import camera_optical_frame_id, is_fisheye_model
-from dimos.perception.fiducial.marker_transformer import (
-    AggregateTagBursts,
-    DetectMarkers,
-    MarkersPerFrame,
-)
+from dimos.perception.fiducial.marker_transformer import DetectMarkers, MarkersPerFrame
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -84,7 +80,7 @@ class MarkerDetectionStreamModule(StreamModule[Image, Detection3DArray]):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._warned_distortion_model = False
-        self._aggregate = AggregateTagBursts(
+        self._aggregate = TagAggregator(
             self.aggregated_detections.publish,
             self.config.aggregation,
             self.config.world_frame,
